@@ -114,6 +114,13 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
 - [x] Capim alto do Campo 5 -> 1.8 ms de GPU: posição `invariant` sem `precise` nos celulares
 - [ ] Campo com a iluminação certa: ~30 ms de GPU em resolução cheia (gramado 5 ms, capim 5 ms, sombras 1-3 ms);
       30 fps firmes com o aparelho frio e resolução dinâmica 0.5-0.75; quente (status 4) cai para ~20 fps
+- [x] Pré-compilação de shaders (`cache/headstart.bin`): programas e pipelines vistos no jogo são preparados na
+      abertura seguinte, em segundo plano (123 programas + 239 pipelines em 0,6 s); entrar no Campo: draws pulados
+      1462 -> 3
+- [x] 60 fps (gerado): quadro intermediário por reprojeção (profundidade da cena + câmera), como no port do WWHD;
+      60 fps na tela na casa da Madam, Tail Cave e no Campo depois de assentar; pausa sozinho quando o jogo não segura 30
+- [ ] Campo no trecho mais pesado: ~20-24 ms de GPU mesmo em 50% (capim alto 3-4 ms de geometria): a geração pausa ali
+- [ ] Controles físicos (Xbox, PS, GameSir): suporte via SDL3 já existe, falta testar com um controle no aparelho
 - Ferramentas: `LARECOMP_DUMP_UBO`, `LARECOMP_DBG_FS` (reg + 3000 = inteiro), `LARECOMP_VK_PASS_GPU_DRAWS=1` (GPU por
   shader), `LARECOMP_DISPLAY` (tela da janela no Mac)
 
