@@ -13,7 +13,13 @@ build/
 save/
 /larecomp.ini
 # tools and Python environments (machine-specific)
-tools/venv/
+tools/venv
 venv/
 __pycache__/
 .DS_Store
+# Android: machine paths, release keys, Gradle state
+android/local.properties
+android/keystore.properties
+android/.gradle/
+android/app/build/
+android/app/.cxx/

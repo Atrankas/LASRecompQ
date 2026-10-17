@@ -56,6 +56,10 @@ typedef struct {
     // cosmetics (runtime/ui/cosmetics.mm; applied live by runtime/nvn/texpatch.c), never part of a seed
     int tunic;           // index into g_tunic_colours (0 = Default: the game's / the seed's own)
     int hearts;          // index into g_heart_colours (0 = Default red)
+    // touch screens (runtime/ui/touch_controls.mm)
+    int touch_mode;      // 0 Auto (while no controller is connected), 1 Always, 2 Off
+    float touch_opacity; // 0.15 .. 1
+    float touch_size;    // 0.6 .. 1.6 (1 = the default layout)
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
 } Settings;
 

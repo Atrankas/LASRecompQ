@@ -12,6 +12,9 @@
 
 #include "paths.h"
 #include "rt.h"
+#ifdef __ANDROID__
+#include <SDL3/SDL.h>
+#endif
 
 static const GameLibTables *g_tables;
 static char g_error[256];
@@ -35,23 +38,41 @@ static bool exists(const char *p) {
 }
 
 // The places to look, in order (gamelib.h). Returns how many were filled.
+// Android: the app's internal storage (where a library built for this phone is put: the data folder is on external
+// storage, mounted without exec), then one packed into the APK itself, opened by its bare name (it lives inside the
+// APK: no file to look at, its own id decides).
 static int candidates(const char *game_dir, char out[3][1100]) {
     int n = 0;
     const char *env = getenv("LARECOMP_GAME_LIB");
     if (env && *env) snprintf(out[n++], 1100, "%s", env);
+#ifdef __ANDROID__
+    (void)game_dir;
+    const char *internal = SDL_GetAndroidInternalStoragePath();
+    if (internal) snprintf(out[n++], 1100, "%s/%s", internal, GAMELIB_NAME);
+    snprintf(out[n++], 1100, "%s", GAMELIB_NAME);
+#else
     char exe_side[1024];
     if (rt_resource(GAMELIB_NAME, NULL, exe_side, sizeof exe_side) && exists(exe_side))
         snprintf(out[n++], 1100, "%s", exe_side);
     if (game_dir) snprintf(out[n++], 1100, "%s/%s", game_dir, GAMELIB_NAME);
+#endif
     return n;
 }
+
+static bool in_apk(const char *c) { return !strchr(c, '/'); }  // (Android: a bare name)
 
 bool gamelib_present(const char *game_dir) {
     if (g_tables) return true;
     char c[3][1100];
     int n = candidates(game_dir, c);
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++) {
+        if (in_apk(c[i])) {  // (loading it is the only way to look: the library stays loaded for the game)
+            char why[8];
+            if (gamelib_load(NULL, why, sizeof why)) return true;
+            continue;
+        }
         if (exists(c[i]) && id_matches(c[i])) return true;
+    }
     return false;
 }
 
@@ -75,16 +96,14 @@ static const GameLibTables *open_lib(const char *path) {
 }
 
 bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
-    static bool tried;
-    if (!tried) {
-        tried = true;
+    if (!g_tables) {  // (again until one loads: a library can be installed while the start screen is up)
         snprintf(g_error, sizeof g_error, "the game code hasn't been built: set up the game files on the start screen");
         char c[3][1100];
         int n = candidates(game_dir, c);
         const char *env = getenv("LARECOMP_GAME_LIB");
         for (int i = 0; i < n && !g_tables; i++) {
-            if (!exists(c[i])) continue;
-            bool given = i == 0 && env && *env;  // LARECOMP_GAME_LIB: loaded as given, the library's own id decides
+            if (!in_apk(c[i]) && !exists(c[i])) continue;
+            bool given = (i == 0 && env && *env) || in_apk(c[i]);  // LARECOMP_GAME_LIB: as given, its own id decides
             if (!given && !id_matches(c[i])) {
                 snprintf(g_error, sizeof g_error, "%s was built for another version", c[i]);
                 continue;

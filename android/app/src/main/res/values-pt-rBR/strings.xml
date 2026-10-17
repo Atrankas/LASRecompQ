@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LAS Recomp</string>
+    <string name="import_title">Copiando os arquivos do jogo</string>
+    <string name="import_failed">Não foi possível copiar os arquivos do jogo: %1$s</string>
+</resources>

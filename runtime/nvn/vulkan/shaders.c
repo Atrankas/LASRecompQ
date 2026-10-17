@@ -21,6 +21,7 @@ static shaderc_shader_kind kind_of(int stage) {
 // GLSL compile (the driver's pipeline cache only covers the step after this one).
 static uint64_t src_hash(const char *src, int stage) {
     uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 3;  // + version of the post-processing (no_contraction)
+    if (g_vk.api < VK_API_VERSION_1_3) h ^= (uint64_t)g_vk.api << 32;  // (SPIR-V for an older device: vk_glsl_to_spirv)
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
     return h;
 }
@@ -122,7 +123,11 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
     static __thread shaderc_compiler_t comp;
     if (!comp) comp = shaderc_compiler_initialize();
     shaderc_compile_options_t o = shaderc_compile_options_initialize();
-    shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
+    // SPIR-V the device takes: 1.6 on Vulkan 1.3, 1.5 / 1.3 on the 1.2 / 1.1 devices of phones (device.c COMPAT_EXT)
+    shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan,
+                                           g_vk.api >= VK_API_VERSION_1_3 ? shaderc_env_version_vulkan_1_3
+                                           : g_vk.api >= VK_API_VERSION_1_2 ? shaderc_env_version_vulkan_1_2
+                                                                            : shaderc_env_version_vulkan_1_1);
     shaderc_compile_options_set_optimization_level(o, getenv("LARECOMP_VK_OPT") ? shaderc_optimization_level_performance
                                                                                   : shaderc_optimization_level_zero);
     shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind_of(stage), name, "main", o);

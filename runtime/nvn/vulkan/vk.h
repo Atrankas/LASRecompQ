@@ -9,7 +9,11 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#ifdef VK_NO_PROTOTYPES
+#include <volk.h>  // (Android: entry points loaded at run time, device.c)
+#else
 #include <vulkan/vulkan.h>
+#endif
 #if __has_include(<vma/vk_mem_alloc.h>)
 #include <vma/vk_mem_alloc.h>
 #else
@@ -35,6 +39,7 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import;
+    uint32_t api;              // the Vulkan version the device is used at (1.3; Android: 1.1 / 1.2 + extensions)
     // window
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
@@ -83,6 +88,7 @@ typedef struct TexBackend {
     uint32_t pending_w, pending_h, pending_stride;
     uint8_t astc_bw, astc_bh;  // ASTC without GPU support: decoded to RGBA8 on upload (runtime/nvn/astc.c)
     bool astc_srgb;
+    uint8_t bcn;  // BC without GPU support (phones): decoded on upload (runtime/nvn/bcn.c), BCN_* kind
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)

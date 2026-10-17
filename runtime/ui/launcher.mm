@@ -42,6 +42,9 @@ extern "C" {
 #include "romfs_build.h"
 #include "settings.h"
 #include "input_bind.h"
+#ifdef __ANDROID__
+#include "platform/android.h"
+#endif
 void controls_bindings_draw(float scale);  // ui/controls_ui.mm
 void ui_window_init(void);
 SDL_Window *ui_window(void);
@@ -184,7 +187,11 @@ static std::string check_copied_files(const std::string &root) {
 // "" = ready to play, else what is wrong
 static std::string check_game_files(const std::string &root) {
     std::string why = check_copied_files(root);
+#ifdef __ANDROID__
+    if (why.empty() && !gamelib_present(root.c_str())) return "Game code not installed";
+#else
     if (why.empty() && !gamelib_present(root.c_str())) return "Game code not built yet";
+#endif
     return why;
 }
 
@@ -293,6 +300,68 @@ static bool build_game_code(void) {
     return ok;
 }
 
+#ifdef __ANDROID__
+// Android: the game files are copied out of the picked folder (the system hands out documents, not paths) straight into
+// extracted/exefs and extracted/romfs (LasActivity.importGameFiles), or were put there over USB; the data image is a
+// thin one (romfs_build_thin: the tables only, the data read from romfs/ itself - no second copy of ~6 GB). The game
+// code isn't built here: liblasgame.so comes from a computer (tools/android/build_game.sh).
+static bool in_place_files(const std::string &root) {
+    return file_exists(root + "/exefs/main") && is_dir(root + "/romfs/region_common");
+}
+static void import_progress(uint64_t done, uint64_t total) { g_total = total, g_done = done; }
+
+static void *extract_thread(void *) {
+    std::string src;
+    pthread_mutex_lock(&g_lock);
+    src = g_src;
+    pthread_mutex_unlock(&g_lock);
+    g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false;
+    if (!src.empty()) {
+        set_job("Copying the game files...");
+        mkdir(g_root.c_str(), 0755);
+        remove((g_root + "/romfs.bin").c_str());
+        std::string dest = g_root[0] == '/' ? g_root : std::string(rt_data_root()) + "/" + g_root;  // (Java: no cwd)
+        const char *err = android_import_game_files(dest.c_str(), import_progress);
+        if (err) {
+            fprintf(stderr, "[launcher] import: %s\n", err);
+            if (!strcmp(err, "notfound") || !strcmp(err, "nofolder")) set_failure(FAIL_NOT_FOUND);
+            else if (!strcmp(err, "unusable")) set_failure(FAIL_UNUSABLE);
+            else if (!strncmp(err, "space:", 6))
+                set_job("Not enough free space", true, "The game files need about " +
+                        std::to_string((unsigned long long)(atof(err + 6) / 1e9 + 1)) + " GB more. Free some space and try again.");
+            else set_failure(FAIL_COPY);
+            goto done;
+        }
+    }
+    if (!file_exists(g_root + "/exefs/main")) { set_failure(FAIL_NOT_FOUND); goto done; }
+    if (!build_id_ok(g_root + "/exefs/main")) { set_failure(FAIL_VERSION); goto done; }
+    if (!in_place_files(g_root)) { set_failure(FAIL_MISSING); goto done; }
+    {
+        set_job("Building the game data image...");
+        char why[256] = "";
+        if (!romfs_build_thin((g_root + "/romfs").c_str(), (g_root + "/romfs.bin").c_str(), why, sizeof why)) {
+            fprintf(stderr, "[launcher] romfs image: %s\n", why);
+            set_failure(FAIL_COPY);
+            goto done;
+        }
+    }
+    if (!gamelib_present(g_root.c_str())) {
+        set_job("Game code not installed", true, "Build liblasgame.so from these game files on a computer "
+                "(tools/android/build_game.sh) and install it.");
+        goto done;
+    }
+    {
+        std::string why = check_game_files(g_root);
+        if (why.empty()) set_job("Game files ready.");
+        else set_failure(why.find("version") != std::string::npos ? FAIL_VERSION : FAIL_MISSING);
+    }
+done:
+    pthread_mutex_lock(&g_lock);
+    g_busy = false;
+    pthread_mutex_unlock(&g_lock);
+    return NULL;
+}
+#else
 static void *extract_thread(void *) {
     std::string src;
     pthread_mutex_lock(&g_lock);
@@ -351,6 +420,7 @@ done:
     pthread_mutex_unlock(&g_lock);
     return NULL;
 }
+#endif
 
 // ------------------------------------------------------------------ folder dialog (SDL calls back on any thread)
 static void SDLCALL picked(void *, const char *const *files, int) {
@@ -359,6 +429,13 @@ static void SDLCALL picked(void *, const char *const *files, int) {
     g_src = files[0];
     pthread_mutex_unlock(&g_lock);
 }
+#ifdef __ANDROID__
+static void picked_android(const char *name) {
+    if (!name) return;
+    const char *const files[] = {name, NULL};
+    picked(NULL, files, 0);
+}
+#endif
 
 // ------------------------------------------------------------------ the user's own Nintendo fonts (not shipped)
 // runtime/hle/pl.c loads fonts/ first, else a close substitute (Hiragino Sans). Import copies recognized files only.
@@ -577,7 +654,12 @@ static bool menu_tip(float s) {
         ImGui::TextUnformatted("LAS Recomp has its own menu for settings, the randomizer, cosmetics and more.");
         ImGui::Spacing();
         int fam = bind_label_family() % 3;
+#ifdef __ANDROID__
+        ImGui::Text("Open it in game with the menu button at the top of the screen, or on a controller with the %s (or "
+                    "%s together).", home[fam], pad[fam]);
+#else
         ImGui::Text("Open it in game with F1 or Esc, or on a controller with the %s (or %s together).", home[fam], pad[fam]);
+#endif
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 14 * s));
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 180 * s) * 0.5f);
@@ -837,6 +919,12 @@ static void prelaunch_tab(float sc) {
 
 extern "C" void launcher_run(const char *root) {
     g_root = root;
+#ifdef __ANDROID__
+    if (g_src.empty() && check_copied_files(g_root) != "") {  // (the folder picked last time, if setup isn't done)
+        const char *saved = android_saved_game_folder();
+        if (saved) g_src = saved;
+    }
+#endif
     g_start_screen = 1;
     static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
     if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK")) {
@@ -974,6 +1062,19 @@ extern "C" void launcher_run(const char *root) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (page == SETTINGS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)
+#ifdef __ANDROID__
+            if (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_MOTION ||
+                e.type == SDL_EVENT_FINGER_CANCELED) {
+                // touch screens: a finger is the mouse (SDL's touch-made mouse events carry no window: ImGui drops them)
+                ImGuiIO &tio = ImGui::GetIO();
+                tio.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+                tio.AddMousePosEvent(e.tfinger.x * tio.DisplaySize.x, e.tfinger.y * tio.DisplaySize.y);
+                if (e.type != SDL_EVENT_FINGER_MOTION) tio.AddMouseButtonEvent(0, e.type == SDL_EVENT_FINGER_DOWN);
+                if (e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED)
+                    tio.AddMousePosEvent(-FLT_MAX, -FLT_MAX);  // (no hover left behind)
+                continue;
+            }
+#endif
             if (!launcher_pad_event(e)) ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT) exit(0);
         }
@@ -1285,6 +1386,10 @@ extern "C" void launcher_run(const char *root) {
                 };
                 std::string src_d = "The folder with your own game folders (exefs/romfs) of The Legend of Zelda: Link's "
                                     "Awakening for Nintendo Switch, version 1.0.0. The game isn't included with LAS Recomp.";
+#ifdef __ANDROID__
+                src_d += "\n\nOr copy exefs and romfs from a computer over USB into " + std::string(rt_data_root()) +
+                         "/extracted and choose Set up.";
+#endif
                 if (!src.empty()) src_d += "\n\nChosen: " + src;
                 // the step that's running / its result, under the rows and in the Set up row's explanation
                 const std::string &job_line = job;
@@ -1303,12 +1408,18 @@ extern "C" void launcher_run(const char *root) {
                 if (!ready) {
                     opt_section("Your copy of the game");
                     if (busy) opt_disable_next();
+#ifdef __ANDROID__
+                    if (opt_action("Game files folder", src_v.c_str(), src_d.c_str(), true)) android_pick_game_folder(picked_android);
+                    bool have_files = in_place_files(g_root);
+#else
                     if (opt_action("Game files folder", src_v.c_str(), src_d.c_str(), true))
                         SDL_ShowOpenFolderDialog(picked, NULL, win, NULL, false);
+                    bool have_files = false;
+#endif
                     check_left_of_value(src_v);
                     first_row();
                     opt_section("Set up");
-                    if (busy || (src.empty() && !check_copied_files(g_root).empty())) opt_disable_next();
+                    if (busy || (src.empty() && !have_files && !check_copied_files(g_root).empty())) opt_disable_next();
                     if (opt_action("Set up game files", busy ? "Working..." : "", ex_d.c_str(), true)) {
                         pthread_mutex_lock(&g_lock);
                         g_busy = true;

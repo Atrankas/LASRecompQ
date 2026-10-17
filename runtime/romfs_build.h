@@ -15,6 +15,13 @@ extern "C" {
 bool romfs_build(const char *dir, const char *out, void (*progress)(uint64_t done, uint64_t total), char *why,
                  size_t why_size);
 
+// The same image without the file data (a sparse file: the header and tables only, a few MB), marked as such in the
+// header's padding (ROMFS_THIN_MAGIC at ROMFS_THIN_AT, past what the game reads): runtime/services/fs.c then reads each
+// file's data from the folder itself. Android: no second copy of ~6 GB on the phone.
+#define ROMFS_THIN_AT 0x100
+#define ROMFS_THIN_MAGIC "LASTHIN1"
+bool romfs_build_thin(const char *dir, const char *out, char *why, size_t why_size);
+
 // Bytes of file data under dir (the image is about this plus its tables).
 uint64_t romfs_dir_bytes(const char *dir);
 

@@ -14,6 +14,11 @@
 #include "vk.h"
 #include "../output_scale.h"
 #include "../renderer.h"
+#ifdef __ANDROID__
+#include <adrenotools/driver.h>
+#include <dlfcn.h>
+#include "../../platform/android.h"
+#endif
 
 VkG g_vk;
 static SDL_Window *window;
@@ -29,6 +34,45 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
     return VK_FALSE;
 }
 
+#ifdef __ANDROID__
+// ---- a Vulkan driver the player installed (Mesa Turnip on Adreno ...: Video settings, GpuDrivers.java) in place of the
+// system's. libadrenotools loads a private copy of the system's Vulkan loader whose driver lookup is hooked to the
+// installed driver; volk takes its vkGetInstanceProcAddr. SDL's own handle is on the system loader, which doesn't know
+// that instance: the window surface is then made here (create_surface). Anything failing: the system driver, logged.
+static bool custom_driver_on;
+static char driver_probe[512];  // GpuDrivers' marker: removed once the driver has presented a few frames
+static char driver_failed[256];  // the installed driver that didn't start (this time or last time), for the settings
+
+// The settings' GPU driver rows (runtime/ui/menu.mm): whether the installed driver runs; failed: one that didn't start
+bool vk_gpu_driver_custom(const char **failed) {
+    if (failed) *failed = driver_failed[0] ? driver_failed : NULL;
+    return custom_driver_on;
+}
+
+static bool custom_driver(void) {
+    AndroidGpuDriver d;
+    if (!android_gpu_driver_config(&d)) {
+        const char *failed = android_gpu_driver_failed();
+        if (failed) LOG("[vk] GPU driver %s failed at its last start: back to the system driver\n", failed);
+        if (failed) snprintf(driver_failed, sizeof driver_failed, "%s", failed);
+        return false;
+    }
+    void *lib = adrenotools_open_libvulkan(RTLD_NOW | RTLD_LOCAL, ADRENOTOOLS_DRIVER_CUSTOM, d.tmp_dir, d.hook_dir, d.dir, d.lib,
+                                           NULL, NULL);
+    PFN_vkGetInstanceProcAddr gipa = lib ? (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr") : NULL;
+    if (!gipa) {  // (the probe stays: the next start goes back to the system driver and says so)
+        LOG("[vk] GPU driver %s%s: %s (hooks in %s); using the system driver\n", d.dir, d.lib,
+            lib ? "no vkGetInstanceProcAddr" : "libadrenotools could not load it", d.hook_dir);
+        snprintf(driver_failed, sizeof driver_failed, "%s", d.lib);
+        return false;
+    }
+    volkInitializeCustom(gipa);
+    snprintf(driver_probe, sizeof driver_probe, "%s", d.probe);
+    LOG("[vk] GPU driver: %s%s\n", d.dir, d.lib);
+    return custom_driver_on = true;
+}
+#endif
+
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 static void create_instance(void) {
     Uint32 n_sdl = 0;
@@ -39,6 +83,12 @@ static void create_instance(void) {
     bool validate = getenv("LARECOMP_VK_VALIDATION") != NULL;
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
+#ifdef VK_NO_PROTOTYPES
+#ifdef __ANDROID__
+    if (!custom_driver())
+#endif
+    if (volkInitialize() != VK_SUCCESS) FATAL("no Vulkan driver\n");
+#endif
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
                              .pEngineName = "LARecomp", .apiVersion = VK_API_VERSION_1_3};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
@@ -52,7 +102,19 @@ static void create_instance(void) {
         validate = false;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
     }
+#ifdef __ANDROID__
+    if (r != VK_SUCCESS && custom_driver_on) {
+        LOG("[vk] vkCreateInstance with the installed GPU driver: %d; using the system driver\n", r);
+        snprintf(driver_failed, sizeof driver_failed, "The installed driver");
+        custom_driver_on = false, driver_probe[0] = 0;  // (the probe stays: the next start is back on the system driver)
+        if (volkInitialize() != VK_SUCCESS) FATAL("no Vulkan driver\n");
+        r = vkCreateInstance(&ci, NULL, &g_vk.inst);
+    }
+#endif
     if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (is a Vulkan 1.3 driver installed?)\n", r);
+#ifdef VK_NO_PROTOTYPES
+    volkLoadInstance(g_vk.inst);
+#endif
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
             (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkCreateDebugUtilsMessengerEXT");
@@ -71,6 +133,69 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
     return false;
 }
 
+#ifdef VK_NO_PROTOTYPES
+// Drivers below Vulkan 1.3 (most phones up to Android 13): what of 1.2 / 1.3 the backend uses, as extensions. The
+// backend then runs exactly its 1.3 code: the extensions' functions take the core names' place (volk's pointers,
+// compat_aliases) and their structures are the same. `below`: the version from which it is core.
+static const struct { const char *name; uint32_t below; } COMPAT_EXT[] = {
+    {VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, VK_API_VERSION_1_3},
+    {VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME, VK_API_VERSION_1_2},  // (dynamic rendering needs these two)
+    {VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME, VK_API_VERSION_1_2},
+    {VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME, VK_API_VERSION_1_3},
+    {VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME, VK_API_VERSION_1_3},
+    {VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME, VK_API_VERSION_1_3},
+    {VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME, VK_API_VERSION_1_3},
+    {VK_KHR_SHADER_TERMINATE_INVOCATION_EXTENSION_NAME, VK_API_VERSION_1_3},
+    {VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME, VK_API_VERSION_1_2},
+    {VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME, VK_API_VERSION_1_2},
+    {VK_KHR_8BIT_STORAGE_EXTENSION_NAME, VK_API_VERSION_1_2},
+    {VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME, VK_API_VERSION_1_2},
+    {VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME, VK_API_VERSION_1_2},
+};
+
+// Whether a device below 1.3 has every extension it needs (missing ones logged)
+static bool compat_ok(VkPhysicalDevice pd, uint32_t api) {
+    if (api < VK_API_VERSION_1_1) return false;
+    uint32_t ne = 0;
+    vkEnumerateDeviceExtensionProperties(pd, NULL, &ne, NULL);
+    VkExtensionProperties *ep = calloc(ne, sizeof *ep);
+    vkEnumerateDeviceExtensionProperties(pd, NULL, &ne, ep);
+    bool ok = true;
+    for (size_t i = 0; i < sizeof COMPAT_EXT / sizeof *COMPAT_EXT; i++)
+        if (api < COMPAT_EXT[i].below && !has_ext(ep, ne, COMPAT_EXT[i].name)) {
+            LOG("[vk]   missing %s\n", COMPAT_EXT[i].name);
+            ok = false;
+        }
+    free(ep);
+    return ok;
+}
+
+static void compat_aliases(void) {
+    if (g_vk.api < VK_API_VERSION_1_3) {
+        vkCmdBeginRendering = vkCmdBeginRenderingKHR;
+        vkCmdEndRendering = vkCmdEndRenderingKHR;
+        vkCmdPipelineBarrier2 = vkCmdPipelineBarrier2KHR;
+        vkQueueSubmit2 = vkQueueSubmit2KHR;
+        vkCmdWriteTimestamp2 = vkCmdWriteTimestamp2KHR;
+        vkCmdSetCullMode = vkCmdSetCullModeEXT;
+        vkCmdSetFrontFace = vkCmdSetFrontFaceEXT;
+        vkCmdSetPrimitiveTopology = vkCmdSetPrimitiveTopologyEXT;
+        vkCmdSetDepthTestEnable = vkCmdSetDepthTestEnableEXT;
+        vkCmdSetDepthWriteEnable = vkCmdSetDepthWriteEnableEXT;
+        vkCmdSetDepthCompareOp = vkCmdSetDepthCompareOpEXT;
+        vkCmdSetStencilTestEnable = vkCmdSetStencilTestEnableEXT;
+        vkCmdSetStencilOp = vkCmdSetStencilOpEXT;
+        vkCmdSetPrimitiveRestartEnable = vkCmdSetPrimitiveRestartEnableEXT;
+        vkCmdSetDepthBiasEnable = vkCmdSetDepthBiasEnableEXT;
+    }
+    if (g_vk.api < VK_API_VERSION_1_2) {
+        vkWaitSemaphores = vkWaitSemaphoresKHR;
+        vkGetSemaphoreCounterValue = vkGetSemaphoreCounterValueKHR;
+        vkSignalSemaphore = vkSignalSemaphoreKHR;
+    }
+}
+#endif
+
 // Discrete GPU first (LARECOMP_GPU=<index> picks one), needs Vulkan 1.3 and a queue that can present.
 static void pick_device(void) {
     uint32_t n = 0;
@@ -84,7 +209,11 @@ static void pick_device(void) {
         vkGetPhysicalDeviceProperties(pd[i], &p);
         LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
             VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
+#ifdef VK_NO_PROTOTYPES
+        if (p.apiVersion < VK_API_VERSION_1_3 && !compat_ok(pd[i], p.apiVersion)) continue;
+#else
         if (p.apiVersion < VK_API_VERSION_1_3) continue;
+#endif
         int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
         if ((int)i == want) score = 100;
         if (score > best_score) { best_score = score; best = (int)i; }
@@ -93,6 +222,8 @@ static void pick_device(void) {
     g_vk.phys = pd[best];
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
+    g_vk.api = g_vk.props.apiVersion < VK_API_VERSION_1_3 ? VK_MAKE_API_VERSION(0, 1, VK_API_VERSION_MINOR(g_vk.props.apiVersion), 0)
+                                                          : VK_API_VERSION_1_3;
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
     VkQueueFamilyProperties *qp = calloc(nq, sizeof *qp);
@@ -134,12 +265,119 @@ void vk_device_fault_report(void) {
             (unsigned long long)vend[i].vendorFaultData);
 }
 
+static void core_features(VkPhysicalDeviceFeatures *b, const VkPhysicalDeviceFeatures *h) {
+    b->independentBlend = h->independentBlend;
+    b->dualSrcBlend = h->dualSrcBlend;
+    b->fillModeNonSolid = h->fillModeNonSolid;
+    b->samplerAnisotropy = h->samplerAnisotropy;
+    b->textureCompressionBC = h->textureCompressionBC;
+    b->shaderInt64 = h->shaderInt64;
+    b->depthBiasClamp = h->depthBiasClamp;
+    b->depthClamp = h->depthClamp;
+    b->largePoints = h->largePoints;
+    b->wideLines = h->wideLines;
+    b->imageCubeArray = h->imageCubeArray;
+    b->sampleRateShading = h->sampleRateShading;
+    b->fragmentStoresAndAtomics = h->fragmentStoresAndAtomics;
+    b->vertexPipelineStoresAndAtomics = h->vertexPipelineStoresAndAtomics;
+    b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
+    b->shaderClipDistance = h->shaderClipDistance;
+    if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
+    if (!h->textureCompressionBC) LOG("[vk] no BC texture formats: decoded on upload\n");
+}
+
+static void device_created(void);
+#ifdef VK_NO_PROTOTYPES
+// A device below 1.3 (COMPAT_EXT): the same features through the extensions' own structures, each enabled as far as
+// the driver has it (what it lacks is logged: some only matter to some shaders).
+static void create_device_compat(const char **ext, uint32_t n_ext, void *ext_features) {
+    for (size_t i = 0; i < sizeof COMPAT_EXT / sizeof *COMPAT_EXT; i++)
+        if (g_vk.api < COMPAT_EXT[i].below) ext[n_ext++] = COMPAT_EXT[i].name;
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR dr = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
+                                                      .pNext = ext_features};
+    VkPhysicalDeviceSynchronization2FeaturesKHR s2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR,
+                                                      .pNext = &dr};
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT eds = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT, .pNext = &s2};
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT eds2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT, .pNext = &eds};
+    VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT dem = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES_EXT, .pNext = &eds2};
+    VkPhysicalDeviceShaderTerminateInvocationFeaturesKHR term = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_TERMINATE_INVOCATION_FEATURES_KHR, .pNext = &dem};
+    // 1.2: its feature structure; 1.1: the extensions'
+    VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &term};
+    VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &f12};
+    VkPhysicalDeviceTimelineSemaphoreFeatures tl = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+                                                    .pNext = &term};
+    VkPhysicalDeviceShaderFloat16Int8Features i8 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+                                                    .pNext = &tl};
+    VkPhysicalDevice8BitStorageFeatures b8 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES, .pNext = &i8};
+    VkPhysicalDeviceScalarBlockLayoutFeatures sbl = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES,
+                                                     .pNext = &b8};
+    VkPhysicalDevice16BitStorageFeatures b16 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES, .pNext = &sbl};
+    bool v12 = g_vk.api >= VK_API_VERSION_1_2;
+    VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = v12 ? (void *)&f11 : (void *)&b16};
+    // what the driver has: everything wanted is enabled as far as it goes (the extensions' own features below
+    // ext_features are asked for as they are, as on 1.3: hide them from the query)
+    dr.pNext = NULL;
+    vkGetPhysicalDeviceFeatures2(g_vk.phys, &f);
+    dr.pNext = ext_features;
+    VkPhysicalDeviceFeatures have = f.features;
+    memset(&f.features, 0, sizeof f.features);
+    core_features(&f.features, &have);
+#define WANT(cond, what) do { if (!(cond)) LOG("[vk] driver lacks %s\n", what); } while (0)
+    WANT(dr.dynamicRendering, "dynamicRendering");
+    WANT(s2.synchronization2, "synchronization2");
+    WANT(eds.extendedDynamicState, "extendedDynamicState");
+    WANT(eds2.extendedDynamicState2, "extendedDynamicState2");
+    WANT(dem.shaderDemoteToHelperInvocation, "shaderDemoteToHelperInvocation");
+    WANT(term.shaderTerminateInvocation, "shaderTerminateInvocation");
+    eds2.extendedDynamicState2LogicOp = eds2.extendedDynamicState2PatchControlPoints = VK_FALSE;
+    if (v12) {
+        WANT(f12.timelineSemaphore, "timelineSemaphore");
+        WANT(f12.shaderInt8, "shaderInt8");
+        WANT(f12.storageBuffer8BitAccess, "storageBuffer8BitAccess");
+        WANT(f12.scalarBlockLayout, "scalarBlockLayout");
+        VkPhysicalDeviceVulkan12Features want12 = {.timelineSemaphore = f12.timelineSemaphore, .shaderInt8 = f12.shaderInt8,
+            .samplerMirrorClampToEdge = f12.samplerMirrorClampToEdge,
+            .uniformAndStorageBuffer8BitAccess = f12.uniformAndStorageBuffer8BitAccess,
+            .storageBuffer8BitAccess = f12.storageBuffer8BitAccess, .scalarBlockLayout = f12.scalarBlockLayout};
+        want12.sType = f12.sType, want12.pNext = f12.pNext;
+        f12 = want12;
+        VkPhysicalDeviceVulkan11Features want11 = {.sType = f11.sType, .pNext = f11.pNext,
+                                                   .storageBuffer16BitAccess = f11.storageBuffer16BitAccess};
+        f11 = want11;
+    } else {
+        WANT(tl.timelineSemaphore, "timelineSemaphore");
+        WANT(i8.shaderInt8, "shaderInt8");
+        WANT(b8.storageBuffer8BitAccess, "storageBuffer8BitAccess");
+        WANT(sbl.scalarBlockLayout, "scalarBlockLayout");
+        i8.shaderFloat16 = VK_FALSE;
+        b8.storagePushConstant8 = VK_FALSE;
+        b16.uniformAndStorageBuffer16BitAccess = b16.storagePushConstant16 = b16.storageInputOutput16 = VK_FALSE;
+    }
+#undef WANT
+    if (!(tl.timelineSemaphore || (v12 && f12.timelineSemaphore)) || !dr.dynamicRendering || !s2.synchronization2 ||
+        !eds.extendedDynamicState || !eds2.extendedDynamicState2)
+        FATAL("this GPU driver lacks Vulkan features the game needs (see the lines above)\n");
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
+                                  .queueCount = 1, .pQueuePriorities = &prio};
+    VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
+                             .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
+    LOG("[vk] Vulkan %u.%u device with %u extensions for 1.3\n", VK_API_VERSION_MAJOR(g_vk.api), VK_API_VERSION_MINOR(g_vk.api), n_ext);
+    VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
+    device_created();
+}
+#endif
+
 static void create_device(void) {
     uint32_t ne = 0;
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[8];
+    const char *ext[32];
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
@@ -162,6 +400,15 @@ static void create_device(void) {
     VkPhysicalDeviceCustomBorderColorFeaturesEXT cbc = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, .customBorderColors = VK_TRUE,
         .customBorderColorWithoutFormat = VK_TRUE, .pNext = g_vk.divisor ? &div : NULL};
+#ifdef VK_NO_PROTOTYPES
+    if (g_vk.api < VK_API_VERSION_1_3) {
+        VkPhysicalDeviceFaultFeaturesEXT ffc = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT,
+                                                .deviceFault = VK_TRUE,
+                                                .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
+        create_device_compat(ext, n_ext, fault ? (void *)&ffc : ffc.pNext);
+        return;
+    }
+#endif
     VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                             .dynamicRendering = VK_TRUE, .synchronization2 = VK_TRUE,
                                             .shaderDemoteToHelperInvocation = VK_TRUE, .shaderTerminateInvocation = VK_TRUE,
@@ -176,34 +423,48 @@ static void create_device(void) {
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
-    VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
-    b->independentBlend = h->independentBlend;
-    b->dualSrcBlend = h->dualSrcBlend;
-    b->fillModeNonSolid = h->fillModeNonSolid;
-    b->samplerAnisotropy = h->samplerAnisotropy;
-    b->textureCompressionBC = h->textureCompressionBC;
-    b->shaderInt64 = h->shaderInt64;
-    b->depthBiasClamp = h->depthBiasClamp;
-    b->depthClamp = h->depthClamp;
-    b->largePoints = h->largePoints;
-    b->wideLines = h->wideLines;
-    b->imageCubeArray = h->imageCubeArray;
-    b->sampleRateShading = h->sampleRateShading;
-    b->fragmentStoresAndAtomics = h->fragmentStoresAndAtomics;
-    b->vertexPipelineStoresAndAtomics = h->vertexPipelineStoresAndAtomics;
-    b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
-    b->shaderClipDistance = h->shaderClipDistance;
-    if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
+    core_features(&f.features, &have.features);
+#ifdef VK_NO_PROTOTYPES
+    {   // phones: one feature the driver lacks fails the whole device - enable what it has, log what it lacks
+        VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        VkPhysicalDeviceVulkan12Features h12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &h13};
+        VkPhysicalDeviceVulkan11Features h11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &h12};
+        VkPhysicalDeviceFeatures2 hf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h11};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &hf);
+#define HAVE(w, h, x) if (w.x && !h.x) { LOG("[vk] driver lacks %s\n", #x); w.x = VK_FALSE; }
+        if (!h13.dynamicRendering || !h13.synchronization2 || !h12.timelineSemaphore)
+            FATAL("this GPU driver lacks Vulkan features the game needs (dynamic rendering, synchronization2, timeline "
+                  "semaphores)\n");
+        HAVE(f13, h13, shaderDemoteToHelperInvocation)
+        HAVE(f13, h13, shaderTerminateInvocation) HAVE(f13, h13, maintenance4) HAVE(f12, h12, timelineSemaphore)
+        HAVE(f12, h12, shaderInt8) HAVE(f12, h12, samplerMirrorClampToEdge) HAVE(f12, h12, uniformAndStorageBuffer8BitAccess)
+        HAVE(f12, h12, storageBuffer8BitAccess) HAVE(f12, h12, scalarBlockLayout) HAVE(f11, h11, storageBuffer16BitAccess)
+#undef HAVE
+    }
+#endif
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
                                   .queueCount = 1, .pQueuePriorities = &prio};
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
+    device_created();
+}
+
+// What follows the device's creation, whichever way it was made
+static void device_created(void) {
+#ifdef VK_NO_PROTOTYPES
+    volkLoadDevice(g_vk.dev);
+    compat_aliases();
+#endif
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
-                                 .vulkanApiVersion = VK_API_VERSION_1_3};
+                                 .vulkanApiVersion = g_vk.api};
+#ifdef VK_NO_PROTOTYPES
+    VmaVulkanFunctions vf = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr, .vkGetDeviceProcAddr = vkGetDeviceProcAddr};
+    ai.pVulkanFunctions = &vf;
+#endif
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
 
     VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
@@ -269,12 +530,23 @@ static VkPresentModeKHR present_mode(void) {
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
+static bool g_sc_turned;
+static atomic_bool g_background, g_surface_stale;  // (the app in the background: below)
 static void create_swapchain(void) {
     VkSurfaceCapabilitiesKHR caps;
-    VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_vk.phys, g_vk.surface, &caps));
+    VkResult capr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_vk.phys, g_vk.surface, &caps);
+    if (capr == VK_ERROR_SURFACE_LOST_KHR) { atomic_store(&g_surface_stale, true); return; }  // (Android: window gone)
+    VK_CHECK(capr);
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     VkExtent2D ext = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : (VkExtent2D){(uint32_t)w, (uint32_t)h};
+    VkSurfaceTransformFlagBitsKHR xf = caps.currentTransform;
+#ifdef __ANDROID__
+    // Phones are portrait underneath: in landscape the surface reports a 90 / 270 degree transform. The images are
+    // made in the window's own (landscape) shape, the extent it reports, and the system turns them (identity)
+    if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) xf = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+#endif
+    g_sc_turned = xf != caps.currentTransform;  // (then presents say "suboptimal": that's this, not a new size)
     if (!ext.width || !ext.height) return;  // minimised
     uint32_t nf = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(g_vk.phys, g_vk.surface, &nf, NULL);
@@ -293,14 +565,32 @@ static void create_swapchain(void) {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_vk.surface, .minImageCount = count,
         .imageFormat = sf.format, .imageColorSpace = sf.colorSpace, .imageExtent = ext, .imageArrayLayers = 1,
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
-        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = present_mode(), .clipped = VK_TRUE,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = xf,
+        .compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
+                                                                                          : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+        .presentMode = present_mode(), .clipped = VK_TRUE,
         .oldSwapchain = old};
-    VK_CHECK(vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain));
+    VkResult cr = vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain);
+    if (cr == VK_ERROR_SURFACE_LOST_KHR || cr == VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) {  // (Android: the app went away)
+        LOG("[vk] swapchain: surface lost (%d)\n", cr);
+        g_vk.swapchain = VK_NULL_HANDLE;
+        if (old) vkDestroySwapchainKHR(g_vk.dev, old, NULL);
+        for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
+        g_vk.sc_count = 0;
+        atomic_store(&g_surface_stale, true);  // (a new surface is made on the next frame)
+        return;
+    }
+    VK_CHECK(cr);
     for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
     if (old) vkDestroySwapchainKHR(g_vk.dev, old, NULL);
     g_vk.sc_format = sf.format;
     g_vk.sc_extent = ext;
+    {
+        int pw, ph;
+        SDL_GetWindowSize(window, &pw, &ph);
+        LOG("[vk] swapchain %ux%u (surface %ux%u, transform %#x; window %dx%d px, %dx%d points)\n", ext.width, ext.height,
+            caps.currentExtent.width, caps.currentExtent.height, caps.currentTransform, w, h, pw, ph);
+    }
     g_vk.sc_count = 8;
     vkGetSwapchainImagesKHR(g_vk.dev, g_vk.swapchain, &g_vk.sc_count, g_vk.sc_images);
     for (uint32_t i = 0; i < g_vk.sc_count; i++) {
@@ -314,6 +604,56 @@ static void create_swapchain(void) {
 static void recreate_swapchain(void) {
     vkDeviceWaitIdle(g_vk.dev);
     create_swapchain();
+}
+
+// ---- the app in the background (Android): the window's surface goes away. Nothing is drawn meanwhile, and the game
+// waits in its next present (it pauses where it is: no CPU, no battery); back in front, a new surface and swapchain.
+static bool SDLCALL lifecycle_watch(void *user, SDL_Event *e) {
+    (void)user;
+    if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND || e->type == SDL_EVENT_DID_ENTER_BACKGROUND) {
+        if (!atomic_exchange(&g_background, true)) LOG("[vk] in the background: game paused\n");
+    } else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND && atomic_load(&g_background)) {
+        LOG("[vk] in front again\n");
+        atomic_store(&g_surface_stale, true);
+        atomic_store(&g_background, false);
+    }
+    return true;
+}
+
+// The window's Vulkan surface (false: SDL_GetError says why)
+static bool create_surface(void) {
+#ifdef __ANDROID__
+    if (custom_driver_on) {  // (as SDL's Android_Vulkan_CreateSurface, through the installed driver's loader)
+        struct ANativeWindow *nw = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, NULL);
+        if (!nw) return SDL_SetError("no native window (the app is in the background)");
+        VkAndroidSurfaceCreateInfoKHR si = {.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = nw};
+        VkResult r = vkCreateAndroidSurfaceKHR(g_vk.inst, &si, NULL, &g_vk.surface);
+        if (r != VK_SUCCESS) return SDL_SetError("vkCreateAndroidSurfaceKHR: %d", r);
+        return true;
+    }
+#endif
+    return SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface);
+}
+
+static void new_surface(void) {
+    vkDeviceWaitIdle(g_vk.dev);
+    for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
+    g_vk.sc_count = 0;
+    if (g_vk.swapchain) vkDestroySwapchainKHR(g_vk.dev, g_vk.swapchain, NULL);
+    g_vk.swapchain = VK_NULL_HANDLE;
+    if (g_vk.surface) vkDestroySurfaceKHR(g_vk.inst, g_vk.surface, NULL);
+    g_vk.surface = VK_NULL_HANDLE;
+    if (!create_surface()) {
+        LOG("[vk] new surface: %s\n", SDL_GetError());
+        atomic_store(&g_surface_stale, true);  // (the window isn't back yet: next frame)
+        return;
+    }
+    create_swapchain();
+}
+
+// Called by the game's presenting thread: blocks while the app is in the background.
+static void wait_foreground(void) {
+    while (atomic_load(&g_background)) SDL_Delay(50);
 }
 
 // ================================================================== frames (start screen and game)
@@ -349,6 +689,9 @@ static Frame cur_frame;
 // nothing to draw into (minimised window).
 bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = false;
+    if (atomic_load(&g_background)) return false;
+    if (atomic_exchange(&g_surface_stale, false)) new_surface();
+    if (!g_vk.surface || atomic_load(&g_surface_stale)) return false;
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     if (!w || !h) return false;  // minimised
@@ -365,6 +708,7 @@ bool vk_frame_begin(const float clear[4]) {
         recreate_swapchain();
         r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
     }
+    if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&g_surface_stale, true);
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
     cur_frame.acquired = acquire_sem[slot];
     slot_seq[slot] = vk_pending_seq();
@@ -433,7 +777,12 @@ void vk_frame_end(const char *shot_path) {
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || (r == VK_SUBOPTIMAL_KHR && !g_sc_turned)) recreate_swapchain();
+    else if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&g_surface_stale, true);
+#ifdef __ANDROID__
+    static int presented;
+    if (driver_probe[0] && r >= 0 && ++presented == 60) unlink(driver_probe), driver_probe[0] = 0;  // (the driver works)
+#endif
     cur_frame.ok = false;
     if (shot_path) {
         vk_wait_seq(seq);
@@ -482,6 +831,7 @@ void backend_present(NvnTexture *t) {
     b->presented = true;
     vk_end_pass();
     static const float black[4] = {0, 0, 0, 1};
+    wait_foreground();
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
     uint64_t nd = SDL_GetTicksNS() - t0;
@@ -638,12 +988,20 @@ void ui_window_init(void) {
     if (window) return;
     atexit(quick_exit_handler);
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+#ifdef __ANDROID__
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");  // (Back is a key for the menus, not "close the app")
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");        // (touches are handled as such: menus, launcher, controls)
+#endif
     settings_load();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     int win_w = 1280, win_h = 720;
     if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
     SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
+#ifdef __ANDROID__
+    wflags |= SDL_WINDOW_FULLSCREEN;  // (immersive: no status / navigation bars over the game)
+#endif
     {   // scripted test runs (user input ignored: runtime/hle/input.c input_user_blocked) open without taking the
         // keyboard focus from whatever the player is doing
         const char *v = getenv("LARECOMP_NO_USER_INPUT");
@@ -653,11 +1011,13 @@ void ui_window_init(void) {
     }
     window = SDL_CreateWindow("LAS Recomp", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
+    SDL_AddEventWatch(lifecycle_watch, NULL);
     rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
+
     create_instance();
-    if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+    if (!create_surface()) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
     pick_device();
     create_device();
     create_swapchain();

@@ -1,8 +1,10 @@
 """Generate C for a whole NSO module.
 
-Usage: gen.py <name> <nso> <base> <outdir> [--hle hle_symbols.txt] [--chunk N] [--simd asm|c]
+Usage: gen.py <name> <nso> <base> <outdir> [--hle hle_symbols.txt] [--chunk N] [--simd asm|c] [--shift N]
 
 --simd: FP/SIMD/CRC32 as AArch64 inline asm (default on arm64 hosts) or portable C (default elsewhere).
+--shift: the module runs N below <base> (runtime/cpu.h GUEST_SHIFT, 0x6000000000 on Android); functions, labels and
+         patches (tools/patches.py) keep the names and addresses of the unshifted layout.
 """
 import argparse
 import bisect
@@ -22,6 +24,7 @@ from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
 from nso import Nso, R_AARCH64_RELATIVE
 
 SCRATCH_MEM = 0x7300000000
+SHIFT = 0  # --shift
 
 
 def sext26(w):
@@ -30,7 +33,11 @@ def sext26(w):
 
 
 def fname(a):
-    return f'f_{a:x}'
+    return f'f_{a + SHIFT:x}'
+
+
+def label(a):
+    return f'L_{a + SHIFT:x}'
 
 
 def sanitize(sym):
@@ -42,6 +49,7 @@ class Module:
         self.name = name
         self.nso = Nso(path)
         self.base = base
+        self.cbase = base + SHIFT  # the unshifted base: what tools/patches.py addresses are relative to
         n = self.nso
         self.lo = base + n.text[0]
         self.hi = base + n.text[0] + n.text[1]
@@ -369,7 +377,7 @@ class Module:
 
         def jump(t):
             if entry <= t < end:
-                return f'goto L_{t:x};'
+                return f'goto {label(t)};'
             if not self.in_text(t):
                 return f'c->pc = {hx(t)}; __attribute__((musttail)) return rt_dispatch(c);'
             refs.add(t)
@@ -393,7 +401,7 @@ class Module:
             ins = self.lift(a)
             if a in labels:
                 flush()
-                out.append(f'L_{a:x}:;')
+                out.append(f'{label(a)}:;')
             if a - self.base in RANDO_CODE:  # randomizer patch site: the active seed picks the instruction
                 flush()
                 out.append(f'    {{ extern uint32_t rando_word(uint64_t); uint32_t rw = rando_word({hx(a)});')
@@ -405,9 +413,9 @@ class Module:
                 out.append('    else { ' + ' '.join(self.render_single(ins, a, jump, refs)) + ' } }')
                 last = 'op'
                 continue
-            if a in PATCHES:  # hand-written replacement for one instruction (tools/patches.py)
+            if a + SHIFT in PATCHES:  # hand-written replacement for one instruction (tools/patches.py)
                 flush()
-                out.append('    ' + PATCHES[a](self, a))
+                out.append('    ' + PATCHES[a + SHIFT](self, a + SHIFT))
                 last = 'op'
                 continue
             k = ins.kind
@@ -445,7 +453,7 @@ class Module:
                     out.append(f'    c->pc = {ins.target}; goto L_dispatch;')
                     continue
                 if jt:
-                    cases = ' '.join(f'case {hx(t)}: goto L_{t:x};' for t in jt)
+                    cases = ' '.join(f'case {hx(t)}: goto {label(t)};' for t in jt)
                     out.append(f'    switch ({ins.target}) {{ {cases} default: break; }}')
                     out.append(f'    c->pc = {ins.target}; goto L_dispatch;')
                     continue
@@ -458,7 +466,7 @@ class Module:
             out.append('    ' + jump(end) if end < self.hi else f'    rt_udf(c, {hx(end)});')
         if all_labels:
             out.append('L_dispatch:')
-            cases = ' '.join(f'case {hx(t)}: goto L_{t:x};' for t in range(entry, end, 4))
+            cases = ' '.join(f'case {hx(t)}: goto {label(t)};' for t in range(entry, end, 4))
             out.append(f'    switch (c->pc) {{ {cases} default: break; }}')
             out.append('    __attribute__((musttail)) return rt_dispatch(c);')
         out.append('}')
@@ -502,17 +510,20 @@ def main():
     ap.add_argument('--limit', type=int, default=0)
     ap.add_argument('--simd', choices=('asm', 'c'),
                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
+    ap.add_argument('--shift', type=lambda s: int(s, 0), default=0)
     args = ap.parse_args()
+    global SHIFT
+    SHIFT = args.shift
 
     t0 = time.time()
-    m = Module(args.name, args.nso, args.base, args.simd)
+    m = Module(args.name, args.nso, args.base - SHIFT, args.simd)
     starts = m.boundaries()
     hle = {}
     if args.hle and os.path.exists(args.hle):
         want = {l.strip() for l in open(args.hle) if l.strip() and not l.startswith('#')}
         for name, info, shndx, value, size in m.nso.syms:
             if shndx and name in want:
-                hle[args.base + value] = name
+                hle[m.base + value] = name
 
     # Partition text into functions; any branch/call target outside its function becomes a new
     # boundary (splitting the containing function) until a fixpoint is reached.

@@ -10,6 +10,7 @@
 #include "../hle.h"
 #include "../rando.h"
 #include "../ipc.h"
+#include "../romfs_build.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
 #define FS_PATH_EXISTS MAKE_RESULT(2, 2)
@@ -30,10 +31,14 @@ static int ov_n, ov_cap;
 static uint8_t *ov_meta;
 static uint64_t ov_meta_off, ov_meta_size, ov_end;
 // Lets the runtime see which game files are being streamed (e.g. which level is loading).
-typedef struct { uint64_t off, size; char *path; uint32_t meta; } RomFile;
+typedef struct { uint64_t off, size; char *path; uint32_t meta; int fd; } RomFile;
 static RomFile *rom_files;
 static int rom_nfiles;
 static uint64_t rom_data_off;
+// A thin image (romfs_build_thin: header and tables only): the bytes between rom_data_off and rom_tables_off come
+// from the files in the romfs/ folder (fd opened on first read)
+static bool rom_thin;
+static uint64_t rom_tables_off;
 
 // Reboot: the next seed builds its own index / overlay when the game opens the RomFS again.
 RT_ON_RESET(fs_reset) {
@@ -42,8 +47,12 @@ RT_ON_RESET(fs_reset) {
         free(ov[i].path);
     }
     for (int i = 0; i < npatches; i++) free(patches[i].data);  // (ov_meta and the extended table are among these)
-    for (int i = 0; i < rom_nfiles; i++) free(rom_files[i].path);
+    for (int i = 0; i < rom_nfiles; i++) {
+        if (rom_files[i].fd >= 0) close(rom_files[i].fd);
+        free(rom_files[i].path);
+    }
     free(ov), free(rom_files);
+    rom_thin = false, rom_tables_off = 0;
     ov = NULL, ov_n = ov_cap = 0;
     ov_meta = NULL, ov_meta_off = ov_meta_size = ov_end = 0;
     npatches = 0;
@@ -201,7 +210,7 @@ static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint6
         o += 0x20 + ((nl + 3) & ~3u);
         if (ov_n == ov_cap) { ov_cap = ov_cap ? ov_cap * 2 : 256; ov = realloc(ov, sizeof *ov * ov_cap); }
         ov[ov_n++] = (Overlay){data_at, size, strdup(nf[i].host), -1, NULL};
-        rom_files[rom_nfiles++] = (RomFile){data_at, size, strdup(nf[i].rel), entry};
+        rom_files[rom_nfiles++] = (RomFile){data_at, size, strdup(nf[i].rel), entry, -1};
         data_at = (data_at + size + 0xF) & ~0xFull;
         added++;
     }
@@ -226,6 +235,10 @@ static void rom_index(int fd) {
     // header: size, dir hash (off,size), dir meta (off,size), file hash (off,size), file meta (off,size), data off
     uint64_t doff = h[3], dsz = h[4], foff = h[7], fsz = h[8];
     rom_data_off = h[9];
+    char magic[8];
+    rom_thin = pread(fd, magic, 8, ROMFS_THIN_AT) == 8 && !memcmp(magic, ROMFS_THIN_MAGIC, 8);
+    rom_tables_off = h[1];
+    if (rom_thin) LOG("[fs] thin romfs image: file data from %s/\n", g_romfs_dir);
     uint8_t *dmeta = malloc(dsz), *fmeta = malloc(fsz);
     if (pread(fd, dmeta, dsz, (off_t)doff) != (ssize_t)dsz || pread(fd, fmeta, fsz, (off_t)foff) != (ssize_t)fsz) return;
     int cap = 4096;
@@ -246,7 +259,7 @@ static void rom_index(int fd) {
         char *path = malloc(strlen(dir) + nl + 1);
         strcpy(path, dir);
         strcat(path, name);
-        rom_files[rom_nfiles++] = (RomFile){rom_data_off + data, size, path, (uint32_t)o};
+        rom_files[rom_nfiles++] = (RomFile){rom_data_off + data, size, path, (uint32_t)o, -1};
         o += 0x20 + ((namelen + 3) & ~3u);
     }
     // Randomizer seed: replacement files are served from the seed folder. The file-meta table is patched
@@ -286,9 +299,56 @@ static void rom_index(int fd) {
     LOG("[fs] romfs index: %d files\n", rom_nfiles);
 }
 
+// The image itself; for a thin one, the data region from the files of the romfs/ folder (zeros between them)
+static ssize_t image_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
+    if (!rom_thin || off + size <= rom_data_off || off >= rom_tables_off) return pread(fd, dst, size, (off_t)off);
+    uint64_t done = 0;
+    while (done < size) {
+        uint64_t at = off + done, n = size - done;
+        if (at < rom_data_off || at >= rom_tables_off) {  // header / tables: in the image file
+            if (at < rom_data_off && n > rom_data_off - at) n = rom_data_off - at;
+            ssize_t r = pread(fd, dst + done, n, (off_t)at);
+            if (r < 0) r = 0;
+            if ((uint64_t)r < n) memset(dst + done + r, 0, n - (uint64_t)r);
+            for (uint64_t k = at; k < at + n && k < ROMFS_THIN_AT + 8; k++)  // (the thin marker reads as padding)
+                if (k >= ROMFS_THIN_AT && k < ROMFS_THIN_AT + 8) dst[done + k - at] = 0;
+            done += n;
+            continue;
+        }
+        int lo = 0, hi = rom_nfiles;  // first file ending past `at`
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (rom_files[mid].off + rom_files[mid].size <= at) lo = mid + 1;
+            else hi = mid;
+        }
+        RomFile *f = lo < rom_nfiles && rom_files[lo].off < rom_tables_off ? &rom_files[lo] : NULL;
+        if (!f || at < f->off) {  // alignment padding up to the next file (or the tables)
+            uint64_t next = f ? f->off : rom_tables_off;
+            if (n > next - at) n = next - at;
+            memset(dst + done, 0, n);
+            done += n;
+            continue;
+        }
+        if (f->fd < 0) {
+            char host[1200];
+            snprintf(host, sizeof host, "%s/%s", g_romfs_dir, f->path);
+            int nfd = open(host, O_RDONLY | O_CLOEXEC), expect = -1;
+            if (nfd < 0) LOG("[fs] thin romfs: can't open %s: %s\n", host, strerror(errno));
+            else if (!__atomic_compare_exchange_n(&f->fd, &expect, nfd, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) close(nfd);
+        }
+        uint64_t in = at - f->off;
+        if (n > f->size - in) n = f->size - in;
+        ssize_t r = f->fd >= 0 ? pread(f->fd, dst + done, n, (off_t)in) : 0;
+        if (r < 0) r = 0;
+        if ((uint64_t)r < n) memset(dst + done + r, 0, n - (uint64_t)r);
+        done += n;
+    }
+    return (ssize_t)done;
+}
+
 // Virtual RomFS image read: original bytes, with the patched file table and appended replacement files.
 static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
-    if (!ov_n) return pread(fd, dst, size, (off_t)off);
+    if (!ov_n) return image_read(fd, dst, size, off);
     uint64_t done = 0;
     while (done < size) {
         uint64_t o = off + done, n = size - done;
@@ -310,7 +370,7 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
         } else {
             if (o + n > ov[0].start) n = ov[0].start - o;
-            ssize_t r = pread(fd, dst + done, n, (off_t)o);
+            ssize_t r = image_read(fd, dst + done, n, o);
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
             // overlay the patched tables (file meta, and with added files: header, dir meta, file hash)

@@ -12,7 +12,7 @@ extern "C" {
 extern "C" bool vk_imgui_backend_init(void) {
     if (ImGui::GetIO().BackendRendererUserData) return true;
     ImGui_ImplVulkan_InitInfo ii = {};
-    ii.ApiVersion = VK_API_VERSION_1_3;
+    ii.ApiVersion = g_vk.api;
     ii.Instance = g_vk.inst;
     ii.PhysicalDevice = g_vk.phys;
     ii.Device = g_vk.dev;

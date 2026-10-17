@@ -1,0 +1,98 @@
+// LAS Recomp for Android: libmain.so (the runtime) + libSDL3.so, built by app/CMakeLists.txt (needs
+// tools/android/build_deps.sh first). No game code in here: liblasgame.so is built from the player's own game files by
+// tools/android/build_game.sh and either packed into a personal APK (-PlasGameLib=<dir with liblasgame.so>) or copied
+// to the app's internal storage.
+plugins {
+    id 'com.android.application'
+}
+
+def sdl = file('../../build/android/SDL3/android-project/app/src/main/java')
+
+android {
+    namespace 'com.lasrecomp.android'
+    compileSdk 36
+    ndkVersion '27.2.12479018'
+
+    defaultConfig {
+        applicationId 'com.lasrecomp.android'
+        // -PlasTestId: installed beside the app (its own data folder; for testing on a phone that has it)
+        if (project.hasProperty('lasTestId')) applicationIdSuffix '.test'
+        minSdk 30          // Android 11: Vulkan 1.1+, AAudio, MAP_FIXED_NOREPLACE kernels
+        targetSdk 36
+        versionCode((project.findProperty('lasVersionCode') ?: '1') as int)
+        versionName project.findProperty('lasVersionName') ?: 'beta_4-android1'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                targets 'main', 'SDL3-shared', 'main_hook', 'hook_impl'  // + libadrenotools' hooks (custom GPU drivers)
+                arguments '-DANDROID_STL=c++_static'
+            }
+        }
+    }
+
+    // A release key for APKs you share: android/keystore.properties with storeFile, storePassword, keyAlias,
+    // keyPassword (never commit it or the key). Without it, release builds use the local debug key (personal builds).
+    def keystoreProps = rootProject.file('keystore.properties')
+    signingConfigs {
+        if (keystoreProps.exists()) {
+            release {
+                def p = new Properties()
+                keystoreProps.withInputStream { p.load(it) }
+                storeFile file(p.getProperty('storeFile'))
+                storePassword p.getProperty('storePassword')
+                keyAlias p.getProperty('keyAlias')
+                keyPassword p.getProperty('keyPassword')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig keystoreProps.exists() ? signingConfigs.release : signingConfigs.debug
+            externalNativeBuild { cmake { arguments '-DCMAKE_BUILD_TYPE=Release' } }
+        }
+        debug {
+            // the runtime is unusably slow at -O0: keep debug info but optimize
+            externalNativeBuild { cmake { arguments '-DCMAKE_BUILD_TYPE=RelWithDebInfo' } }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('CMakeLists.txt')
+            buildStagingDirectory file('../../build/android/cxx')
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += [sdl]
+            assets.srcDirs += ["$buildDir/generated/las-assets"]
+            // a personal build with the game code inside (tools/android/build_game.sh --apk)
+            if (project.hasProperty('lasGameLib')) jniLibs.srcDirs += [project.property('lasGameLib')]
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging false   // stored uncompressed and mapped directly from the APK
+        }
+    }
+}
+
+// What the app ships besides code (runtime/paths.c android_resources): the start screen font and the icon
+tasks.register('lasAssets', Copy) {
+    from('../../third_party/fonts/Baloo2/Baloo2-SemiBold.ttf')
+    from('../../third_party/fonts/DejaVu/DejaVuSans.ttf')  // (the game text's font without the user's Switch fonts)
+    from('../../docs/icon/icon_1024.png') { rename { 'icon.png' } }
+    into "$buildDir/generated/las-assets"
+}
+preBuild.dependsOn lasAssets

@@ -10,6 +10,9 @@
 #include <pthread.h>
 #include <atomic>
 #include <vector>
+#ifdef __ANDROID__
+#include <string>
+#endif
 
 #include "imgui.h"
 #include "option_rows.h"
@@ -37,6 +40,10 @@ extern "C" void difficulty_draw(float scale);  // difficulty.mm
 void controls_bindings_draw(float scale);  // controls_ui.mm
 #include "../input_bind.h"
 #include "../paths.h"
+#ifdef __ANDROID__
+#include "../platform/android.h"
+bool vk_gpu_driver_custom(const char **failed);  // nvn/vulkan/device.c
+#endif
 }
 
 // ------------------------------------------------------------------ state shared with the main thread
@@ -55,6 +62,7 @@ struct QEvent {
 static pthread_mutex_t q_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::vector<QEvent> q_events;
 static float g_pixel_density = 1;
+static int g_win_px_w = 1, g_win_px_h = 1;  // (touch positions come normalized)
 
 static void push(const QEvent &e) {
     pthread_mutex_lock(&q_lock);
@@ -64,16 +72,19 @@ static void push(const QEvent &e) {
 
 bool menu_is_open(void) { return g_open.load(); }
 static void set_open(bool open);
+extern "C" void menu_toggle(void) { set_open(!g_open.load()); }  // (the touch controls' menu button)
 extern "C" void menu_test_open(void) {
     set_open(true);
     if (getenv("LARECOMP_MENU_TAB")) { extern int g_tab_request_ext; g_tab_request_ext = atoi(getenv("LARECOMP_MENU_TAB")); }
 }
 
 void menu_tabs_focus(bool first_tab);
+extern "C" void touch_reset(void);  // touch_controls.mm
 static void set_open(bool open) {
     if (open == g_open.load()) return;
     g_open.store(open);
     input_reset();  // nothing held while the menu had focus leaks into the game
+    touch_reset();  // (nor touches: the menu takes them, their lifts included)
     bind_capture_cancel();
     if (open) {
         save_editor_on_open();
@@ -247,6 +258,26 @@ bool menu_handle_event(const SDL_Event *e) {
         if (!capturing()) return false;
         { QEvent q = {}; q.kind = QEvent::WHEEL; q.x = e->wheel.x; q.y = e->wheel.y; push(q); }
         return true;
+#ifdef __ANDROID__
+    case SDL_EVENT_FINGER_DOWN: case SDL_EVENT_FINGER_UP: case SDL_EVENT_FINGER_MOTION: case SDL_EVENT_FINGER_CANCELED:
+        if (!capturing()) return false;
+        {   // touch screens: a finger is the mouse (SDL's touch-made mouse events carry no window, which ImGui drops)
+            QEvent q = {};
+            q.kind = QEvent::MOUSE_POS, q.x = e->tfinger.x * g_win_px_w, q.y = e->tfinger.y * g_win_px_h;
+            push(q);
+            if (e->type != SDL_EVENT_FINGER_MOTION) {
+                q = {};
+                q.kind = QEvent::MOUSE_BUTTON, q.button = 0, q.down = e->type == SDL_EVENT_FINGER_DOWN;
+                push(q);
+            }
+            if (e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_CANCELED) {  // (no hover left behind)
+                q = {};
+                q.kind = QEvent::MOUSE_POS, q.x = -FLT_MAX, q.y = -FLT_MAX;
+                push(q);
+            }
+        }
+        return true;
+#endif
     default:
         return false;
     }
@@ -255,6 +286,7 @@ bool menu_handle_event(const SDL_Event *e) {
 void menu_apply_window_requests(void *win) {
     SDL_Window *w = (SDL_Window *)win;
     g_pixel_density = SDL_GetWindowPixelDensity(w);
+    SDL_GetWindowSizeInPixels(w, &g_win_px_w, &g_win_px_h);
     static bool text_input;
     bool want_text = capturing();
     if (want_text != text_input) {
@@ -429,6 +461,61 @@ static bool toggle(const char *label, bool *v) {
     return ch;
 }
 
+#ifdef __ANDROID__
+// ---- the GPU driver (Adreno): the system's or one the player installed (GpuDrivers.java). The Vulkan driver is chosen
+// before anything is drawn, so a change applies at the next start. The Java side is asked once, and after a change.
+static std::atomic<bool> g_driver_reread{true};
+static pthread_mutex_t g_driver_lock = PTHREAD_MUTEX_INITIALIZER;
+static std::string g_driver_msg;  // the last install's result
+
+static void driver_installed(const char *err) {  // (LasActivity's install thread)
+    if (err && !err[0]) return;  // (cancelled)
+    pthread_mutex_lock(&g_driver_lock);
+    g_driver_msg = err ? std::string("Not installed: ") + err : "Installed and selected: it's used from the next start.";
+    pthread_mutex_unlock(&g_driver_lock);
+    g_driver_reread = true;
+}
+
+static void gpu_driver_rows(void) {
+    static bool supported, use;
+    static std::string name;
+    if (g_driver_reread.exchange(false)) {
+        supported = android_gpu_driver_supported();
+        const char *n = android_gpu_driver_name();
+        name = n ? n : "";
+        use = android_gpu_driver_selected();
+    }
+    opt_section("GPU driver");
+    if (!supported) {
+        opt_disable_next();
+        opt_action("GPU driver", "System", "Installed GPU drivers (such as Mesa Turnip) work on Adreno GPUs only.");
+        return;
+    }
+    const char *failed;
+    bool active = vk_gpu_driver_custom(&failed);
+    std::string d = "The Vulkan driver the game renders with. System: your device's own. An installed driver (such as "
+                    "Mesa Turnip for Adreno) can be faster or fix glitches - or be slower; one that doesn't start is "
+                    "replaced by System at the next start.\n\nChanges apply at the next start of the app. Running now: ";
+    d += active ? name : "System";
+    if (failed) d += std::string(".\n\n") + failed + " didn't start: System runs instead";
+    d += ".";
+    std::string names[2] = {"System", name};
+    if (use != active) names[use] += " (next start)";
+    const char *np[2] = {names[0].c_str(), names[1].c_str()};
+    int v = use;
+    if (name.empty()) opt_disable_next(), opt_action("GPU driver", "System", d.c_str());
+    else if (opt_choice("GPU driver", &v, np, 2, 0, d.c_str())) android_gpu_driver_select(use = v);
+
+    pthread_mutex_lock(&g_driver_lock);
+    std::string id = "Installs a driver package from your files: a .zip as other emulators use them (meta.json and the "
+                     "driver's .so), replacing the one installed before, and selects it. It's used from the next start "
+                     "of the app.";
+    if (!g_driver_msg.empty()) id += "\n\n" + g_driver_msg;
+    pthread_mutex_unlock(&g_driver_lock);
+    if (opt_action("Install driver...", "", id.c_str())) android_gpu_driver_install(driver_installed);
+}
+#endif
+
 extern "C" void renderer_get_scale(float *sx, float *sy);
 extern "C" int input_pad_family(void);  // runtime/hle/input.c
 extern "C" double output_scale_dynamic_factor(void);
@@ -499,6 +586,9 @@ static void tab_display(void) {
                "Turns off the tilt-shift blur at the top and bottom of the screen.");
     opt_toggle("Hide Hero Mode icon", &g_settings.hide_hero_icon, false,
                "Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
+#ifdef __ANDROID__
+    gpu_driver_rows();
+#endif
     opt_end();
 }
 
@@ -567,6 +657,24 @@ static void tab_quit(float scale, bool in_game) {
 }
 
 static void tab_about(void) {
+    header("Touch controls");
+    {
+        static const char *const modes[] = {"Auto (no controller)", "Always", "Off"};
+        if (choice("Show", &g_settings.touch_mode, modes, 3)) settings_save();
+        float sz = roundf(g_settings.touch_size * 100), op = roundf(g_settings.touch_opacity * 100);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Size");
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderFloat("##touch_size", &sz, 60, 160, "%.0f%%")) g_settings.touch_size = sz / 100, settings_save();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Opacity");
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderFloat("##touch_opacity", &op, 15, 100, "%.0f%%")) g_settings.touch_opacity = op / 100, settings_save();
+    }
+    hint("On-screen buttons for touch screens. The middle button at the top opens this menu.");
+    ImGui::Spacing();
     header("Movement");
     toggle("D-pad moves Link", &g_settings.dpad_move);
     toggle("360-degree movement", &g_settings.move_360);
@@ -609,6 +717,8 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font);
 extern "C" bool chaos_overlay_wanted(void);
 extern "C" void chaos_overlay_draw(ImVec2 display, ImFont *font);
 extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font);
+extern "C" bool touch_visible(void);  // touch_controls.mm
+extern "C" void touch_draw(ImDrawList *dl, float w, float h, ImFont *font);
 
 // Reboot (runtime/main.c): the game is gone - menu and name dialog close; the ImGui context stays.
 RT_ON_RESET(menu_reset) {
@@ -819,7 +929,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool trk = !open && tracker_overlay_wanted();
     bool chaos = !open && chaos_overlay_wanted();
     bool kbd = g_kbd.load() == 1;
-    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos) {
+    bool touch = !open && !kbd && touch_visible();
+    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos && !touch) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -873,6 +984,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::End();
     }
 
+    if (touch) touch_draw(ImGui::GetBackgroundDrawList(), io.DisplaySize.x, io.DisplaySize.y, g_font_big ? g_font_big : ImGui::GetFont());
     if (trk) tracker_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (chaos) chaos_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (inv) {

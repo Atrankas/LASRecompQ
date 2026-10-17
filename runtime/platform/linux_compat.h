@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/random.h>
 
+#ifdef __GLIBC__  // (Android's bionic has all of these)
 #if !__GLIBC_PREREQ(2, 38)
 static inline size_t strlcpy(char *d, const char *s, size_t n) {
     size_t len = strlen(s);
@@ -34,4 +35,5 @@ static inline uint32_t arc4random_uniform(uint32_t n) {
     do r = arc4random(); while (r < min);
     return r % n;
 }
+#endif
 #endif

@@ -69,6 +69,12 @@ static void recompute_pad(void) {
     pad_ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
 }
 
+bool input_gamepad_connected(void) { return pad != NULL; }
+// touch screens: runtime/ui/touch_controls.mm
+bool touch_handle_event(const SDL_Event *e);
+uint64_t touch_buttons(void);
+void touch_stick(int32_t *lx, int32_t *ly);
+
 // Forget held keys (the menu took focus); the gamepad is re-read on its next event.
 void input_reset(void) {
     memset(keys_down, 0, sizeof keys_down);
@@ -145,6 +151,7 @@ void input_handle_event(const SDL_Event *e) {
         if (n > 0 && !pad) { pad = SDL_OpenGamepad(ids[0]); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
         SDL_free(ids);
     }
+    if (touch_handle_event(e)) return;
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
@@ -367,7 +374,9 @@ void input_frame(uint64_t frame) {
 extern bool menu_input_captured(void);  // runtime/ui/menu.mm: overlay menu or name entry up (it has the keys / pad)
 
 // Buttons held right now (keyboard, gamepad, test script), independent of whether the game polls (movies).
-uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons) | script_buttons; }
+uint64_t input_buttons_now(void) {
+    return (menu_input_captured() ? 0 : key_buttons | pad_buttons | touch_buttons()) | script_buttons;
+}
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
@@ -403,14 +412,16 @@ static void fill_state(Cpu *c) {
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
     bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
-    uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | script_buttons;
+    uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | touch_buttons() | script_buttons;
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_present_count(void);
         static uint64_t until;
         if (g_inject_plus > 0) { until = renderer_present_count() + 10; g_inject_plus = 0; }
         if (renderer_present_count() < until) b |= 1ull << BTN_PLUS;
     }
-    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
+    int32_t tlx, tly;
+    touch_stick(&tlx, &tly);
+    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + tlx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + tly) + script_ly);
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
     extern bool mirror_input(void);  // mirror mode, the world on screen (runtime/hle/mirror.c): left and right swap
     bool mirrored = !menu && mirror_input();

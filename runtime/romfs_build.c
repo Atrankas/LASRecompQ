@@ -147,7 +147,8 @@ static bool copy_data(FILE *out, const char *path, uint64_t size, uint8_t *buf, 
     return true;
 }
 
-bool romfs_build(const char *dir, const char *out_path, void (*progress)(uint64_t, uint64_t), char *why, size_t why_size) {
+static bool build(const char *dir, const char *out_path, void (*progress)(uint64_t, uint64_t), char *why, size_t why_size,
+                  bool thin) {
     #define FAIL(...) do { if (why) snprintf(why, why_size, __VA_ARGS__); goto fail; } while (0)
     bool ok = false;
     FILE *out = NULL;
@@ -221,6 +222,7 @@ bool romfs_build(const char *dir, const char *out_path, void (*progress)(uint64_
     uint8_t hdr[DATA_START] = {0};
     uint64_t hv[10] = {0x50, dhash_off, 4ull * nbd, dmeta_off, dsize, fhash_off, 4ull * nbf, fmeta_off, fsize, DATA_START};
     memcpy(hdr, hv, sizeof hv);
+    if (thin) memcpy(hdr + ROMFS_THIN_AT, ROMFS_THIN_MAGIC, 8);
 
     out = fopen(out_path, "wb");
     if (!out) FAIL("can't write %s", out_path);
@@ -229,7 +231,12 @@ bool romfs_build(const char *dir, const char *out_path, void (*progress)(uint64_
     buf = malloc(bufsize);
     uint64_t pos = 0, done = 0;
     static const uint8_t zero[16];
-    for (int i = 0; i < l.nf; i++) {
+    if (thin) {  // the data region stays a hole: the tables go where they belong, the file is sparse
+        if (fseeko(out, (off_t)dhash_off, SEEK_SET) != 0) FAIL("write failed");
+        pos = dhash_off - DATA_START;
+        if (progress) progress(total, total);
+    }
+    for (int i = 0; i < l.nf && !thin; i++) {
         File *f = l.files[i];
         if (f->data_off > pos && fwrite(zero, 1, (size_t)(f->data_off - pos), out) != f->data_off - pos)
             FAIL("write failed (disk full?)");
@@ -251,6 +258,14 @@ fail:
     free_tree(root);
     return ok;
     #undef FAIL
+}
+
+bool romfs_build(const char *dir, const char *out_path, void (*progress)(uint64_t, uint64_t), char *why, size_t why_size) {
+    return build(dir, out_path, progress, why, why_size, false);
+}
+
+bool romfs_build_thin(const char *dir, const char *out_path, char *why, size_t why_size) {
+    return build(dir, out_path, NULL, why, why_size, true);
 }
 
 // ------------------------------------------------------------------ copying the player's folder

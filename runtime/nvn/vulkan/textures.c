@@ -9,6 +9,7 @@
 
 #include "vk.h"
 #include "../astc.h"
+#include "../bcn.h"
 #include "../renderer.h"
 #include "../texpatch.h"
 
@@ -295,10 +296,24 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     VkFormat vf = mf.vf;
     VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     b->astc_bw = b->astc_bh = 0;
+    b->bcn = BCN_NONE;
     if (!format_supports(vf, need)) {
         bool astc = vf >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && vf <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK;
         const FormatInfo *fi = t->layout.fmt;
-        if (astc && fi && fi->bpb == 16) {  // desktop GPUs: decoded on the CPU into an RGBA8 image of the same colour space
+        // BC on GPUs without it (phones): decoded on the CPU, into the uncompressed format with the same channels
+        static const struct { VkFormat bc, out; uint8_t kind; } BC[] = {
+            {VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_R8G8B8A8_UNORM, BCN_1}, {VK_FORMAT_BC1_RGBA_SRGB_BLOCK, VK_FORMAT_R8G8B8A8_SRGB, BCN_1},
+            {VK_FORMAT_BC2_UNORM_BLOCK, VK_FORMAT_R8G8B8A8_UNORM, BCN_2}, {VK_FORMAT_BC2_SRGB_BLOCK, VK_FORMAT_R8G8B8A8_SRGB, BCN_2},
+            {VK_FORMAT_BC3_UNORM_BLOCK, VK_FORMAT_R8G8B8A8_UNORM, BCN_3}, {VK_FORMAT_BC3_SRGB_BLOCK, VK_FORMAT_R8G8B8A8_SRGB, BCN_3},
+            {VK_FORMAT_BC4_UNORM_BLOCK, VK_FORMAT_R8_UNORM, BCN_4U}, {VK_FORMAT_BC4_SNORM_BLOCK, VK_FORMAT_R8_SNORM, BCN_4S},
+            {VK_FORMAT_BC5_UNORM_BLOCK, VK_FORMAT_R8G8_UNORM, BCN_5U}, {VK_FORMAT_BC5_SNORM_BLOCK, VK_FORMAT_R8G8_SNORM, BCN_5S},
+            {VK_FORMAT_BC6H_SFLOAT_BLOCK, VK_FORMAT_R16G16B16A16_SFLOAT, BCN_6HS},
+            {VK_FORMAT_BC6H_UFLOAT_BLOCK, VK_FORMAT_R16G16B16A16_SFLOAT, BCN_6HU},
+            {VK_FORMAT_BC7_UNORM_BLOCK, VK_FORMAT_R8G8B8A8_UNORM, BCN_7}, {VK_FORMAT_BC7_SRGB_BLOCK, VK_FORMAT_R8G8B8A8_SRGB, BCN_7}};
+        for (size_t i = 0; i < sizeof BC / sizeof *BC; i++)
+            if (BC[i].bc == vf) b->bcn = BC[i].kind, vf = BC[i].out;
+        if (b->bcn) {
+        } else if (astc && fi && fi->bpb == 16) {  // desktop GPUs: decoded on the CPU into an RGBA8 image of the same colour space
             b->astc_bw = fi->bw;
             b->astc_bh = fi->bh;
             b->astc_srgb = t->format >= 0x87;
@@ -535,7 +550,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (b->tp > 0) b->tp_gen = texpatch_generation();
     b->data_hash = h;
     b->uploaded = true;
-    if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
+    if (b->format != mf.vf && !b->astc_bw && !b->bcn) return;  // unsupported format: nothing sensible to copy
     VkCommandBuffer cb = vk_upload_cmd();
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     if (layers > b->layers && b->depth == 1) layers = b->layers;
@@ -545,14 +560,16 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     for (uint32_t layer = 0; layer < layers; layer++) {
         for (uint32_t lv = 0; lv < levels; lv++) {
             LevelLayout l = tegra_level(&t->layout, lv);
-            if (b->astc_bw) {  // blocks -> linear block rows -> RGBA8 texels
+            if (b->astc_bw || b->bcn) {  // blocks -> linear block rows -> uncompressed texels
                 const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
-                uint8_t *blocks = malloc((uint64_t)l.wb * l.hb * 16);
-                if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * 16, src + (uint64_t)y * t->stride, l.wb * 16);
-                else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
-                if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, blocks, l.w, l.h, l.wb * 16);
-                VkSpan s = vk_transient((uint64_t)l.w * l.h * 4, 16);
-                astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
+                uint32_t bb = b->bcn ? (uint32_t)bcn_block_bytes(b->bcn) : 16, tb = b->bcn ? (uint32_t)bcn_texel_bytes(b->bcn) : 4;
+                uint8_t *blocks = malloc((uint64_t)l.wb * l.hb * bb);
+                if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * bb, src + (uint64_t)y * t->stride, l.wb * bb);
+                else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, bb, l.block_height_log2, l.block_depth_log2);
+                if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, blocks, l.w, l.h, l.wb * bb);
+                VkSpan s = vk_transient((uint64_t)l.w * l.h * tb, 16);
+                if (b->bcn) bcn_decode(b->bcn, blocks, l.w, l.h, s.ptr);
+                else astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
                 free(blocks);
                 VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = l.w, .bufferImageHeight = l.h,
                                         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, layer, 1},
