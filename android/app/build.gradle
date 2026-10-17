@@ -89,7 +89,7 @@ android {
 }
 
 // What the app ships besides code (runtime/paths.c android_resources): the start screen font and the icon
-tasks.register('lasAssets', Copy) {
+tasks.register('lasAssets', Sync) {  // (Sync: a file gone from the sources goes from the APK too)
     from('../../third_party/fonts/Baloo2/Baloo2-SemiBold.ttf')
     from('../../third_party/fonts/DejaVu/DejaVuSans.ttf')  // (the game text's font without the user's Switch fonts)
     from('../../docs/icon/icon_1024.png') { rename { 'icon.png' } }
