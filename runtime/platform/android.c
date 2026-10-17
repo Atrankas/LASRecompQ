@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,7 @@ void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/cr
 #endif
 
 // ---- guest address space
+#include "../rt.h"
 // As on Linux: everything readable/writable from the start, untouched pages cost nothing (MAP_NORESERVE).
 bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     void *p = mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE,
@@ -45,11 +47,65 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi) {
                 -1, 0) == (void *)(uintptr_t)lo;
 }
 
-void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
-int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page) {  // (no write tracking)
-    (void)addr; (void)size; (void)pages; (void)max; (void)page;
-    return -1;
+// Page write tracking for the guest heap (the renderer's vertex cache and texture checks: plat_written_pages), by
+// write protection: a query reports the range's pages written since the last one (or never asked about), marks them
+// clean and makes the range read-only; the first write to a page then faults, and the handler marks it written and
+// gives the page its write access back. The OS writing into guest memory (file reads) comes through plat_commit first.
+// LARECOMP_WRITE_TRACKING=0: none (every range counts as written).
+enum { WT_UNTRACKED = 0, WT_CLEAN = 1, WT_WRITTEN = 2 };
+static _Atomic uint8_t *wt_state;  // per heap page
+static int wt_on = -1;
+#define WT_PAGE 4096ull
+
+static bool wt_init(void) {
+    if (wt_on < 0) {
+        const char *e = getenv("LARECOMP_WRITE_TRACKING");
+        wt_on = (!e || atoi(e)) && sysconf(_SC_PAGESIZE) == (long)WT_PAGE;
+        if (wt_on) wt_state = calloc(HEAP_MAX / WT_PAGE, 1);
+        if (!wt_state) wt_on = 0;
+    }
+    return wt_on;
+}
+
+static bool wt_range(uint64_t addr, uint64_t size, uint64_t *p0, uint64_t *p1) {
+    if (!size || addr < HEAP_BASE || addr - HEAP_BASE >= HEAP_MAX) return false;
+    uint64_t end = addr + size - HEAP_BASE;
+    if (end > HEAP_MAX) end = HEAP_MAX;
+    *p0 = (addr - HEAP_BASE) / WT_PAGE, *p1 = (end + WT_PAGE - 1) / WT_PAGE;
+    return true;
+}
+
+int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page) {
+    *page = WT_PAGE;
+    uint64_t p0, p1;
+    if (!wt_init() || !wt_range(addr, size, &p0, &p1)) return -1;
+    int n = 0;
+    for (uint64_t p = p0; p < p1; p++) {  // (clean first, then protected: a write in between lands before the copy)
+        if (atomic_exchange(&wt_state[p], WT_CLEAN) == WT_CLEAN) continue;
+        if (n < max) pages[n] = HEAP_BASE + p * WT_PAGE;
+        n++;
+    }
+    mprotect((void *)(uintptr_t)(HEAP_BASE + p0 * WT_PAGE), (p1 - p0) * WT_PAGE, PROT_READ);
+    return n > max ? max : n;
+}
+
+// A write fault in the heap (the only faults there are ours): page written, writable again. Signal handler.
+static bool wt_fault(uint64_t fa) {
+    if (wt_on <= 0 || fa < HEAP_BASE || fa - HEAP_BASE >= HEAP_MAX) return false;
+    uint64_t p = (fa - HEAP_BASE) / WT_PAGE;
+    atomic_store(&wt_state[p], WT_WRITTEN);
+    return mprotect((void *)(uintptr_t)(HEAP_BASE + p * WT_PAGE), WT_PAGE, PROT_READ | PROT_WRITE) == 0;
+}
+
+// (the OS is about to write [addr, addr + size): a read-only page would make the call fail rather than fault)
+void plat_commit(uint64_t addr, uint64_t size) {
+    uint64_t p0, p1;
+    if (wt_on <= 0 || !wt_range(addr, size, &p0, &p1)) return;
+    bool any = false;
+    for (uint64_t p = p0; p < p1; p++)
+        if (atomic_exchange(&wt_state[p], WT_WRITTEN) == WT_CLEAN) any = true;
+    if (any) mprotect((void *)(uintptr_t)(HEAP_BASE + p0 * WT_PAGE), (p1 - p0) * WT_PAGE, PROT_READ | PROT_WRITE);
 }
 
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
@@ -198,6 +254,7 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     if (sig == SIGABRT && depth++ > 0) { signal(SIGABRT, SIG_DFL); abort(); }  // (nested: just die)
     uint64_t fa = (uint64_t)(uintptr_t)si->si_addr;
     uint64_t pc = uc->uc_mcontext.pc, lr = uc->uc_mcontext.regs[30];
+    if (sig == SIGSEGV && si->si_code == SEGV_ACCERR && wt_fault(fa)) return;
     if (rt_fault_watch(fa, pc)) return;
     char what[32];
     snprintf(what, sizeof what, "signal %d", sig);
@@ -258,11 +315,15 @@ static void core_scan(void) {
     for (int i = 0; i < n; i++) if (freq[i] < best && freq[i] > second) second = freq[i];
     for (int i = 0; i < n; i++) ntop += freq[i] == best, nsecond += freq[i] == second;
     const char *e = getenv("LARECOMP_AFFINITY");
-    if ((e && !atoi(e)) || ntop != 1 || !nsecond) return;  // (no single fastest core: nothing to do)
+    if ((e && !strcmp(e, "0")) || ntop != 1 || !nsecond) return;  // (no single fastest core: nothing to do)
     for (int r = 0; r < 3; r++) CPU_ZERO(&g_core_sets[r]);
+    // LARECOMP_AFFINITY=render: the render thread gets the fastest core (when it is the busier one); =big: both on
+    // every big core, the scheduler choosing
+    int mode = e && !strcmp(e, "render") ? 1 : e && !strcmp(e, "big") ? 2 : 0;
     for (int i = 0; i < n; i++) {
-        if (i == top) CPU_SET(i, &g_core_sets[PLAT_CORE_MAIN]);
-        if (freq[i] == second) CPU_SET(i, &g_core_sets[PLAT_CORE_RENDER]);
+        bool fast = i == top, big = freq[i] == second;
+        if (mode == 2 ? fast || big : mode == 1 ? big : fast) CPU_SET(i, &g_core_sets[PLAT_CORE_MAIN]);
+        if (mode == 2 ? fast || big : mode == 1 ? fast : big) CPU_SET(i, &g_core_sets[PLAT_CORE_RENDER]);
         if (i != top) CPU_SET(i, &g_core_sets[PLAT_CORE_OTHER]);
     }
     g_core_on = true;

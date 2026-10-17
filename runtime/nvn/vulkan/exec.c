@@ -2789,9 +2789,10 @@ static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
             vc_on = 0;
         }
     }
-    if (!vc_on || !gmem_buf || size > VC_MAX_RANGE) return false;
+    // (without the heap import - phones - the cache is filled from guest memory by the CPU: vc_flush)
+    if (!vc_on || (!gmem_buf && !vk_gmem_mirror()) || size > VC_MAX_RANGE) return false;
     uint64_t lo = (addr - HEAP_BASE) & ~(VC_PAGE - 1), hi = (addr - HEAP_BASE + size + VC_PAGE - 1) & ~(VC_PAGE - 1);
-    if (hi > gmem_size) return false;
+    if (hi > (gmem_buf ? gmem_size : HEAP_MAX)) return false;
     uint64_t pend = vk_pending_seq();
     uint64_t h = (lo * 0x9E3779B97F4A7C15ull) ^ (hi * 0xC2B2AE3D27D4EB4Full);
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (VC_TAB - 1), free_slot = ~0u, old_slot = ~0u;
@@ -2879,7 +2880,14 @@ void vc_flush(void) {
             if (nc == 64) { nc = 1; cp[0] = (VkBufferCopy){e->lo, 0, e->hi - e->lo}; break; }  // (scattered: the whole range)
             cp[nc++] = (VkBufferCopy){o, o - e->lo, VC_PAGE};
         }
-        if (nc) {
+        if (nc && !gmem_buf) {  // (no heap import: the written pages through the transient ring)
+            for (int k = 0; k < nc; k++) {
+                VkSpan sp = vk_transient_copy((const void *)(uintptr_t)(HEAP_BASE + cp[k].srcOffset), cp[k].size, 16);
+                cp[k].srcOffset = sp.off;
+                vkCmdCopyBuffer(cb, sp.buf, e->buf, 1, &cp[k]);
+                prof_vc_copied += cp[k].size;
+            }
+        } else if (nc) {
             vkCmdCopyBuffer(cb, gmem_buf, e->buf, (uint32_t)nc, cp);
             for (int k = 0; k < nc; k++) prof_vc_copied += cp[k].size;
         }
@@ -2897,7 +2905,8 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < HEAP_BASE) return false;
     if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
-    if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return mirror_direct(addr, size, buf, off);
+    if (!gmem_buf) return mirror_direct(addr, size, buf, off) || vcache_lookup(addr, size, buf, off);
+    if (addr + size > HEAP_BASE + gmem_size) return false;
     if (vcache_lookup(addr, size, buf, off)) return true;
     *buf = gmem_buf;
     *off = addr - HEAP_BASE;
