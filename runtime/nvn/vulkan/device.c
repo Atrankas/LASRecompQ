@@ -970,6 +970,8 @@ void backend_present(NvnTexture *t) {
 }
 
 void backend_present_gpu(NvnTexture *t) {
+    extern void vk_pass_gpu_report(void);
+    vk_pass_gpu_report();  // (LARECOMP_VK_PASS_GPU: exec.c)
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
@@ -988,10 +990,15 @@ void backend_present_gpu(NvnTexture *t) {
         widescreen_frame_end(total_frames);
         extern void widescreen_set_factor(float f);
         extern bool widescreen_allowed(void);
-        // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution");
-        // no GPU timer here (-1): dynamic resolution goes by the frame time
+        // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution")
         OutScale os;
-        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, -1, &os);
+        // the GPU's time for the frame (the fence watcher's sum: exec.c), for dynamic resolution
+        extern _Atomic uint64_t g_gpu_busy_ns;
+        static uint64_t last_gb;
+        uint64_t gb = atomic_load(&g_gpu_busy_ns);
+        double gpu_ms = gb && last_gb ? (gb - last_gb) / 1e6 : -1;
+        last_gb = gb;
+        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, gpu_ms, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
         extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);

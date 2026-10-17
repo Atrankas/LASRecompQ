@@ -89,14 +89,15 @@ if [ ! -f "$P/lib/libshaderc_combined.a" ]; then
     rm -rf "$W/shaderc"  # (~1 GB of sources and objects)
 fi
 # Mesa Turnip (MIT), the Vulkan 1.3 driver the app carries for Adreno 6xx / 7xx phones whose own driver is older (the
-# Galaxy S20 FE's is 1.1). K11MCH1's 24.1.0 R18 a6xx build: on the S20 FE (Adreno 650) the newer ones tried hung the
-# GPU now and then (Mesa main 26.3.0-20261013: ~1 run in 8 of the overworld, kgsl "GPU hang detected" between frames;
-# 25.3.0 R11: device lost at the title) while this one ran 24 of 24 - slower to record for (the overworld: 20 fps
-# instead of 30 at the same settings). Players can install another from the Video settings.
-TURNIP=Turnip-24.1.0.adpkg_R18.a6xx.zip
+# Galaxy S20 FE's is 1.1). K11MCH1's 24.3.0 R9v2 build: on the S20 FE (Adreno 650) it ran 28 of 28 test runs clean and
+# draws the overworld at native resolution in 24 ms of GPU time a frame, where 24.1.0 R18 (bundled before) took 35;
+# newer ones hung the GPU now and then (Mesa main 26.3.0-20261013: ~1 run in 8 of the overworld, kgsl "GPU hang
+# detected" between frames, also with TU_DEBUG=noubwc; 25.3.0 R11: device lost at the title). Players can install
+# another from the Video settings.
+TURNIP=turnip_v24.3.0_R9v2.zip
 if [ ! -f "$P/turnip/meta.json" ] || [ "$(cat "$P/turnip.zip.name" 2>/dev/null)" != "$TURNIP" ]; then
-    fetch https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v24.1.0_R18/$TURNIP \
-          073f0f56a375dc3f92bd63ab240e3b61e7f7c99904548d949f4565faf50e556b $TURNIP
+    fetch https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v24.3.0_r9/$TURNIP \
+          8a781186ed96d7f9b1620ae4caa508eb121b78af4b3777f0907dada34ce6714a $TURNIP
     rm -rf "$P/turnip" && mkdir -p "$P/turnip" && unzip -o -q "$S/$TURNIP" -d "$P/turnip" && echo "$TURNIP" > "$P/turnip.zip.name"
 fi
 echo "deps: $P"

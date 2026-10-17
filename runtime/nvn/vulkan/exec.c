@@ -277,14 +277,14 @@ void vk_pace_frame(void) {
     bool first = !last;
     last = now, last_wait = w, last_gpu = gb;
     if (first || p > 100000000ull) return;  // (loading, a hitch: not a pace)
-    double busy = (p > wt ? p - wt : 0) / 1e6;
+    double busy = (p > wt ? p - wt : 0) / 1e6, game_busy = busy, render_busy = 0;
     // with a render thread, the game's thread waits for it in its present (blocked time): its busy time counts too -
     // otherwise a frame the render thread can't keep up with looks like headroom, the game takes its 60 fps mode and
     // plays in slow motion until we're back in 30 (the mode flapping every few seconds). And the GPU's (fences: the
     // watcher's sum), whose waits are blocked time for both threads
     extern _Atomic uint64_t g_render_frame_busy_ns;
     if (gt_on()) {
-        double rb = atomic_load(&g_render_frame_busy_ns) / 1e6;
+        double rb = render_busy = atomic_load(&g_render_frame_busy_ns) / 1e6;
         if (rb > busy) busy = rb;
     }
     if (gpu && gpu / 1e6 > busy) busy = gpu / 1e6;
@@ -293,7 +293,8 @@ void vk_pace_frame(void) {
     static int log = -1;  // LARECOMP_LOG_PACE=1: each frame's period, vsync wait and busy time
     if (log < 0) log = getenv("LARECOMP_LOG_PACE") != NULL;
     extern uint32_t g_game_interval;  // (runtime/hle/framepace.c)
-    if (log) LOG("[pace] period %.2f blocked %.2f gpu %.2f busy %.2f ms, interval %u\n", p / 1e6, wt / 1e6, gpu / 1e6, busy, g_game_interval);
+    if (log) LOG("[pace] period %.2f blocked %.2f gpu %.2f busy %.2f ms (game %.2f, render %.2f), interval %u\n", p / 1e6, wt / 1e6,
+                 gpu / 1e6, busy, game_busy, render_busy, g_game_interval);
     // over: busy past a 60 fps frame - or, in the game's 60 fps mode, a frame that came late whatever held it up
     int o = busy > 16.2 || (g_game_interval == 1 && p > 20000000ull);
     stat_pace_over += o;
@@ -326,7 +327,9 @@ void vk_pace_frame(void) {
 
 // a pair's end counter (the 16 bytes after its start) is at least PACE_SLOW_NS after it while pace_slow
 static uint64_t pace_end_counter(const uint64_t *start_entry, const uint64_t *entry, uint64_t value) {
-    if (!pace_slow || !start_entry || (const uint8_t *)entry - (const uint8_t *)start_entry != 16) return value;
+    static int stretch = -1;  // LARECOMP_PACE_STRETCH=0: the counters' real times
+    if (stretch < 0) stretch = !getenv("LARECOMP_PACE_STRETCH") || atoi(getenv("LARECOMP_PACE_STRETCH")) != 0;
+    if (!stretch || !pace_slow || !start_entry || (const uint8_t *)entry - (const uint8_t *)start_entry != 16) return value;
     uint64_t min = start_entry[1] + ns_to_gpu_ticks(PACE_SLOW_NS);
     return value < min ? min : value;
 }
@@ -983,6 +986,7 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
     last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_draws = cum_draws; l_subs = cum_submits;
 }
 
+static uint64_t stat_set_hits;  // (stage_set: sets reused)
 const char *renderer_stats(void) {
     static int dumps;
     if (dumps++ < 3) {
@@ -991,11 +995,12 @@ const char *renderer_stats(void) {
         LOG("\n");
     }
     snprintf(stats_text, sizeof stats_text,
-             "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB",
+             "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB, sets reused %llu",
              (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
-             atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0);
-    stat_feedback_copies = stat_upload_bytes = 0;
+             atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0,
+             (unsigned long long)stat_set_hits);
+    stat_feedback_copies = stat_upload_bytes = stat_set_hits = 0;
     {
         extern void vk_alias_stats(void);
         vk_alias_stats();
@@ -1096,12 +1101,11 @@ static int debug_pass_no;
 // state and vertex / index buffer binds are not recorded again (a draw used to issue ~20 vkCmd* calls; most repeat the
 // previous draw's). Forgotten (ss_forget) whenever something else may have recorded state: a new command buffer, a new
 // render pass (present, ImGui, post-processing and copies all run between game passes) and the clear pipeline.
-// Descriptor sets are not filtered: every draw writes new ones (sharing identical sets within a submission was tried:
-// a third matched, but comparing them cost more than allocating and writing them on NVIDIA).
+// Descriptor sets: an identical one written earlier in the submission is reused (stage_set) and not bound again.
 // LARECOMP_VK_STATE_FILTER=0: every draw sets everything, as before.
 enum { SS_PIPE = 1 << 0, SS_DT = 1 << 1, SS_DW = 1 << 2, SS_DOP = 1 << 3, SS_STEN = 1 << 4, SS_SFACE0 = 1 << 5, SS_SFACE1 = 1 << 6,
        SS_BC = 1 << 7, SS_CULL = 1 << 8, SS_FF = 1 << 9, SS_TOPO = 1 << 10, SS_PRE = 1 << 11, SS_DBE = 1 << 12, SS_DB = 1 << 13,
-       SS_VP = 1 << 14, SS_SC = 1 << 15, SS_IB = 1 << 16 };
+       SS_VP = 1 << 14, SS_SC = 1 << 15, SS_IB = 1 << 16, SS_DS = 1 << 17 };
 static struct {
     uint32_t known;  // SS_* bits: the value below is what the command buffer has
     uint32_t vb_known;  // per vertex binding
@@ -1117,6 +1121,7 @@ static struct {
     VkRect2D sc;
     VkBuffer ib; VkDeviceSize io; VkIndexType it;
     VkBuffer vb[17]; VkDeviceSize vo[17];
+    VkDescriptorSet ds[2];
 } ss;
 static int ss_on = -1;
 static void ss_forget(void) { ss.known = 0; ss.vb_known = 0; }
@@ -1131,6 +1136,52 @@ static inline bool ss_need(uint32_t bit, bool same) {
     return true;
 }
 
+// ---- GPU time per pass (LARECOMP_VK_PASS_GPU=<frame>): that frame's passes and dispatches get a timestamp each before
+// they start and after they end; a few frames later the times between them, largest first, by what they were.
+#define PG_MAX 1024
+static VkQueryPool pg_qp;
+static int pg_n, pg_state;  // marks written; 0 not yet, 1 recording the frame, 2 waiting for it, 3 done
+static uint64_t pg_frame, pg_draws0;
+static char pg_what[PG_MAX][112];
+uint64_t renderer_present_count(void);
+static void pg_mark(VkCommandBuffer cb, const char *fmt, ...) {
+    if (pg_state == 0) {
+        static long at = -1;
+        if (at < 0) at = getenv("LARECOMP_VK_PASS_GPU") ? atol(getenv("LARECOMP_VK_PASS_GPU")) : 0;
+        if (!at || renderer_present_count() != (uint64_t)at) return;
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = PG_MAX};
+        if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &pg_qp) != VK_SUCCESS) { pg_state = 3; return; }
+        vkCmdResetQueryPool(cb, pg_qp, 0, PG_MAX);
+        pg_state = 1, pg_frame = (uint64_t)at, pg_n = 0;
+    }
+    if (pg_state != 1) return;
+    if (renderer_present_count() != pg_frame) { pg_state = 2; return; }
+    if (pg_n >= PG_MAX) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(pg_what[pg_n], sizeof pg_what[0], fmt, ap);
+    va_end(ap);
+    vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pg_qp, (uint32_t)pg_n++);
+}
+static void pg_report(void) {  // (present: the frame's GPU work is done a few frames later)
+    if (pg_state == 1 && renderer_present_count() != pg_frame) pg_state = 2;
+    if (pg_state != 2 || renderer_present_count() < pg_frame + 4 || pg_n < 2) return;
+    pg_state = 3;
+    static uint64_t t[PG_MAX];
+    if (vkGetQueryPoolResults(g_vk.dev, pg_qp, 0, (uint32_t)pg_n, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS) return;
+    double per = g_vk.props.limits.timestampPeriod / 1e6, total = (t[pg_n - 1] - t[0]) * per;
+    int order[PG_MAX];
+    for (int i = 0; i < pg_n - 1; i++) order[i] = i;
+    for (int i = 0; i < pg_n - 1; i++)  // (largest first)
+        for (int j = i + 1; j < pg_n - 1; j++)
+            if (t[order[j] + 1] - t[order[j]] > t[order[i] + 1] - t[order[i]]) { int x = order[i]; order[i] = order[j]; order[j] = x; }
+    LOG("[passgpu] frame %llu: %d marks, %.2f ms first to last\n", (unsigned long long)pg_frame, pg_n, total);
+    for (int i = 0; i < pg_n - 1 && i < 40; i++)
+        LOG("[passgpu] %6.3f ms  #%d %s\n", (t[order[i] + 1] - t[order[i]]) * per, order[i], pg_what[order[i]]);
+}
+
+void vk_pass_gpu_report(void) { pg_report(); }  // (device.c, each present on the render thread)
+
 static void vk_end_pass_at(int line);
 void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
@@ -1139,6 +1190,7 @@ static void vk_end_pass_at(int line) {
     if (prof && line < 4096) prof_end_line[line]++;
     vkCmdEndRendering(vk_cmd());
     in_pass = false;
+    if (pg_state == 1) pg_mark(vk_cmd(), "(after pass, %llu draws in it; ended at line %d)", (unsigned long long)(stat_draws - pg_draws0), line);
     if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
@@ -1265,6 +1317,9 @@ static void begin_pass(void) {
         else LOG(", no depth / stencil");
         LOG(", samples %u\n", pass_samples);
     }
+    pg_mark(cb, "pass %ux%u, %u color (fmt %d), depth fmt %d, load %s", minw, minh, pass_ncolor, pass_ncolor ? pass_color[0] : 0,
+            has_d ? pass_depth : 0, pass_ncolor && ca[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? "clear" : "load");
+    pg_draws0 = stat_draws;
     vkCmdBeginRendering(cb, &ri);
     ss_forget();  // (whatever ran between the passes may have set its own state)
     in_pass = true;
@@ -2768,7 +2823,15 @@ static bool mirror_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
         MirSlot *m = &mir_slot[k];
         if (m->used && m->lo <= addr && addr + size <= m->hi) {
             *buf = mir_buf, *off = m->off + (addr - m->lo);
-            m->last_use = vk_pending_seq();
+            uint64_t pending = vk_pending_seq();
+            m->last_use = pending;
+            // what the CPU wrote there too, as for a shader's reads (mirror_table): a vertex buffer the game fills
+            // partly on the CPU, partly by compute (Madam MeowMeow's little chain chomps were torn into white wedges)
+            if (m->gpu_seq < pending) {
+                pthread_mutex_lock(&mir_lock);  // (base: merges elsewhere)
+                mirror_cpu_changes(m, vk_upload_cmd());
+                pthread_mutex_unlock(&mir_lock);
+            }
             hit = true;
         }
     }
@@ -3097,9 +3160,12 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
 // viewport decision), or NULL.
 static float g_mirror_w;  // mirror mode's composite: its render target width (rscale[65].x; 0 otherwise)
 
+// descriptor sets written in the pending submission, by a hash of their writes (stage_set)
+#define SET_CACHE 1024
+static struct { uint64_t key, seq; VkDescriptorSet set; } set_cache[SET_CACHE];
+
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,
                                  const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii) {
-    VkDescriptorSet ds = vk_alloc_set(layout);
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
     VkDescriptorImageInfo ii[MAX_BIND];
@@ -3118,7 +3184,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
         if (b->set != set) continue;
-        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
+        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) {
             int ti = (int)b->binding - 32;
@@ -3147,7 +3213,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         VkBindingInfo *b = &p->binds[i];
         if (b->set != set || b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
             (b->binding != 18 && b->binding != 19 && b->binding != GMAP_BUFFER_INDEX)) continue;
-        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
+        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->binding == GMAP_BUFFER_INDEX) {  // (compute) this dispatch's fast-copy table: gfast_prepare
             uint32_t mt[(GMAP_MAX + 1) * 4];
@@ -3163,7 +3229,30 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         w[n].pBufferInfo = &bi[n];
         n++;
     }
+    // The same set again in this submission (same layout, same buffers / views / samplers): the one written then -
+    // allocating and writing sets is a large part of a draw on phones (Turnip copies each descriptor into its pool),
+    // and an unchanged set isn't bound again (draw_). LARECOMP_VK_SET_CACHE=0: a new set every time.
+    static int cache = -1;
+    if (cache < 0) cache = !getenv("LARECOMP_VK_SET_CACHE") || atoi(getenv("LARECOMP_VK_SET_CACHE")) != 0;
+    uint64_t h = 0, seq = 0;
+    uint32_t slot = 0;
+    if (cache) {
+        h = hash_words(0x51ed27, &layout, sizeof layout);
+        for (int i = 0; i < n; i++) {
+            uint64_t a[4] = {w[i].dstBinding | (uint64_t)w[i].descriptorType << 32, 0, 0, 0};
+            if (w[i].pImageInfo) a[1] = (uint64_t)w[i].pImageInfo->sampler, a[2] = (uint64_t)w[i].pImageInfo->imageView, a[3] = w[i].pImageInfo->imageLayout;
+            else a[1] = (uint64_t)w[i].pBufferInfo->buffer, a[2] = w[i].pBufferInfo->offset, a[3] = w[i].pBufferInfo->range;
+            h = hash_words(h, a, sizeof a);
+        }
+        h |= 1;
+        seq = vk_pending_seq();
+        slot = (uint32_t)(h ^ (h >> 29)) & (SET_CACHE - 1);
+        if (set_cache[slot].key == h && set_cache[slot].seq == seq) { stat_set_hits++; return set_cache[slot].set; }
+    }
+    VkDescriptorSet ds = vk_alloc_set(layout);
+    for (int i = 0; i < n; i++) w[i].dstSet = ds;
     if (n) vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL);
+    if (cache) set_cache[slot].key = h, set_cache[slot].seq = seq, set_cache[slot].set = ds;
     return ds;
 }
 
@@ -3282,7 +3371,10 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             cp->si->uses_gmem_store ? " (stores)" : "");
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
+    pg_mark(cb, "dispatch %ux%ux%u cs %llx%s", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr,
+            cp->si->uses_gmem_store ? " (stores)" : "");
     vkCmdDispatch(cb, gx, gy, gz);
+    pg_mark(cb, "(after dispatch)");
     if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) {
         if (vk_gmem_mirror()) mirror_after_dispatch(cb);  // (its slots: readbacks; read by what follows)
         else gfast_finish(cb);
@@ -3641,7 +3733,14 @@ static void draw_(CmdRec *r, bool indexed) {
     VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii);
     if (prof) prof_sets += SDL_GetTicksNS() - prof_t1_;
     VkDescriptorSet sets[2] = {vset, fset};
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, 0, NULL);  // (always new sets)
+    {   // (only what changed: equal handles are sets of this Prog's own layouts - stage_set's cache)
+        bool k0 = ss_on && (ss.known & SS_DS) && ss.ds[0] == vset, k1 = k0 && ss.ds[1] == fset;
+        if (!k1) {
+            uint32_t first_set = k0 ? 1 : 0;
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, first_set, 2 - first_set, sets + first_set, 0, NULL);
+            ss.ds[0] = vset, ss.ds[1] = fset, ss.known |= SS_DS;
+        }
+    }
     if (pr->vi->uses_gmem_store) vc_mark_sbufs(0);
     if (pr->fi->uses_gmem_store) vc_mark_sbufs(1);
 
@@ -3671,6 +3770,24 @@ static void draw_(CmdRec *r, bool indexed) {
         inst = (uint32_t)r->x[6] ? (uint32_t)r->x[6] : 1;
         const void *src = (const void *)(uintptr_t)iaddr;
         uint32_t restart = st.prim_restart ? st.restart_index : 0xFFFFFFFFu;
+        if (st.prim_restart && itype != 0 && getenv("LARECOMP_LOG_RESTART")) {  // (debug) restart indices Vulkan won't see
+            uint32_t isz = itype == 1 ? 2 : 4, vkr = isz == 2 ? 0xFFFF : 0xFFFFFFFFu, hits = 0;
+            for (uint32_t i = 0; i < count; i++) {
+                uint32_t v = isz == 2 ? ((const uint16_t *)src)[i] : ((const uint32_t *)src)[i];
+                if (v == (isz == 2 ? (restart & 0xFFFF) : restart)) hits++;
+            }
+            bool strip = mode == 3 || mode == 5;
+            if (hits && (!strip || (isz == 2 ? (restart & 0xFFFF) : restart) != vkr || !native)) {
+                static uint64_t told[64]; static int nt;
+                uint64_t key = (uint64_t)mode << 40 | (uint64_t)isz << 36 | restart, seen = 0;
+                for (int i = 0; i < nt; i++) seen |= told[i] == key;
+                if (!seen && nt < 64) {
+                    told[nt++] = key;
+                    LOG("[restart] mode %d, %u-bit indices, restart %#x (%u in %u indices), native %d, fs hash %016llx\n", mode, isz * 8,
+                        restart, hits, count, native, (unsigned long long)g_cur_fs_hash);
+                }
+            }
+        }
         if (native && itype != 0) {
             uint32_t isz = itype == 1 ? 2 : 4;
             itype_vk = itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
@@ -3774,6 +3891,7 @@ static void draw_(CmdRec *r, bool indexed) {
             if (run_gold[ri]) pot_gold_tint(rtint);
             VkDescriptorSet rset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, rtint, 0, 0, 0, fii);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, 0, NULL);
+            ss.ds[1] = rset;
         }
         if (!use_index) vkCmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else vkCmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);

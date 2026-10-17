@@ -30,7 +30,7 @@ Settings g_settings = {
     .touch_opacity = 0.6f,
     .touch_size = 1.0f,
 #ifdef __ANDROID__
-    .res_mode = RES_DYNAMIC,  // (phones: 50-75% of the display as the frame rate allows, Snapdragon GSR up to it)
+    .res_mode = RES_DYNAMIC,  // (phones: the display's resolution, down to 50% while the GPU can't hold 30 fps)
 #endif
 };
 

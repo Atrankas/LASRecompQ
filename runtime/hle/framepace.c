@@ -75,14 +75,8 @@ uint32_t rt_interval_choice(uint32_t v, uint64_t obj, uint64_t gpu, uint64_t cpu
     if (log < 0) log = ENV("LARECOMP_LOG_INTERVAL") != NULL;
     uint32_t lo = LD8(obj + 0x4e2), hi = LD8(obj + 0x4e3), was = LD8(obj + 0x4e1), out = v;
     if (g_pace_slow && v == 0 && hi >= 1) out = 1;
-    // Its range stops at 2 (30 fps), but the world steps by the interval whatever it is (measured: Link walks 3 steps a
-    // frame at interval 3, 4.5 units a second at 20 fps as at 60) - so a frame that took 3 vsyncs, when frames don't
-    // fit (a hot phone throttled), gets 3: 20 fps at the right speed rather than 30 fps mode in slow motion. More
-    // never (after a stall a jump ahead).
-    static uint64_t last_vs;
-    uint64_t vs = g_vsync_count, took = last_vs ? vs - last_vs : 1;
-    last_vs = vs;
-    if (g_pace_slow && hi == 1 && v == 1 && took >= 3 && took < 15) out = 2;
+    // (Never past its range: Link walks 3 steps a frame at interval 3, but other things don't take it - Madam
+    // MeowMeow's little chain chomps' chains flew apart. Below 30 fps the resolution gives way instead.)
     static int force = -1;  // LARECOMP_FORCE_INTERVAL=<n> (test): always n
     if (force < 0) force = ENV("LARECOMP_FORCE_INTERVAL") ? atoi(ENV("LARECOMP_FORCE_INTERVAL")) : 0;
     if (force > 0) out = (uint32_t)force - 1;

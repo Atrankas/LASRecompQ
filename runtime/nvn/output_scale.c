@@ -17,17 +17,22 @@
 
 #define MAX_TEX 16384.0
 
-// Dynamic resolution: a factor on the Match display scale, 0.5 .. 1 in 0.05 steps. Phones: 0.5 .. 0.75 (the fixed
-// default's), holding the game's 30 fps (a phone GPU can't hold 60 in its heavy areas; the overworld at 75% on an S20
-// FE: 20 fps, at 50%: 30).
+// Dynamic resolution: a factor on the Match display scale, 0.5 .. 1 in 0.05 steps, held at 1 (the game's own look)
+// whenever the GPU allows. Phones aim at the game's 30 fps (a phone GPU can't hold 60 in its heavy areas: an S20 FE's
+// overworld at native resolution takes 24 ms of GPU time a frame cool, 35 once its thermal limits set in) and judge
+// by the GPU's own time when the backend measures it (Vulkan with fences: the done watcher), raising again only with
+// clear room.
+#define DYN_MAX 1.0
 #ifdef __ANDROID__
-#define DYN_MAX 0.75
 #define DYN_SLOW_MS 34.5   // (a 30 fps frame is 33.3 ms; one late frame is 50)
 #define DYN_SLOWER_MS 40.0
+#define DYN_GPU_SLOW 30.0
+#define DYN_GPU_ROOM 23.0  // (+0.05 near 1: ~10% more pixels)
 #else
-#define DYN_MAX 1.0
 #define DYN_SLOW_MS 17.4
 #define DYN_SLOWER_MS 22.0
+#define DYN_GPU_SLOW 14.5
+#define DYN_GPU_ROOM 10.5
 #endif
 static double g_dyn = DYN_MAX;
 static double g_dyn_gpu_sum, g_dyn_dt_sum, g_last_t;
@@ -48,7 +53,7 @@ static void dyn_update(double now, double gpu_ms) {
     g_dyn_n = g_dyn_gpu_n = 0;
     if (now < g_dyn_cool_until) return;
     double prev = g_dyn;
-    bool slow = avg_dt > DYN_SLOW_MS || (avg_gpu >= 0 && avg_gpu > 14.5);
+    bool slow = avg_dt > DYN_SLOW_MS || (avg_gpu >= 0 && avg_gpu > DYN_GPU_SLOW);
     if (slow) {
         g_dyn = fmax(0.5, g_dyn - (avg_dt > DYN_SLOWER_MS ? 0.1 : 0.05));
         g_dyn_good = 0;
@@ -56,7 +61,7 @@ static void dyn_update(double now, double gpu_ms) {
     } else if (g_dyn < DYN_MAX) {
         g_dyn_good++;
         // with GPU timing: raise when there is clear headroom; without (Vulkan): probe upwards now and then
-        bool room = avg_gpu >= 0 ? avg_gpu < 10.5 && g_dyn_good >= 4 : now >= g_dyn_probe_at && g_dyn_good >= 2 * (int)g_dyn_probe_wait;
+        bool room = avg_gpu >= 0 ? avg_gpu < DYN_GPU_ROOM && g_dyn_good >= 4 : now >= g_dyn_probe_at && g_dyn_good >= 2 * (int)g_dyn_probe_wait;
         if (room) { g_dyn = fmin(DYN_MAX, g_dyn + 0.05); g_dyn_good = 0; g_dyn_last_raise = now; g_dyn_probe_at = now + g_dyn_probe_wait; }
     }
     g_dyn = round(g_dyn * 20) / 20;
