@@ -411,6 +411,19 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(min(mx, max(mn, ac / aw)), 1.0);\n"
                "}\n";
     }
+    // Texture copy as a draw (exec.c draw_copy): a = (source origin, source / destination size), b = (destination
+    // origin, 1 / source level size). Nearest at texel centres: an exact copy at the same size.
+    if (!strcmp(name, "copy.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  vec2 p = pc.a.xy + (gl_FragCoord.xy - pc.b.xy) * pc.a.zw;\n"
+               "  o = textureLod(t, p * pc.b.zw, 0.0);\n"
+               "}\n";
+    }
     // Snapdragon Game Super Resolution 1 (third_party/sgsr, BSD-3-Clause: Copyright (c) 2025, Qualcomm Innovation Center,
     // Inc.), sgsr1_shader_mobile.frag in RGBA mode: one pass, 12-tap Lanczos-like upscale with edge-adaptive sharpening on
     // green (luma) where neighbours differ, plain bilinear elsewhere. a = (1 / in size, in size), b.xy = out size.

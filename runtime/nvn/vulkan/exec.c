@@ -3719,6 +3719,8 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     if (small_mem) vmaDestroyImage(g_vk.vma, srcimg, small_mem);
 }
 
+static bool draw_copy(VkCommandBuffer cb, NvnTexture *st_, NvnTexture *dt, TexBackend *s, TexBackend *d, uint32_t slv, uint32_t sly,
+                      uint32_t dlv, uint32_t dly, int sx0, int sy0, int sw, int sh, int dx0, int dy0, int dw, int dh, bool linear);
 static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t flags) {
     snap_reason = "tex2tex"; snapshots_invalidate(NULL);
     NvnTexture *st_ = (NvnTexture *)(uintptr_t)src->tex, *dt = (NvnTexture *)(uintptr_t)dst->tex;
@@ -3775,6 +3777,10 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     if (naliases) s = alias_read(st_)->backend;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
+    bc_mark(cb, "copy texture %ux%u -> %ux%u (images %ux%u -> %ux%u)", src->tex ? ((NvnTexture *)(uintptr_t)src->tex)->width : 0,
+            src->tex ? ((NvnTexture *)(uintptr_t)src->tex)->height : 0, dst->tex ? ((NvnTexture *)(uintptr_t)dst->tex)->width : 0,
+            dst->tex ? ((NvnTexture *)(uintptr_t)dst->tex)->height : 0, s ? s->width : 0, s ? s->height : 0, d ? d->width : 0,
+            d ? d->height : 0);
     VkImageAspectFlags sa = s->aspect, da = d->aspect;
     if (s->samples > 1 && d->samples == 1 && sw == dw && sh == dh && s->format == d->format && !(sa & VK_IMAGE_ASPECT_DEPTH_BIT)) {
         VkImageResolve rv = {.srcSubresource = {sa, slv, sly, 1}, .srcOffset = {sx0, sy0, 0}, .dstSubresource = {da, dlv, dly, 1},
@@ -3783,6 +3789,12 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
         return;
     }
     if (s->samples != d->samples) return;
+    {
+        bool dep = (sa | da) & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+        if (!dep && draw_copy(cb, st_, dt, s, d, slv, sly, dlv, dly, sx0, sy0, sw, sh, dx0, dy0, dw, dh,
+                              (flags & 1) && !rt_kind(st_->format) && !(sw == dw && sh == dh)))
+            return;
+    }
     if (sw == dw && sh == dh && s->format == d->format) {
         VkImageCopy c = {.srcSubresource = {sa, slv, sly, 1}, .srcOffset = {sx0, sy0, 0}, .dstSubresource = {da, dlv, dly, 1},
                          .dstOffset = {dx0, dy0, 0}, .extent = {(uint32_t)sw, (uint32_t)sh, 1}};
@@ -3977,9 +3989,9 @@ static VkImageView raw_view(TexBackend *b) {
 static VkPipelineLayout post_layout;
 static VkDescriptorSetLayout post_set_layout;
 
-static VkPipeline post_pipeline(const char *fs) {
-    static struct { const char *fs; VkPipeline p; } cache[8];
-    for (int i = 0; i < 8; i++) if (cache[i].p && cache[i].fs == fs) return cache[i].p;
+static VkPipeline post_pipeline_fmt(const char *fs, VkFormat fmt) {
+    static struct { const char *fs; VkFormat fmt; VkPipeline p; } cache[32];
+    for (int i = 0; i < 32; i++) if (cache[i].p && cache[i].fs == fs && cache[i].fmt == fmt) return cache[i].p;
     if (!post_layout) {
         VkDescriptorSetLayoutBinding b[3];
         for (uint32_t i = 0; i < 3; i++)
@@ -4009,7 +4021,6 @@ static VkPipeline post_pipeline(const char *fs) {
                                               .pAttachments = &cba};
     VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
-    VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1,
                                         .pColorAttachmentFormats = &fmt};
     VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -4019,8 +4030,70 @@ static VkPipeline post_pipeline(const char *fs) {
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = post_layout};
     VkPipeline p;
     VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
-    for (int i = 0; i < 8; i++) if (!cache[i].p) { cache[i].fs = fs; cache[i].p = p; break; }
+    for (int i = 0; i < 32; i++) if (!cache[i].p) { cache[i].fs = fs; cache[i].fmt = fmt; cache[i].p = p; break; }
     return p;
+}
+static VkPipeline post_pipeline(const char *fs) { return post_pipeline_fmt(fs, VK_FORMAT_R8G8B8A8_UNORM); }
+
+// Texture copies as a draw (copy_texture): a fullscreen draw sampling the source, through the 3D pipeline instead of
+// the transfer one. Tried against the S20 FE's rare GPU hangs (breadcrumbs once stopped inside the game's frame copy):
+// the hang moved on to the next step, so not the copy - kept for tests. Single-sample float / unorm colour images whose destination format renders, 2D
+// levels / layers; anything else returns false (the transfer path).
+// LARECOMP_VK_DRAW_COPY=1.
+static bool draw_copy(VkCommandBuffer cb, NvnTexture *st_, NvnTexture *dt, TexBackend *s, TexBackend *d, uint32_t slv, uint32_t sly,
+                      uint32_t dlv, uint32_t dly, int sx0, int sy0, int sw, int sh, int dx0, int dy0, int dw, int dh, bool linear) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LARECOMP_VK_DRAW_COPY");
+        on = e && atoi(e) != 0;
+    }
+    if (!on || s->samples != 1 || d->samples != 1 || s->aspect != VK_IMAGE_ASPECT_COLOR_BIT || d->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
+        s->depth > 1 || d->depth > 1 || rt_kind(st_->format) || rt_kind(dt->format))
+        return false;
+    // the same format: the bytes as they are (vkCmdCopyImage), sRGB read and written raw; different formats: converted as a
+    // blit converts (sRGB decoded when read, encoded when written)
+    VkFormat sf = s->format, df = d->format;
+    if (sf == df) {
+        sf = df = s->format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : s->format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM
+                                                                                                                       : s->format;
+    }
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(g_vk.phys, df, &fp);
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) return false;
+    vkGetPhysicalDeviceFormatProperties(g_vk.phys, d->format, &fp);  // (the image was made renderable only if this is)
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) return false;
+    static const VkComponentMapping id = {0};
+    VkImageView sv = vk_image_view(s, VK_IMAGE_VIEW_TYPE_2D, sf, slv, 1, sly, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkImageView dv = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, df, dlv, 1, dly, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (!sv || !dv) return false;
+    VkPipeline pipe = post_pipeline_fmt("copy.frag", df);
+    uint32_t slw = level_extent(s->width, slv), slh = level_extent(s->height, slv);
+    uint32_t dlw = level_extent(d->width, dlv), dlh = level_extent(d->height, dlv);
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dv,
+                                    .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+                                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRect2D area = {{dx0, dy0}, {(uint32_t)dw, (uint32_t)dh}};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = area, .layerCount = 1,
+                          .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    vkCmdBeginRendering(cb, &ri);
+    VkDescriptorSet ds = vk_alloc_set(post_set_layout);
+    VkDescriptorImageInfo ii = {vk_default_sampler(linear), sv, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
+                              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
+    vkUpdateDescriptorSets(g_vk.dev, 1, &w, 0, NULL);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, post_layout, 0, 1, &ds, 0, NULL);
+    VkViewport vp = {0, 0, (float)dlw, (float)dlh, 0, 1};
+    vkCmdSetViewport(cb, 0, 1, &vp);
+    vkCmdSetScissor(cb, 0, 1, &area);
+    // source texel = src origin + (pixel - dst origin) * (src size / dst size), normalised by the source level's size
+    float pc[8] = {(float)sx0, (float)sy0, (float)sw / (float)dw, (float)sh / (float)dh, (float)dx0, (float)dy0, 1.0f / (float)slw,
+                   1.0f / (float)slh};
+    vkCmdPushConstants(cb, post_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdEndRendering(cb);
+    vk_full_barrier(cb);
+    return true;
 }
 
 // Post image `i` at w x h (RGBA8, kept until the size changes). 0, 1: SMAA edges / weights, 2: SMAA output,
