@@ -239,7 +239,7 @@ static void pick_device(void) {
     LOG("[vk] using %s\n", g_vk.props.deviceName);
 }
 
-static bool g_fault_ext;
+static bool g_fault_ext, g_budget_ext;
 // After VK_ERROR_DEVICE_LOST: what the driver says faulted (VK_EXT_device_fault), into the log.
 void vk_device_fault_report(void) {
     static int once;
@@ -372,6 +372,23 @@ static void create_device_compat(const char **ext, uint32_t n_ext, void *ext_fea
 }
 #endif
 
+// Each memory heap: its size, the driver's budget for this process (smaller when other programs hold that memory),
+// this process's use and the part LAS Recomp allocated through VMA. Logged at start and when an allocation fails
+// (issue #45: out of device memory on a 6 GB GTX 1060 - our own use, or other programs'?).
+void vk_log_memory(const char *why) {
+    if (!g_vk.vma) return;
+    const VkPhysicalDeviceMemoryProperties *mp;
+    vmaGetMemoryProperties(g_vk.vma, &mp);
+    VmaBudget b[VK_MAX_MEMORY_HEAPS];
+    vmaGetHeapBudgets(g_vk.vma, b);
+    for (uint32_t i = 0; i < mp->memoryHeapCount; i++)
+        LOG("[vk] memory (%s) heap %u %s: %llu MB, budget %llu MB, in use %llu MB, ours %llu MB in %u allocations\n", why, i,
+            mp->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "device-local" : "system",
+            (unsigned long long)(mp->memoryHeaps[i].size >> 20), (unsigned long long)(b[i].budget >> 20),
+            (unsigned long long)(b[i].usage >> 20), (unsigned long long)(b[i].statistics.allocationBytes >> 20),
+            b[i].statistics.allocationCount);
+}
+
 static void create_device(void) {
     uint32_t ne = 0;
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
@@ -389,6 +406,17 @@ static void create_device(void) {
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     g_fault_ext = fault;
+    g_budget_ext = has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);  // (real per-heap budgets: vk_log_memory)
+    if (g_budget_ext) ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+#ifdef __linux__
+    // the guest heap as driver memory mapped at HEAP_BASE (exec.c backend_guest_heap_prepare)
+    g_vk.dmabuf = has_ext(ep, ne, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+                  has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+    if (g_vk.dmabuf) {
+        ext[n_ext++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+        ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME;
+    }
+#endif
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
@@ -460,12 +488,14 @@ static void device_created(void) {
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
-                                 .vulkanApiVersion = g_vk.api};
+                                 .vulkanApiVersion = g_vk.api,
+                                 .flags = g_budget_ext ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0};
 #ifdef VK_NO_PROTOTYPES
     VmaVulkanFunctions vf = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr, .vkGetDeviceProcAddr = vkGetDeviceProcAddr};
     ai.pVulkanFunctions = &vf;
 #endif
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
+    vk_log_memory("start");
 
     VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
                                     .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE, .initialValue = 0};
@@ -581,6 +611,9 @@ static void create_swapchain(void) {
         return;
     }
     VK_CHECK(cr);
+    static const char *const modes[] = {"immediate", "mailbox", "fifo", "fifo-relaxed"};
+    LOG("[vk] swapchain %ux%u, %u images, %s\n", ext.width, ext.height, count,
+        ci.presentMode < 4 ? modes[ci.presentMode] : "other present mode");
     for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
     if (old) vkDestroySwapchainKHR(g_vk.dev, old, NULL);
     g_vk.sc_format = sf.format;
@@ -656,6 +689,14 @@ static void wait_foreground(void) {
     while (atomic_load(&g_background)) SDL_Delay(50);
 }
 
+// Time this thread spends waiting here - for a frame slot's GPU work, a window image, the presentation engine -
+// counts as idle for the frame pacer (exec.c vk_pace_frame), like the game's own waits: in FIFO (exclusive fullscreen
+// on Windows offers no mailbox) acquire / present block until the display's refresh, and counted as busy that made
+// every frame look ~16.6 ms: the game's 30 fps mode outdoors on a fast GPU (issue #44). GPU-bound frames still show
+// in the game's GPU counters.
+extern __thread uint64_t g_blocked_ns;  // kernel.c
+#define WAITING(x) do { uint64_t w0_ = plat_now_ns(); x; g_blocked_ns += plat_now_ns() - w0_; } while (0)
+
 // ================================================================== frames (start screen and game)
 // Acquire semaphores rotate per frame in flight; a slot is reused once the submission that waited on it is done.
 #define FRAMES 3
@@ -702,11 +743,13 @@ bool vk_frame_begin(const float clear[4]) {
     if (trace) LOG("[vk] frame begin %dx%d (swapchain %ux%u)\n", w, h, g_vk.sc_extent.width, g_vk.sc_extent.height);
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
-    vk_wait_seq(slot_seq[slot]);
-    VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+    WAITING(vk_wait_seq(slot_seq[slot]));
+    VkResult r;
+    WAITING(r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image));
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
-        r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+        WAITING(r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE,
+                                          &cur_frame.image));
     }
     if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&g_surface_stale, true);
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
@@ -776,7 +819,8 @@ void vk_frame_end(const char *shot_path) {
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
-    VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+    VkResult r;
+    WAITING(r = vkQueuePresentKHR(g_vk.queue, &pi));
     if (r == VK_ERROR_OUT_OF_DATE_KHR || (r == VK_SUBOPTIMAL_KHR && !g_sc_turned)) recreate_swapchain();
     else if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&g_surface_stale, true);
 #ifdef __ANDROID__
@@ -959,6 +1003,8 @@ void backend_present(NvnTexture *t) {
         frames = 0;
         last_fps_time = now;
     }
+    static double mem_at = 60.0;  // (memory in steady state: a minute in, then every 10 minutes)
+    if (now >= mem_at) { vk_log_memory("playing"); mem_at = now + 600.0; }
 }
 
 // ================================================================== UI thread
@@ -995,6 +1041,7 @@ void ui_window_init(void) {
 #endif
     settings_load();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
+    input_load_user_mappings();
     int win_w = 1280, win_h = 720;
     if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
     SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;

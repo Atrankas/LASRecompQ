@@ -120,6 +120,17 @@ bool input_user_blocked(const SDL_Event *e) {
     }
 }
 
+// A controller SDL has no mapping for (on macOS e.g. a generic Bluetooth HID pad, such as a phone app posing as one)
+// is only a joystick to SDL, and the game reads gamepads only. gamecontrollerdb.txt in the data root holds the
+// player's own mappings, in SDL's format (lines for other platforms are skipped, so SDL_GameControllerDB's file works
+// as is). Called right after SDL_Init: a pad already connected becomes a gamepad then (SDL sends GAMEPAD_ADDED).
+void input_load_user_mappings(void) {
+    if (!SDL_GetPathInfo("gamecontrollerdb.txt", NULL)) return;
+    int n = SDL_AddGamepadMappingsFromFile("gamecontrollerdb.txt");
+    if (n < 0) LOG("[input] gamecontrollerdb.txt: %s\n", SDL_GetError());
+    else LOG("[input] gamecontrollerdb.txt: %d controller mapping(s) added\n", n);
+}
+
 // Controller family for the button prompts (runtime/nvn/texpatch.c): 0 Nintendo / other / none, 1 Xbox, 2 PlayStation.
 // LARECOMP_PAD_TYPE=xbox|playstation|nintendo pretends one is attached (tests).
 static _Atomic int pad_family;

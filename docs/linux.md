@@ -11,6 +11,9 @@ package the release AppImages.
 
 Needs: a distribution with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36, Arch, ...), a Vulkan 1.3 driver
 (Mesa RADV / ANV / NVK / Turnip / Asahi Honeykrisp, or NVIDIA's), and on x86-64 a CPU with AVX2 (2013 or newer).
+On Linux 6.7 or newer the renderer also gets page write tracking (userfaultfd + PAGEMAP_SCAN, as Windows' write watch):
+its vertex cache, and textures re-checked only where the game wrote. Older kernels run without it (the log says
+`[plat] no page write tracking: ...`); `LARECOMP_WRITE_TRACKING=0` turns it off.
 The start screen asks for the folder with your own game files and sets them up.
 
 Everything the app writes lives in `~/.local/share/lasrecomp` (`$XDG_DATA_HOME/lasrecomp`): game files (`extracted/`),
@@ -29,10 +32,16 @@ If the AppImage won't start with a FUSE error, install your distribution's `fuse
 needs `fusermount3`), or run it as `./LAS.Recomp-...-linux-x86_64.AppImage --appimage-extract-and-run`.
 
 ## Building from source
-Ubuntu / Debian packages (other distributions: the same libraries under their names; SDL3 3.2 or newer):
+Ubuntu / Debian packages (other distributions: the same libraries under their names). SDL3 must be 3.4 or newer
+(LAS Recomp loads and saves PNGs through it); where the distribution ships an older one (Debian 13 has 3.2), build SDL3
+3.4 from source first - `tools/linux/build_deps.sh` builds the pinned version the AppImage uses (into
+`build/linux/<arch>/deps`).
 
     sudo apt install clang lld make pkg-config python3-venv libsdl3-dev libavformat-dev libavcodec-dev \
         libavutil-dev libswscale-dev libvulkan-dev libshaderc-dev libvulkan-memory-allocator-dev glslc vulkan-tools
+
+shaderc is linked the way its pkg-config file says (`libshaderc_shared` on Arch, Fedora, AOSC...); to choose
+yourself: `make SHADERC=-lshaderc_shared` (or `-lshaderc`).
 
 Then from the repo root:
 

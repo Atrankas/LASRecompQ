@@ -1155,22 +1155,22 @@
   "cond": "D1-8D & kill-hardhat-beetle[pit]"
  },
  "D1-owl-statue-long-hallway": {
-  "room": null,
-  "level": null,
+  "room": "Lv01TailCave_04C",
+  "level": "Lv01TailCave",
   "region": "tail-cave",
   "subtype": "dungeon-statue",
   "cond": "D1-8D & key-D1:3 & stone-beak-D1"
  },
  "D1-owl-statue-spinies": {
-  "room": null,
-  "level": null,
+  "room": "Lv01TailCave_04B",
+  "level": "Lv01TailCave",
   "region": "tail-cave",
   "subtype": "dungeon-statue",
   "cond": "D1-8D & key-D1:3 & stone-beak-D1"
  },
  "D1-owl-statue-3-of-a-kind": {
-  "room": null,
-  "level": null,
+  "room": "Lv01TailCave_05F",
+  "level": "Lv01TailCave",
   "region": "tail-cave",
   "subtype": "dungeon-statue",
   "cond": "D1-6F & stone-beak-D1"
@@ -1274,22 +1274,22 @@
   "cond": "D2-7D & (feather | (rooster & bad-pets)) & hit-crystal-switch"
  },
  "D2-owl-statue-first-switch": {
-  "room": null,
-  "level": null,
+  "room": "Lv02BottleGrotto_07E",
+  "level": "Lv02BottleGrotto",
   "region": "bottle-grotto",
   "subtype": "dungeon-statue",
   "cond": "D2-7D & stone-beak-D2"
  },
  "D2-owl-statue-push-puzzle": {
-  "room": null,
-  "level": null,
+  "room": "Lv02BottleGrotto_06G",
+  "level": "Lv02BottleGrotto",
   "region": "bottle-grotto",
   "subtype": "dungeon-statue",
   "cond": "D2-7D & (feather | (rooster & bad-pets)) & hit-crystal-switch & key-D2:3 & stone-beak-D2"
  },
  "D2-owl-statue-past-hinox": {
-  "room": null,
-  "level": null,
+  "room": "Lv02BottleGrotto_04C",
+  "level": "Lv02BottleGrotto",
   "region": "bottle-grotto",
   "subtype": "dungeon-statue",
   "cond": "D2-4C & stone-beak-D2"
@@ -1428,22 +1428,22 @@
   "cond": "D3-8B & (boots | hookshot | (rooster & bad-pets))"
  },
  "D3-owl-statue-basement-north": {
-  "room": null,
-  "level": null,
+  "room": "Lv03KeyCavern_03G",
+  "level": "Lv03KeyCavern",
   "region": "key-cavern",
   "subtype": "dungeon-statue",
   "cond": "D3-3G & stone-beak-D3"
  },
  "D3-owl-statue-arrow": {
-  "room": null,
-  "level": null,
+  "room": "Lv03KeyCavern_02D",
+  "level": "Lv03KeyCavern",
   "region": "key-cavern",
   "subtype": "dungeon-statue",
   "cond": "D3-4C & stone-beak-D3"
  },
  "D3-owl-statue-northwest": {
-  "room": null,
-  "level": null,
+  "room": "Lv03KeyCavern_01A",
+  "level": "Lv03KeyCavern",
   "region": "key-cavern",
   "subtype": "dungeon-statue",
   "cond": "D3-4C & kill-zol-red & kill-stalfos & stone-beak-D3"
@@ -1554,8 +1554,8 @@
   "cond": "D4-8D & kill-spiny & kill-zol-red & break-crystal & kill-water-tektite"
  },
  "D4-owl-statue": {
-  "room": null,
-  "level": null,
+  "room": "Lv04AnglersTunnel_05E",
+  "level": "Lv04AnglersTunnel",
   "region": "angler-tunnel",
   "subtype": "dungeon-statue",
   "cond": "D4-4E & stone-beak-D4"
@@ -1575,8 +1575,8 @@
   "cond": "D5-3E & key-D5:3 & nightmare-key-D5 & hookshot & kill-slime-eel"
  },
  "D5-master-stalfos": {
-  "room": null,
-  "level": null,
+  "room": "Lv05CatfishsMaw_01B",
+  "level": "Lv05CatfishsMaw",
   "region": "catfish-maw",
   "subtype": "boss",
   "cond": "D5-8H & D5-5G & feather & kill-master-stalfos & break-crystal & kill-keese & kill-helmasaur"
@@ -1659,15 +1659,15 @@
   "cond": "D5-8H & (hookshot | (rooster & bad-pets))"
  },
  "D5-owl-statue-triple-stalfos": {
-  "room": null,
-  "level": null,
+  "room": "Lv05CatfishsMaw_06F",
+  "level": "Lv05CatfishsMaw",
   "region": "catfish-maw",
   "subtype": "dungeon-statue",
   "cond": "D5-7F & stone-beak-D5"
  },
  "D5-owl-statue-before-slime-eel": {
-  "room": null,
-  "level": null,
+  "room": "Lv05CatfishsMaw_03C",
+  "level": "Lv05CatfishsMaw",
   "region": "catfish-maw",
   "subtype": "dungeon-statue",
   "cond": "D5-5G & feather & stone-beak-D5"
@@ -1778,22 +1778,22 @@
   "cond": "D6-8D & bracelet:2 & kill-wizzrobe & feather"
  },
  "D6-owl-statue-ledge": {
-  "room": null,
-  "level": null,
+  "room": "Lv06FaceShrine_04D",
+  "level": "Lv06FaceShrine",
   "region": "face-shrine",
   "subtype": "dungeon-statue",
   "cond": "D6-8D & stone-beak-D6"
  },
  "D6-owl-statue-southeast": {
-  "room": null,
-  "level": null,
+  "room": "Lv06FaceShrine_08G",
+  "level": "Lv06FaceShrine",
   "region": "face-shrine",
   "subtype": "dungeon-statue",
   "cond": "D6-8D & bracelet:2 & kill-wizzrobe & stone-beak-D6"
  },
  "D6-owl-statue-canal": {
-  "room": null,
-  "level": null,
+  "room": "Lv06FaceShrine_03G",
+  "level": "Lv06FaceShrine",
   "region": "face-shrine",
   "subtype": "dungeon-statue",
   "cond": "D6-4H & bombs & hookshot & bracelet & key-D6:3 & stone-beak-D6"
@@ -1890,22 +1890,22 @@
   "cond": "D7-2D & hit-crystal-switch & kill-battle-bat"
  },
  "D7-owl-statue-ball": {
-  "room": null,
-  "level": null,
+  "room": "Lv07EagleTower_02D",
+  "level": "Lv07EagleTower",
   "region": "eagle-tower",
   "subtype": "dungeon-statue",
   "cond": "D7-2D & stone-beak-D7"
  },
  "D7-owl-statue-kirbys": {
-  "room": null,
-  "level": null,
+  "room": "Lv07EagleTower_05D",
+  "level": "Lv07EagleTower",
   "region": "eagle-tower",
   "subtype": "dungeon-statue",
   "cond": "D7-2D & stone-beak-D7"
  },
  "D7-owl-statue-hookshot-chest": {
-  "room": null,
-  "level": null,
+  "room": "Lv07EagleTower_04B",
+  "level": "Lv07EagleTower",
   "region": "eagle-tower",
   "subtype": "dungeon-statue",
   "cond": "D7-2D & hit-crystal-switch & bombs & stone-beak-D7"
@@ -2044,22 +2044,22 @@
   "cond": "D8-8D & feather & (break-pot | (rooster & bad-pets))"
  },
  "D8-owl-statue-above-smasher": {
-  "room": null,
-  "level": null,
+  "room": "Lv08TurtleRock_06H",
+  "level": "Lv08TurtleRock",
   "region": "turtle-rock",
   "subtype": "dungeon-statue",
   "cond": "D8-8D & feather & (break-pot | (rooster & bad-pets)) & stone-beak-D8"
  },
  "D8-owl-statue-below-gibdos": {
-  "room": null,
-  "level": null,
+  "room": "Lv08TurtleRock_04G",
+  "level": "Lv08TurtleRock",
   "region": "turtle-rock",
   "subtype": "dungeon-statue",
   "cond": "D8-8D & feather & key-D8:2 & stone-beak-D8"
  },
  "D8-owl-statue-eye-statue": {
-  "room": null,
-  "level": null,
+  "room": "Lv08TurtleRock_04C",
+  "level": "Lv08TurtleRock",
   "region": "turtle-rock",
   "subtype": "dungeon-statue",
   "cond": "D8-4C & stone-beak-D8"
@@ -2114,232 +2114,232 @@
   "cond": "D0-8C & kill-goblin[heavy]"
  },
  "D0-fairy-1": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_04C",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "npc",
   "cond": "D0-6D & nightmare-key-D0 & key-D0:3 & hit-color-dungeon-switch & break-pot"
  },
  "D0-fairy-2": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_04C",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "npc",
   "cond": "D0-6D & nightmare-key-D0 & key-D0:3 & hit-color-dungeon-switch & break-pot"
  },
  "D0-owl-statue-nine-switches": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_06C",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "dungeon-statue",
   "cond": "D0-6D & key-D0:2 & stone-beak-D0 & break-pot"
  },
  "D0-owl-statue-first-switches": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_07D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "dungeon-statue",
   "cond": "D0-8C & kill-goblin[heavy] & stone-beak-D0"
  },
  "D0-owl-statue-before-mini-boss": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_05F",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "dungeon-statue",
   "cond": "D0-8C & kill-goblin[heavy] & stone-beak-D0"
  },
  "D0-rupee-1": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-2": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-3": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-4": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-5": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-6": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-7": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-8": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-9": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-10": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-11": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-12": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-13": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-14": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-15": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-16": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-17": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-18": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-19": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-20": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-21": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-22": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-23": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-24": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-25": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-26": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-27": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"
  },
  "D0-rupee-28": {
-  "room": null,
-  "level": null,
+  "room": "Lv10ClothesDungeon_08D",
+  "level": "Lv10ClothesDungeon",
   "region": "color-dungeon",
   "subtype": "standing",
   "cond": "D0-8C & kill-goblin[heavy] & bombs"

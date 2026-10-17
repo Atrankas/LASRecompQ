@@ -50,13 +50,14 @@ def enabled(settings):
 
 
 def add_to_pool(logic, item_defs, settings):
-    """Pet items into the pool (one 50-rupee less each) and the logic changes they make. Returns the pets."""
+    """Pet items into the pool (one junk rupee less each) and the logic changes they make. Returns the pets."""
     pets = enabled(settings)
     for p in pets:
         sym, npc, path, model = PETS[p]
         item_defs[p] = {'type': 'important', 'quantity': 1, 'item-key': sym, 'model-path': path, 'model-name': model,
                         'npc-key': npc}
-        item_defs['rupee-50']['quantity'] -= 1
+        junk = max(('rupee-50', 'rupee-20', 'rupee-100', 'rupee-300'), key=lambda k: item_defs[k]['quantity'])
+        item_defs[junk]['quantity'] -= 1  # (the most plentiful junk: a 50-rupee count below 0 dropped items)
     if 'rooster' in pets:
         del logic['rooster-statue']  # (LAS: the rooster follower location; the pet is the rooster now)
     if 'ghost' in pets:

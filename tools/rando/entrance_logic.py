@@ -97,15 +97,25 @@ def apply_logic(logic, doors, entry, exit_, extra_inside=None):
             else:
                 loc.pop('condition-basic', None)
             moved += 1
+        for fo in by_id[t].get('followers') or []:  # (BowWow, the Rooster: freed inside, they follow from there)
+            loc = logic.get(fo['follower'])
+            if not loc:
+                continue
+            loc['region'] = f'inside-{t}'
+            for k in ('condition-advanced', 'condition-glitched', 'condition-hell'):
+                loc.pop(k, None)
+            loc['condition-basic'] = str(fo['cond'])
+            moved += 1
     for (loc, token), door in INSIDE_TOKENS.items():
         if loc in logic and door in by_id and f'inside-{door}' in logic:
             c = logic[loc].get('condition-basic', '')
             logic[loc]['condition-basic'] = ' '.join(f'inside-{door}' if w == token else w for w in c.split())
-    # leaving interior I through door c puts Link outside c (coupled: the door he came in by)
+    # leaving interior I through door c puts Link outside c (coupled: the door he came in by); past what blocks
+    # that doorstep (exit_req: the rock at Mamu's cave, the bushes at the Trendy Game)
     for t, c in exit_.items():
         region = by_id[c]['outer_region']
         if region in logic and f'inside-{t}' in logic:
-            _or_into(logic[region], f'inside-{t}')
+            _or_into(logic[region], _and(f'inside-{t}', by_id[c].get('exit_req')))
     return moved
 
 
@@ -353,7 +363,8 @@ def apply_rooms(doors, entry, exit_, read_room, write_room, zones_path=os.path.j
         z = next(z for z in zones if z['room'] == d['field_room'] and z['index'] == d['zone_index'])
         field[d['id']] = list(z['params'])
         if d['type'] == 'connector':  # several doors of one cave return to one screen: the zone named per door
-            rz = [d['return_zone']] + list(d.get('other_return_zones') or [])
+            rz = [d['return_zone']] + list(d.get('other_return_zones') or  # (entrance_data.yml nests them)
+                                           (d['return_zone'] or {}).get('other_return_zones') or [])
             returns[d['id']] = [(r['room'], r['index']) for r in rz]
             ret_params[d['id']] = list(next(z for z in zones if (z['room'], z['index']) == returns[d['id']][0])['params'])
             continue

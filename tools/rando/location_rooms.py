@@ -17,6 +17,24 @@ sys.path.insert(0, HERE)
 import underwater  # (the sunken seashells: no LAS table has their rooms)
 for k, (_, r, _) in underwater.SPOTS.items():
     rooms.setdefault(k, r)
+# rooms no LAS table has (dungeon room shuffle and mini-boss souls follow a check's room): owl statues (their
+# DungeonOwlStatue.bfevfl examine_<dungeon><cell> entries, owls.py), the Color Dungeon's rupee room and the Fairy Queen,
+# Master Stalfos' last fight (his parameter 3). Boss drops stay None: room_logic.py takes the room above the boss door.
+L = {'D0': 'Lv10ClothesDungeon', 'D1': 'Lv01TailCave', 'D2': 'Lv02BottleGrotto', 'D3': 'Lv03KeyCavern',
+     'D4': 'Lv04AnglersTunnel', 'D5': 'Lv05CatfishsMaw', 'D6': 'Lv06FaceShrine', 'D7': 'Lv07EagleTower',
+     'D8': 'Lv08TurtleRock'}
+EXTRA = {'D1-owl-statue-long-hallway': '04C', 'D1-owl-statue-spinies': '04B', 'D1-owl-statue-3-of-a-kind': '05F',
+         'D2-owl-statue-first-switch': '07E', 'D2-owl-statue-push-puzzle': '06G', 'D2-owl-statue-past-hinox': '04C',
+         'D3-owl-statue-basement-north': '03G', 'D3-owl-statue-arrow': '02D', 'D3-owl-statue-northwest': '01A',
+         'D4-owl-statue': '05E', 'D5-owl-statue-triple-stalfos': '06F', 'D5-owl-statue-before-slime-eel': '03C',
+         'D6-owl-statue-ledge': '04D', 'D6-owl-statue-southeast': '08G', 'D6-owl-statue-canal': '03G',
+         'D7-owl-statue-ball': '02D', 'D7-owl-statue-kirbys': '05D', 'D7-owl-statue-hookshot-chest': '04B',
+         'D8-owl-statue-above-smasher': '06H', 'D8-owl-statue-below-gibdos': '04G', 'D8-owl-statue-eye-statue': '04C',
+         'D0-owl-statue-nine-switches': '06C', 'D0-owl-statue-first-switches': '07D',
+         'D0-owl-statue-before-mini-boss': '05F', 'D0-fairy-1': '04C', 'D0-fairy-2': '04C',
+         'D5-master-stalfos': '01B', **{f'D0-rupee-{i}': '08D' for i in range(1, 29)}}
+for k, c in EXTRA.items():
+    rooms.setdefault(k, f'{L[k[:2]]}_{c}')
 out = {}
 for k, v in logic.items():
     if v.get('type') != 'item': continue

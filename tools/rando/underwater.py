@@ -20,6 +20,8 @@ seen (the heart piece's do); in these seeds every material counts as one (tools/
 """
 import os
 
+import seed_tables
+
 # location -> (level folder, room, actor type it has in vanilla)
 SPOTS = {
     'bay-passage-sunken': ('MadBattersWellEnter', 'MadBattersWellEnter_01B', 0xB0),
@@ -57,13 +59,9 @@ def apply(mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
     # flags for the seashells (after every other flag: existing indices stay)
     sheet = oead_tools.readSheet(path('datasheets/GlobalFlags.gsheet'))
     names = {str(v['symbol']) for v in sheet['values']}
-    nxt = max(int(v['index']) for v in sheet['values'] if int(v['index']) < 2048) + 1
     for f in SHELL_FLAGS.values():
         if f not in names:
-            if nxt >= 2048:
-                raise RuntimeError('out of GlobalFlags indices for the sunken seashells')
-            sheet['values'].append({'symbol': f, 'index': nxt})
-            nxt += 1
+            sheet['values'].append({'symbol': f, 'index': seed_tables.next_flag(sheet, out_dir)})
     oead_tools.writeSheet(out('datasheets/GlobalFlags.gsheet'), sheet)
 
     flow = event_tools.readFlow(path('event/SinkingSword.bfevfl'))

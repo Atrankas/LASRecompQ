@@ -602,6 +602,9 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
     excluded = settings.setdefault('excluded-locations', set())
     absent = settings.setdefault('absent-locations', set())  # (their rooms aren't in the layout: not in the game)
     rewritten = unused = fallback = 0
+    # dungeons with a crystal switch somewhere in their layout
+    crystal = {lv: any('ObjCrystalSw' in cat.get(r, {}).get('actors', ()) for r in layout.values())
+               for lv, layout in layouts.items()}
     targets = {k: (v.get('room'), v.get('level')) for k, v in lr.items()}
     for k, room in (extra_locations or {}).items():
         targets[k] = (room, room.rsplit('_', 1)[0])
@@ -633,6 +636,12 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
                 v.pop(key, None)
             continue
         places = rooms_at.get(room, [])
+        # Coherent copies: a room may sit in two dungeons. The check is credited to one (dungeon-of: a dungeon item
+        # there counts for that dungeon) - only that copy reaches it in logic (the other is a bonus pickup: a key found
+        # there would count for the wrong dungeon)
+        if len({p[0] for p in places}) > 1:
+            lvl_home = next((p[0] for p in places if LEVELS[p[0]][0] == home), places[0][0])
+            places = [p for p in places if p[0] == lvl_home]
         def with_blocks(p):  # a check in a room with keyhole blocks: they may guard it
             e = cell_expr.get(p)
             bl = lock_blocks(romfs, room)
@@ -659,6 +668,12 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             unused += 1
             continue
         local, _ = strip(parse(cond), drop)
+        lvl_now = next((p for p in places if LEVELS[p[0]][0] == home), places[0])[0]
+        if 'hit-crystal-switch' in cond and not crystal.get(lvl_now):
+            # (crystal blocks guard it, and the dungeon it's in now has no crystal switch to lower them)
+            excluded.add(loc), absent.add(loc)
+            unused += 1
+            continue
         r = reach[0] if len(reach) == 1 else ' | '.join(f'({x})' for x in reach)
         v['condition-basic'] = f'({r}) & ({show(local)})' if local else r
         for key in ('condition-advanced', 'condition-glitched', 'condition-hell'):

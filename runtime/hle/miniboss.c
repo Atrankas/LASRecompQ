@@ -190,9 +190,11 @@ static void force_tick(Cpu *c, uint64_t frame) {
         (unsigned long long)sm, state);
 }
 
-// A copy of a mini-boss whose flow gives a check (Lanmola) skips the item when its switch 2 - the seed's
-// OverworldMinibossMarker flag (settings.json "miniboss-marker-flag", tools/rando/miniboss_guard.py) - is set: set it
-// whenever one is woken. (The original has no switch 2: he gives it as before.)
+// A copy of a mini-boss whose flow gives a check (Lanmola, Armos Knight) skips the item when its switch 2 - the seed's
+// OverworldMinibossMarker flag (settings.json "miniboss-marker-flag", tools/rando/miniboss_guard.py) - is set: set
+// every frame on the Field (an Armos Knight copy fights on its own, nothing wakes it). The originals have no switch 2
+// set: they give it as before. Written through the flag object (main+0x1CC1388, its byte capacity +0x1CC1390): the
+// flag may be past the game's 2048 (runtime/hle/flags_ext.c).
 static int g_marker = -2;
 RT_ON_RESET(miniboss_marker_reset) { g_marker = -2; }
 static void miniboss_marker_set(void) {
@@ -211,8 +213,9 @@ static void miniboss_marker_set(void) {
             if (k) g_marker = atoi(k + strlen("\"miniboss-marker-flag\":"));
         }
     }
-    if (g_marker < 0 || g_marker >= 2048) return;
-    uint8_t *fl = (uint8_t *)(uintptr_t)(MAIN_BASE + 0x1CBB220 + 0x5DC0);  // (live save: event flag bits)
+    if (g_marker < 0) return;
+    uint8_t *fl = (uint8_t *)(uintptr_t)LD64(MAIN_BASE + 0x1CC1388);
+    if (!fl || (uint32_t)(g_marker >> 3) >= LD32(MAIN_BASE + 0x1CC1390)) return;
     fl[g_marker >> 3] |= (uint8_t)(1 << (g_marker & 7));
 }
 
@@ -368,6 +371,7 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
     if (!pc) return;
     const float *lp = (const float *)(uintptr_t)(pc + 0x80);
     memcpy(g_link, lp, sizeof g_link), g_have_link = true;
+    miniboss_marker_set();
     for (int i = 0; i < 32; i++) {
         Seen *s = &g_seen[i];
         if (!s->obj || frame - s->last > 2 || frame - s->first < 30 || LD64(s->obj) != g_kinds[s->kind].vt) continue;
@@ -386,13 +390,14 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
         bool again = s->woken && k->rest != 0xff && st == k->rest && frame - s->woken_at > 180;
         if (s->woken ? !again : st != k->idle) continue;
         const float *p = (const float *)(uintptr_t)(s->obj + k->pos);
+        // (Yarna Desert's own Lanmola, Field_13O at 217.5, 150: his screen's event starts him)
+        if (!strcmp(k->name, "Lanmola") && fabsf(p[0] - 217.5f) < 1.5f && fabsf(p[2] - 150.0f) < 1.5f) continue;
         float dx = p[0] - lp[0], dz = p[2] - lp[2];
         if (!k->at_once && dx * dx + dz * dz > WAKE_DIST * WAKE_DIST) continue;
         s->woken = 1;
         s->woken_at = frame;
         uint64_t saved[31], sp = c->sp;
         memcpy(saved, c->x, sizeof saved);
-        miniboss_marker_set();
         if (k->start) {
             c->x[0] = s->obj;
             guest_call(c, MAIN_BASE + k->start);

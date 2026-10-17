@@ -8,7 +8,7 @@
 // rando/<seed>/digs.tsv (tools/rando/digs.py) lists every dig tile: screen, tile, ground height, and for a check its
 // item (name, model, flow entry in SinkingSword.bfevfl, seashell, scale, turn) and what grows on the tile.
 //
-// Dig: the patch after the hole's spawn in the shovel's dig commit (tools/patches.py DIG_HOLE_SITE) calls
+// Dig: the hook after the hole's spawn in the shovel's dig commit (runtime/hle/hooks.c DIG_HOLE_SITE) calls
 // rt_dig_hole: the first dig of a tile sets its flag. Items: a check's item is a SinkingSword item actor (type 0x194,
 // what LAS uses for standing items, pots and bushes) spawned on the dug tile through the actor factory
 // (f_70008f5ea0); touching it runs its flow entry - LAS's own item-get: Link holds it up, the game's message box,

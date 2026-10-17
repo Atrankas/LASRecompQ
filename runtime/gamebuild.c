@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <unistd.h>
 
 #include "gamelib.h"
 #include "paths.h"
@@ -19,6 +21,9 @@
 #endif
 #ifndef GAMELIB_SHARED
 #define GAMELIB_SHARED "-shared"
+#endif
+#ifndef GAMELIB_BASE_ID
+#define GAMELIB_BASE_ID "dev"
 #endif
 
 #ifdef _WIN32
@@ -211,8 +216,9 @@ static void log_tail(const char *path, char *out, size_t n) {  // the last line 
 
 // ------------------------------------------------------------------ compiling
 typedef struct {
-    char src[1100], obj[1100], log[1100];
+    char src[1100], obj[1100], log[1100], stem[64];
     unsigned long long bytes;
+    uint64_t hash;  // of its generated C (0: not hashed - the entry file, always compiled)
 } Unit;
 
 typedef struct {
@@ -229,8 +235,72 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
     snprintf(u->src, sizeof u->src, "%s", src);
     snprintf(u->obj, sizeof u->obj, "%s" SEP "%s.o", work, stem);
     snprintf(u->log, sizeof u->log, "%s" SEP "%s.log", work, stem);
+    snprintf(u->stem, sizeof u->stem, "%s", stem);
     struct stat st;
     u->bytes = stat(src, &st) == 0 ? (unsigned long long)st.st_size : 0;
+    u->hash = 0;
+}
+
+// ------------------------------------------------------------------ the pieces kept between builds
+// <game_dir>/.gamebuild keeps every compiled piece and a manifest: the base id (GAMELIB_BASE_ID: headers, flags,
+// compiler) and a hash of each piece's generated C. The next build (an update) generates all the C again - its chunks
+// are stable: the same functions in the same files - and compiles only the pieces whose C changed, then links them
+// all. Another base id, or a failed build, and every piece is compiled again.
+#define MANIFEST "manifest.txt"
+typedef struct { char stem[64]; uint64_t hash; } Kept;
+typedef struct { Kept *k; int n; } Manifest;
+
+static uint64_t file_hash(const char *path) {  // FNV-1a 64 of the whole file (0: unreadable)
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    uint64_t h = 0xcbf29ce484222325ull;
+    static unsigned char buf[1 << 16];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0)
+        for (size_t i = 0; i < n; i++) h = (h ^ buf[i]) * 0x100000001b3ull;
+    fclose(f);
+    return h ? h : 1;
+}
+
+// the manifest of the last good build, when its base is this build's (else empty)
+static Manifest manifest_read(const char *work) {
+    Manifest m = {0};
+    char path[1200], line[256], base[64] = "";
+    snprintf(path, sizeof path, "%s" SEP MANIFEST, work);
+    FILE *f = fopen(path, "rb");
+    if (!f) return m;
+    if (!fgets(line, sizeof line, f) || sscanf(line, "base %63s", base) != 1 || strcmp(base, GAMELIB_BASE_ID)) {
+        fclose(f);
+        return m;
+    }
+    int cap = 0;
+    char stem[64];
+    unsigned long long h;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "%63s %llx", stem, &h) == 2) {
+            if (m.n == cap) m.k = (Kept *)realloc(m.k, sizeof *m.k * (cap = cap ? cap * 2 : 1024));
+            snprintf(m.k[m.n].stem, sizeof m.k[m.n].stem, "%s", stem);
+            m.k[m.n++].hash = h;
+        }
+    fclose(f);
+    return m;
+}
+
+static bool manifest_has(const Manifest *m, const Unit *u) {
+    for (int i = 0; i < m->n; i++)
+        if (!strcmp(m->k[i].stem, u->stem)) return m->k[i].hash == u->hash;
+    return false;
+}
+
+static void manifest_write(const char *work, const Units *us) {
+    char path[1200];
+    snprintf(path, sizeof path, "%s" SEP MANIFEST, work);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "base %s\n", GAMELIB_BASE_ID);
+    for (int i = 0; i < us->n; i++)
+        if (us->u[i].hash) fprintf(f, "%s %llx\n", us->u[i].stem, (unsigned long long)us->u[i].hash);
+    fclose(f);
 }
 
 // The flags the game code was built with (GAMELIB_CFLAGS, part of its id). zig cc reads -march=<cpu> with its own CPU
@@ -267,6 +337,38 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     return p;
 }
 
+// after a build: the pieces and the manifest stay; the generated C, the logs and the link files go
+static void cleanup_work(const char *work) {
+    DIR *d = opendir(work);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        const char *n = e->d_name;
+        if (n[0] == '.' || !strcmp(n, MANIFEST)) continue;
+        size_t len = strlen(n);
+        if (len > 2 && !strcmp(n + len - 2, ".o")) continue;
+        char p[1300];
+        snprintf(p, sizeof p, "%s" SEP "%s", work, n);
+        struct stat st;
+        if (stat(p, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {  // (the generator's output folders: main/, sdk/)
+            DIR *sd = opendir(p);
+            struct dirent *se;
+            while (sd && (se = readdir(sd))) {
+                if (se->d_name[0] == '.') continue;
+                char q[1600];
+                snprintf(q, sizeof q, "%s" SEP "%s", p, se->d_name);
+                remove(q);
+            }
+            if (sd) closedir(sd);
+            rmdir(p);
+        } else {
+            remove(p);
+        }
+    }
+    closedir(d);
+}
+
 // ------------------------------------------------------------------ the build
 bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size_t why_size) {
     uint64_t t0 = plat_now_ns();
@@ -281,13 +383,21 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     snprintf(work, sizeof work, "%s" SEP ".gamebuild", game_dir);
     snprintf(lib, sizeof lib, "%s" SEP "%s", game_dir, GAMELIB_NAME);
     snprintf(tmp, sizeof tmp, "%s" SEP "%s.tmp", work, GAMELIB_NAME);
-    rt_remove_game_file(game_dir, ".gamebuild");
+    Manifest kept = manifest_read(work);  // (the last good build's pieces, if they fit this one)
+    if (!kept.n) rt_remove_game_file(game_dir, ".gamebuild");
+    else cleanup_work(work);  // (an interrupted build's leftovers)
     rt_remove_game_file(game_dir, GAMELIB_NAME);
     rt_remove_game_file(game_dir, GAMELIB_NAME ".id");
+    rt_remove_game_file(game_dir, ".zigcache");
     mkdir(work, 0755);
-    if (t.zig) {  // its caches in the work folder too (deleted below), not ~/.cache: hundreds of MB, used once
+    {  // (the manifest goes until this build has linked: a failed one starts from scratch next time)
+        char mp[1200];
+        snprintf(mp, sizeof mp, "%s" SEP MANIFEST, work);
+        remove(mp);
+    }
+    if (t.zig) {  // its caches next to the work folder (deleted below), not ~/.cache: hundreds of MB, used once
         char zc[1200];
-        snprintf(zc, sizeof zc, "%s" SEP "zig-cache", work);
+        snprintf(zc, sizeof zc, "%s" SEP ".zigcache", game_dir);
 #ifdef _WIN32
         _putenv_s("ZIG_GLOBAL_CACHE_DIR", zc);
         _putenv_s("ZIG_LOCAL_CACHE_DIR", zc);
@@ -328,7 +438,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     bool tables[2] = {false, false};
     int next = 0, jobs = o->jobs < 1 ? 1 : o->jobs > 64 ? 64 : o->jobs;
     struct { PlatProc p; int unit; } run[64];
-    int nrun = 0;
+    int nrun = 0, reused = 0;
     unsigned long long done_bytes = 0;
     double shown = 0;
     {
@@ -375,9 +485,21 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         if (!ok) break;
         for (int k = 0; k < units.n; k++) written += units.u[k].bytes;
 
-        // compiles
+        // compiles (a piece whose C is the same as the last good build's keeps its object)
         while (nrun < jobs && next < units.n) {
-            PlatProc p = start_compile(&t, &units.u[next]);
+            Unit *u = &units.u[next];
+            if (next > 0) {  // (unit 0, the entry file, carries GAMELIB_ID: always compiled)
+                u->hash = file_hash(u->src);
+                struct stat ost;
+                if (manifest_has(&kept, u) && stat(u->obj, &ost) == 0) {
+                    done_bytes += u->bytes;
+                    remove(u->src);
+                    reused++;
+                    next++;
+                    continue;
+                }
+            }
+            PlatProc p = start_compile(&t, u);
             if (!p) { snprintf(why, why_size, "the compiler didn't start"); ok = false; break; }
             run[nrun].p = p, run[nrun].unit = next++;
             nrun++;
@@ -405,7 +527,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         double est_total = gens_done ? (double)written : gen_frac > 0.02 ? (double)written / gen_frac : 0;
         double comp_frac = est_total > 0 ? (double)done_bytes / est_total : 0;
         if (comp_frac > 1) comp_frac = 1;
-        double f = 0.2 * gen_frac + 0.75 * comp_frac;
+        // (an update that keeps the last build's pieces compiles little: generating the C is most of its time)
+        double f = kept.n ? 0.85 * gen_frac + 0.1 * comp_frac : 0.2 * gen_frac + 0.75 * comp_frac;
         double secs = (double)(plat_now_ns() - t0) / 1e9;
         if (gen_frac == 0) f = 0.05 * (secs / (secs + 20));  // (the generator's first pass: no count yet)
         if (f > shown) shown = f;
@@ -481,9 +604,13 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         }
         if (f) fclose(f);
     }
+    if (ok) manifest_write(work, &units);
+    cleanup_work(work);  // (the objects stay for the next build)
+    rt_remove_game_file(game_dir, ".zigcache");
+    LOG("[gamebuild] %s in %.0fs: %d of %d pieces compiled, %d kept from the last build\n", ok ? "done" : "failed",
+        (double)(plat_now_ns() - t0) / 1e9, units.n - reused, units.n, reused);
     free(units.u);
-    rt_remove_game_file(game_dir, ".gamebuild");  // the C, the objects, the logs
-    LOG("[gamebuild] %s in %.0fs\n", ok ? "done" : "failed", (double)(plat_now_ns() - t0) / 1e9);
+    free(kept.k);
     if (ok && o->progress) o->progress(1, "Finishing...");
     return ok;
 }

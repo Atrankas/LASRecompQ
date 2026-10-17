@@ -1,5 +1,6 @@
 """Overworld copies of a mini-boss whose own flow gives a check (Lanmola: LAS puts Yarna Desert's item in
-Lanmola.bfevfl, mod_generator.lanmolaChanges) must not give it again when beaten: each copy's switch 2 = a new global
+Lanmola.bfevfl, mod_generator.lanmolaChanges; Armos Knight: the armos-knight check in DeguArmos.bfevfl,
+armosKnightChanges) must not give it again when beaten (a copy keeps coming back): each copy's switch 2 = a new global
 flag (OverworldMinibossMarker) that the runtime sets when it wakes one (runtime/hle/miniboss.c, settings.json
 "miniboss-marker-flag"); the flow asks CheckSawTheFirstEvent(switchIndex 2) before the item get - the original
 (no switch 2: 0) gets the item as before, a copy (the marker set: 1) goes straight past it.
@@ -8,10 +9,11 @@ flag (OverworldMinibossMarker) that the runtime sets when it wakes one (runtime/
 """
 import os
 
-# mini-boss type -> (event flow, actor name in it, the event LAS's item get follows, the event after it, the original's
-# room in the Field)
+# mini-boss type -> (event flow, actor name in it, the event LAS's item get follows, the event after it (None: the
+# flow ends), the original's room in the Field (None: not on the Field - every Field one is a copy))
 GUARDS = {
     0x57: ('Lanmola.bfevfl', 'Lanmola', 'Event34', 'Event9', 'Field_13O'),
+    0x5B: ('DeguArmos.bfevfl', 'DeguArmos', 'Event47', None, None),
 }
 MARKER = 'OverworldMinibossMarker'
 
@@ -26,6 +28,8 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
 
     originals = set()  # (the original's own key: he keeps his item)
     for t, (_, _, _, _, room_name) in GUARDS.items():
+        if room_name is None:
+            continue
         van = leb.Room(open(os.path.join(common_in, 'level', 'Field', f'{room_name}.leb'), 'rb').read())
         originals |= {a.key for a in van.actors if a.type == t}
     field = os.path.join(common_out, 'level', 'Field')
@@ -45,9 +49,8 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
     if MARKER in have:
         idx = have[MARKER]
     else:
-        idx = max(i for i in have.values() if i < 2048) + 1
-        if idx >= 2048:
-            raise RuntimeError('out of GlobalFlags indices for the overworld mini-boss marker')
+        import seed_tables
+        idx = seed_tables.next_flag(sheet, out_dir)
         sheet['values'].append({'symbol': MARKER, 'index': idx})
         os.makedirs(os.path.join(common_out, 'datasheets'), exist_ok=True)
         oead_tools.writeSheet(os.path.join(common_out, rel), sheet)
@@ -69,7 +72,7 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
         fc = flow.flowchart
         first = event_tools.findEvent(fc, before).data.nxt.v.name  # (LAS's item get, inserted after `before`)
         sw = event_tools.createSwitchEvent(fc, actor, 'CheckSawTheFirstEvent', {'switchIndex': 2},
-                                           {0: first, 1: after})
+                                           {0: first, 1: after} if after else {0: first})
         event_tools.insertEventAfter(fc, before, sw)
         os.makedirs(os.path.join(common_out, 'event'), exist_ok=True)
         event_tools.writeFlow(os.path.join(common_out, f'event/{name}'), flow)

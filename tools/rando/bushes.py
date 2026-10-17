@@ -29,7 +29,7 @@ BUSH_TYPE = 0xb6  # ObjGrass (bushes; ObjLawn 0xb5 is the tall grass)
 FLAG_BASE = int(os.environ.get('LARECOMP_BUSH_FLAG_BASE', 2048))  # (env: experiments)
 FLAG_LIMIT = int(os.environ.get('LARECOMP_BUSH_FLAG_LIMIT', 4096))  # runtime/hle/flags_ext.c: 512-byte bitfield
 # what bushes give in the original game: hearts and rupees mostly (ItemDrop 'Grass'), a few refills
-JUNK_MIX = [('pot-heart', 0.32), ('rupee-5', 0.34), ('rupee-20', 0.10), ('rupee-50', 0.03),
+JUNK_MIX = [('pot-heart', 0.32), ('pot-rupee-5', 0.34), ('pot-rupee-20', 0.10), ('pot-rupee-50', 0.03),
             ('pot-arrows', 0.08), ('pot-bombs', 0.08), ('pot-powder', 0.05)]
 BUSH_TRAPS = pots.POT_TRAPS
 HIDE_SCALE = float(os.environ.get('LARECOMP_BUSH_HIDE', 0.4))  # smaller than in pots: leaves don't cover a 0.7 item

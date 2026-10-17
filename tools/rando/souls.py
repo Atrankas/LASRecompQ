@@ -25,7 +25,9 @@ appear, so it can't be beaten and what it guards can't be had:
             The Color Dungeon's fairy rewards get kill-evil-orb (LAS never asked for the boss there).
 Overworld mini-bosses ("Mini-bosses among overworld enemies") are never held back: souls only apply in dungeons.
 """
+import copy
 import os
+import re
 import glob
 
 # dungeon (0 = Color Dungeon), boss, its actor type, LAS kill token, level
@@ -105,6 +107,18 @@ def _and(logic_defs, loc, atom):
 def add_to_logic(logic_defs, item_defs, kinds, cat=None):
     """Souls into the pool (replacing junk, LAS needs one item per location) and into the kill conditions. Mini-boss
     rooms: room_logic.EXIT_REQ (leaving the room needs its soul) for the room graph of shuffled / vanilla dungeons."""
+    # Dampe's chambers (PanelLv... levels) keep every boss / mini-boss (runtime/hle/souls.c holds them back in the
+    # dungeons only): their kills stay soul-free copies
+    for kind, name, typ, kill, _ in souls(kinds):
+        if not kill or kill not in logic_defs:
+            continue
+        uses = [k for k, v in logic_defs.items() if k.startswith('dampe-') and
+                re.search(rf'\b{re.escape(kill)}\b', v.get('condition-basic') or '')]
+        if uses:
+            logic_defs[kill + '-chamber'] = copy.deepcopy(logic_defs[kill])
+            for k in uses:
+                logic_defs[k]['condition-basic'] = re.sub(rf'\b{re.escape(kill)}\b(?![-\[])', kill + '-chamber',
+                                                          logic_defs[k]['condition-basic'])
     for kind, name, typ, kill, _ in souls(kinds):
         item_defs[las_name(name)] = dict(MODEL, **{'type': 'important', 'quantity': 1, 'item-key': item_key(name, kind)})
         if kill:
@@ -160,7 +174,20 @@ def vanilla_gate(cat, romfs, logic_defs, levels, extra_locations=None):
                 common = set.intersection(*souls_in)
                 if common:
                     need[cell] = common
-        for loc, room in targets.items():
+        # boss drops (no room listed): the boss sits behind its door (as room_logic.py's boss_cell)
+        n = room_logic.LEVELS[lv][0]
+        here = dict(targets)
+        for cell, room in layout.items():
+            for d in cat.get(room, {}).get('doors', []):
+                if len(d) > 3 and d[2] == 'bossdoor':
+                    c, r = room_logic.cell_pos(cell)
+                    dc, dr = room_logic.STEP[d[0]]
+                    arena = f'{lv}_{room_logic.cell_name(c + dc, r + dr)}'
+                    for loc, v in logic_defs.items():
+                        if v.get('type') == 'item' and v.get('subtype') == 'boss' and loc.startswith(f'D{n}-') \
+                                and not here.get(loc):
+                            here[loc] = arena
+        for loc, room in here.items():
             if room and room.startswith(lv + '_') and loc in logic_defs:
                 for atom in sorted(need.get(room.rsplit('_', 1)[1], ())):
                     _and(logic_defs, loc, atom)
@@ -193,11 +220,13 @@ def barriers(out_romfs, romfs, leb, cat, kinds):
     """Rooms whose held-back enemy leaves the shutters open: [(level, soul name, defeat flag, cells)]. cells: the
     room's cells as (column, row) of the 15 x 12 grid, from the enemy's position (Eagle's Tower's floors sit side by
     side: names don't match positions there) plus, for a room spanning several cells, the other cell files whose
-    actors carry the same room id. Side-view rooms (z = 0 plane: Angler, Evil Eagle) are left out."""
+    actors carry the same room id. Side-view rooms (z = 0 plane: Angler, Evil Eagle) and Eagle's Tower are left out."""
     import collections
     types = {t: (name, kind) for kind, name, t, _, _ in souls(kinds) if kind == 'mini'}
     out = []
     for level in DUNGEON_LEVELS if types else ():
+        if level == 'Lv07EagleTower':  # (no room graph there - dungeon_gen.ENTRANCES leaves it out - so its checks
+            continue                   # can't be gated by soul: no wall either, or Link could be shut in)
         rooms = {}
         for fname, f in sorted(_level_files(out_romfs, romfs, level).items()):
             with open(f, 'rb') as fh:
@@ -285,10 +314,12 @@ def apply(out_dir, romfs, leb, oead_tools, event_tools, msbt, kinds, cat):
     nxt = max(int(v['index']) for v in sheet['values'] if int(v['index']) < 1240) + 1
     flags = {}
     for kind, name, _, _, _ in all_souls:
+        if nxt >= 1240:  # (no room left below: after every flag the seed has - shopsanity's are 1240+ already)
+            nxt = max(int(v['index']) for v in sheet['values'] if int(v['index']) < 2048) + 1
+            assert nxt < 2048, nxt
         flags[name] = nxt
         sheet['values'].append({'symbol': item_key(name, kind), 'index': nxt})
         nxt += 1
-    assert nxt <= 1240, nxt
     oead_tools.writeSheet(dst(rel), sheet)
 
     # item rows: the Secret Medicine's, renamed (the get sequence looks items up by key)

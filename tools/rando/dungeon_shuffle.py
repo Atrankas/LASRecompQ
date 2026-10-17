@@ -28,8 +28,8 @@ ROLE_ACTORS = ('TreasureBox', 'SmallKey', 'NightmareKey', 'Stairs', 'Downstairs'
                'Degu', 'Rola', 'Hinox', 'Bossblin', 'Dodongo', 'Lanmola', 'Hiploop', 'Stalfon', 'Gohma', 'Jacky',
                'PiccoloMaster', 'EnemyTurtleRock', 'MightPunch', 'StoneHinox', 'BossBlob', 'DonPawn', 'PotDemon',
                'Angler', 'Hooker', 'Albatoss', 'Shadow', 'PlayerStart', 'Hole', 'Npc', 'Shop', 'FullMoon',
-               'Instrument', 'ConchHorn', 'SeaLily', 'SurfHarp', 'WindMarimba', 'CoralTriangle', 'EveningCalm',
-               'ThunderDrum', 'DungeonCo', 'Compass', 'Beak', 'Map', 'Tunic', 'Panel', 'Golden', 'HeartContainer')
+               'Instrument', 'ConchHorn', 'SeaLily', 'SurfHarp', 'WindMari', 'CoralTri', 'EveningCalm',
+               'ThunderD', 'DungeonCo', 'Compass', 'Beak', 'Map', 'Tunic', 'Panel', 'Golden', 'HeartContainer')
 
 
 BOSS_TYPES = set(range(0x51, 0x70))  # mini-bosses 0x51-0x61 and bosses (EnemyRola .. ), by actor type id

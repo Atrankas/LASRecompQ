@@ -17,6 +17,18 @@ EXACT = {'unused0427', 'unused0428', 'unused0429', 'unused0430', 'GhostClear1', 
          'Ghost4_Clear', 'WalrusAwaked', 'EighthClear'}
 
 
+def next_flag(sheet, seed_dir):
+    """A new GlobalFlags index after every one the seed's sheet has (pots, bushes, generated dungeons...; below the
+    Chaos map letters at 3800). Past the game's 2048 the seed turns on the extended flags (runtime/hle/flags_ext.c)."""
+    i = max(int(v['index']) for v in sheet['values'] if int(v['index']) < 3800) + 1
+    if i >= 3800:
+        raise RuntimeError('out of GlobalFlags indices')
+    if i >= 2048:
+        with open(os.path.join(seed_dir, 'flags_ext'), 'a') as f:
+            f.write(f'event flag {i}\n')
+    return i
+
+
 def write_flags(seed_dir, oead_tools, romfs=None):
     p = os.path.join(seed_dir, 'romfs', 'region_common', 'datasheets', 'GlobalFlags.gsheet')
     if not os.path.exists(p) and romfs:

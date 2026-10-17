@@ -1107,13 +1107,13 @@ doors:
   outer_extra: null
   door_req: null
   exit_req: null
-  inside:
+  inside:  # (paid inside; the raft leaves from the dock outside the vanilla door: the rapids region)
   - location: rapids-race-45
-    cond: null
+    cond: rapids
   - location: rapids-race-35
-    cond: hookshot
+    cond: rapids & hookshot
   - location: rapids-race-30
-    cond: hookshot
+    cond: rapids & hookshot
   confidence: medium
   notes: Raft shop (NpcRaftShopMan; LAS patches RaftShopMan.bfevfl for the race prizes). The race itself runs on the overworld rapids starting outside this hut, so LADXR only shuffles it in "insanity" mode.
     Shuffling it likely needs event fixes.

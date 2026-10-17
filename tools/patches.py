@@ -108,14 +108,6 @@ for _a in WARP_REQUEST_SITES:
 CRASHOUT_SITE = 0x7000d97e2c
 
 
-def _crashout(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
-    assert w == 0xb900b81f, hex(w)  # str wzr, [x0, #0xb8]
-    return ('{ extern int rt_crashout_skip(void); ST32(c->x[0] + 0xb8, 0); if (rt_crashout_skip()) goto L_7000d97ea4; }'
-            f'  /* {a:#x}: str wzr, [x0, #0xb8] (Blaino knock-out: no crash-out event on the Field) */')
-
-
-PATCHES[CRASHOUT_SITE] = _crashout
 
 # Gohma on the Field (seeds): its moves walk / charge along a track - a heading of +-90 degrees (+0x15ec / +0x15f0,
 # the shared movement controller at +0x15c0 turns to it and the mover moves it, walls and all) toward a track end,
@@ -125,36 +117,12 @@ GOHMA_HEADING_SITES = (0x70003996e4, 0x700039a2c4)  # str w8, [x19, #0x15ec] (th
 GOHMA_ARRIVED_SITE = 0x700039957c  # ldr q0, [x19, #0x1600] (the track end, against Gohma's spot)
 
 
-def _gohma_heading(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
-    assert w == 0xb915ee68, hex(w)  # str w8, [x19, #0x15ec]
-    return ('{ extern uint32_t rt_gohma_heading(uint64_t, uint32_t); '
-            'c->x[8] = rt_gohma_heading(c->x[19], (uint32_t)c->x[8]); ST32(c->x[19] + 0x15ec, (uint32_t)c->x[8]); }'
-            f'  /* {a:#x}: str w8, [x19, #0x15ec] (Gohma: heading at Link on the Field) */')
-
-
-def _gohma_arrived(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
-    assert w == 0x3dc58260, hex(w)  # ldr q0, [x19, #0x1600]
-    return ('{ extern int rt_gohma_free(void); if (rt_gohma_free()) { c->x[0] = 0; goto L_70003995c0; } '
-            'memcpy(&c->v[0], (const void *)(uintptr_t)(c->x[19] + 0x1600), 16); }'
-            f'  /* {a:#x}: ldr q0, [x19, #0x1600] (Gohma: no track end on the Field) */')
-
-
 # Master Stalfos' body collision (CharaBodyCollision, main+0x1841c0 from his constructor) blocks Link - in his arena,
 # fine; on the Field Link couldn't damage-boost past him as past the other mini-bosses. Its flag (x6 -> sp+0x328) off
 # there (seeds, level Field).
 MSTALFOS_BODY_SITE = 0x70004b47c8  # mov w8, #1
 
 
-def _mstalfos_body(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
-    assert w == 0x320003e8, hex(w)  # mov w8, #1
-    return ('{ extern int rt_gohma_free(void); c->x[8] = rt_gohma_free() ? 0 : 1; }'
-            f'  /* {a:#x}: mov w8, #1 (Master Stalfos body collision flag: off on the Field) */')
-
-
-PATCHES[MSTALFOS_BODY_SITE] = _mstalfos_body
 
 # Master Stalfos' jump (state 4 exec) sets its vertical speed to 6 * sin(phase) - height: an arc from his arena's floor
 # (height 0). On the Field the ground is higher - he dropped through it. There the arc starts from his takeoff height
@@ -162,33 +130,10 @@ PATCHES[MSTALFOS_BODY_SITE] = _mstalfos_body
 MSTALFOS_JUMP_SITE = 0x70004bde08  # fsub s0, s0, s1
 
 
-def _mstalfos_jump(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
-    assert w == 0x1e213800, hex(w)  # fsub s0, s0, s1
-    return ('{ extern int rt_gohma_free(void); float a_, b_; memcpy(&a_, &c->v[0], 4); memcpy(&b_, &c->v[1], 4); '
-            'if (rt_gohma_free()) a_ += *(const float *)(uintptr_t)(LD64(c->x[19] + 0x1160) + 0x28c); '
-            '__uint128_t r_ = 0; a_ -= b_; memcpy(&r_, &a_, 4); c->v[0] = r_; }'
-            f'  /* {a:#x}: fsub s0, s0, s1 (Master Stalfos jump: arc from his takeoff height on the Field) */')
-
-
-PATCHES[MSTALFOS_JUMP_SITE] = _mstalfos_jump
 
 # Moblin Chief deletes himself in his init (main+0x1f8af0) unless a story bit is set (player status +0xac bit 7 - his
 # hideout's time); on the Field (seeds) that check is skipped. The defeated check before it stays.
 MCHIEF_STORY_SITE = 0x70001f8b30  # tbnz w8, #7, 0x70001f8b58
-
-
-def _mchief_story(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
-    assert w == 0x37380148, hex(w)  # tbnz w8, #7, +0x28
-    return ('{ extern int rt_gohma_free(void); if (rt_gohma_free() || ((c->x[8] >> 7) & 1)) goto L_70001f8b58; }'
-            f'  /* {a:#x}: tbnz w8, #7 (Moblin Chief: no story check on the Field) */')
-
-
-PATCHES[MCHIEF_STORY_SITE] = _mchief_story
-for _a in GOHMA_HEADING_SITES:
-    PATCHES[_a] = _gohma_heading
-PATCHES[GOHMA_ARRIVED_SITE] = _gohma_arrived
 
 
 # Generated dungeons (runtime/hle/chamber.c): every level jump goes through the request processor main+0x81ba80
@@ -381,14 +326,6 @@ PATCHES[RES_NAME_SITE] = _res_name
 MB_SEEN_SITE = 0x70000ec354
 
 
-def _mb_seen(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
-    assert w == 0xf94002a8, hex(w)  # ldr x8, [x21]
-    return ('{ extern void rt_mb_seen(uint64_t); rt_mb_seen(c->x[21]); c->x[8] = LD64(c->x[21]); }'
-            f'  /* {a:#x}: ldr x8, [x21] (actor seen: field mini-bosses) */')
-
-
-PATCHES[MB_SEEN_SITE] = _mb_seen
 
 
 # Frame pacing (runtime/hle/framepace.c): the game's frame timer (f_700000c910) advances by its frame period times
@@ -415,31 +352,12 @@ PATCHES[FRAME_STEPS_SITE] = _frame_steps
 DIG_HOLE_SITE = 0x7000ddc5cc
 
 
-def _dig_hole(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
-    assert w == 0xf94007f6, hex(w)  # ldr x22, [sp, #8]
-    return ('{ extern void rt_dig_hole(Cpu *); rt_dig_hole(c); c->x[22] = LD64(c->sp + 8); }'
-            f'  /* {a:#x}: ldr x22, [sp, #8] (a hole was dug: runtime/hle/digs.c) */')
-
-
-PATCHES[DIG_HOLE_SITE] = _dig_hole
 
 # The game keeps its dug holes in a list (main+0x1cbae80, count at +0x10) and fills in the oldest ones once there are
 # more than 80 (f_7000d22d10: while count > 0x50). Digsanity keeps holes open: the limit comes from the runtime.
-HOLE_CAP_SITES = {0x7000d22d30: (0xf101451f, 0, 'cmp x8, #0x51'), 0x7000d22dc0: (0xf101411f, 1, 'cmp x8, #0x50')}
+HOLE_CAP_SITES = (0x7000d22d30, 0x7000d22dc0)  # cmp x8, #0x51 / cmp x8, #0x50
 
 
-def _hole_cap(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
-    want, minus, text = HOLE_CAP_SITES[a]
-    assert w == want, hex(w)
-    return ('{ extern uint64_t rt_hole_cap(void); '
-            f'(void)(subs64(c, c->x[8], rt_hole_cap() - {minus}ull)); }}'
-            f'  /* {a:#x}: {text} (dug-hole limit: runtime/hle/digs.c) */')
-
-
-for _a in HOLE_CAP_SITES:
-    PATCHES[_a] = _hole_cap
 # Escape Bottle (runtime/hle/escape.c): the player's per-item "use it now?" predicates (one per item slot, main+0xd50e60
 # .. 0xd52f00; each: X / Y newly pressed with that slot equipped on it) only run while Link may use items (no cutscene,
 # dialog, menu or transition). main+0xd50e60 is the third bottle's (slot 0xf): owned (PlayerStatus+0xa9 bit 7) and
@@ -688,3 +606,54 @@ def _prompt_pos(gen, a):
 
 
 PATCHES[PROMPT_POS_SITE] = _prompt_pos
+
+
+# Issue #19: [this+0x10] is the delegate of a recycled "action" object (the class whose vtable is 0x7001c51358, and
+# the ~100 siblings sharing these forwarders). Its slot +0x28 (main+0x10cce50) and +0x30 (main+0x10cce30) forward to
+# that delegate without checking it, while the class's own slot +0x38 (main+0x10cce80) checks *its* delegate (+0x18)
+# with `cbz` and returns when there is none. The task loop (main+0x13c21e0) picks the slot from the task's state and
+# the object's slot +0x00 (main+0x10cce00) re-initialises it, clearing the delegate: the tick can then land on a
+# freshly reset object and the forwarder dereferences NULL (signal 11 at main+0x10cce50+0x8, always the same object).
+# runtime/hle/delegate_null.c makes both forwarders read a missing delegate as "nothing to do" as well.
+DELEGATE_FORWARDER_SITES = [0x70010cce50, 0x70010cce30]
+
+
+def _delegate_forwarder(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
+    assert w == 0xaa0003e1, hex(w)  # mov x1, x0
+    slot = 0x28 if a == 0x70010cce50 else 0x30
+    return ('{ extern int rt_delegate_null(Cpu *, int); if (rt_delegate_null(c, %#x)) return; c->x[1] = c->x[0]; }'
+            f'  /* {a:#x}: mov x1, x0 (delegate forwarder: nothing to forward to) */' % slot)
+
+
+for _a in DELEGATE_FORWARDER_SITES:
+    PATCHES[_a] = _delegate_forwarder
+
+
+# Issue #41: an event's handler that is an empty std::function. The event dispatcher main+0x108ddc0 calls it through
+# main+0x108dfc0 (std::function's call: throws std::bad_function_call when empty) and catches that (its landing pad
+# 0x108de78 -> 0x108de00: returns 0, "not handled") - the catch can't work in recompiled code (no unwinding), so the
+# throw ended in std::terminate. The hook skips the call when the function is empty, to where the catch goes. Seen
+# with Warp tab jumps; same family as NO_HANDLER_SITES (the action dispatcher's).
+EMPTY_HANDLER_SITE = 0x700108de48  # bl main+0x108dfc0
+
+
+# ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
+# what to do - 0 run it, 1 the hook did it all, 2.. jump to the site's first.. target (each a label in its function).
+# The game code they generate never changes when a hook's behaviour does: only a new site needs the game code
+# rebuilt. New game-code changes go here, as a hook, unless they can't.
+# site -> (the instruction word, (jump targets...), what it's for)
+HOOKS = {
+    MB_SEEN_SITE: (0xf94002a8, (), 'ldr x8, [x21]: an actor seen - field mini-bosses (miniboss.c)'),
+    CRASHOUT_SITE: (0xb900b81f, (0x7000d97ea4,), 'str wzr, [x0, #0xb8]: Blaino knock-out, no crash-out on the Field'),
+    GOHMA_HEADING_SITES[0]: (0xb915ee68, (), 'str w8, [x19, #0x15ec]: Gohma heading at Link on the Field'),
+    GOHMA_HEADING_SITES[1]: (0xb915ee68, (), 'str w8, [x19, #0x15ec]: Gohma heading at Link on the Field (again)'),
+    GOHMA_ARRIVED_SITE: (0x3dc58260, (0x70003995c0,), 'ldr q0, [x19, #0x1600]: Gohma, no track end on the Field'),
+    MSTALFOS_BODY_SITE: (0x320003e8, (), 'mov w8, #1: Master Stalfos body collision flag, off on the Field'),
+    MSTALFOS_JUMP_SITE: (0x1e213800, (), 'fsub s0, s0, s1: Master Stalfos jump arc from his takeoff height'),
+    MCHIEF_STORY_SITE: (0x37380148, (0x70001f8b58,), 'tbnz w8, #7: Moblin Chief, no story check on the Field'),
+    DIG_HOLE_SITE: (0xf94007f6, (), 'ldr x22, [sp, #8]: a hole was dug (digs.c)'),
+    HOLE_CAP_SITES[0]: (0xf101451f, (), 'cmp x8, #0x51: dug-hole limit (digs.c)'),
+    HOLE_CAP_SITES[1]: (0xf101411f, (), 'cmp x8, #0x50: dug-hole limit (digs.c)'),
+    EMPTY_HANDLER_SITE: (0x9400005e, (0x700108de00,), 'bl std::function call: an empty event handler, as its catch'),
+}

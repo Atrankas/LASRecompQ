@@ -5,6 +5,8 @@
 # that same machine needs. Shipped as Contents/Resources/zig (macOS), zig/ next to the exe (Windows, Linux).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Frozen: a new VER rebuilds every player's game code (this file is in the Makefile's GAMELIB_BASE_SRCS). Only for a
+# real need; then ship it in a zig-<VER>/ folder (an update extracted over the old one leaves no old files in it).
 VER=0.17.0
 case "$(uname -s)" in Darwin) OS=macos;; Linux) OS=linux;; *) OS=windows;; esac
 case "$(uname -m)" in arm64|aarch64) ARCH=aarch64;; *) ARCH=x86_64;; esac

@@ -1,6 +1,7 @@
 // Builds the game code library (runtime/gamelib.h) on the player's machine, from their own game files: the generator
 // (tools/gen.py; shipped frozen as lasgen/) turns exefs/main and exefs/sdk into C, the bundled compiler (zig/) builds
-// that into <game_dir>/lasgame.*. The C and the objects are deleted afterwards.
+// that into <game_dir>/lasgame.*. The compiled pieces are kept in <game_dir>/.gamebuild: an update compiles only the
+// pieces whose generated C changed.
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>

@@ -243,9 +243,14 @@ class ItemShuffler(QtCore.QThread):
         self.item_defs['rupee-100']['quantity'] += 2 # +200 rupees
         self.item_defs['rupee-300']['quantity'] += 1 # +300 rupees
 
-        # remove 50-rupees to make room for the traps
-        self.item_defs['rupee-50']['quantity'] -= num_traps
+        # remove 50-rupees to make room for the traps (LAS Recomp: then the most plentiful junk rupees - souls, pets,
+        # trendsanity and the Escape Bottle take 50-rupees first; a negative count dropped the traps)
         for i in range(num_traps):
+            src = 'rupee-50' if self.item_defs['rupee-50']['quantity'] > 0 else \
+                max(('rupee-20', 'rupee-100', 'rupee-300'), key=lambda k: self.item_defs[k]['quantity'])
+            if self.item_defs[src]['quantity'] <= 0:
+                break
+            self.item_defs[src]['quantity'] -= 1
             trap = random.choice(traps)
             self.item_defs[trap]['quantity'] += 1
 
@@ -306,11 +311,17 @@ class ItemShuffler(QtCore.QThread):
         if logic == 'none': return True
         
         if self.logic_defs[no_params]['type'] == 'enemy':
+            node = self.logic_defs[no_params]
             param = re.search('\\[([a-z]+)\\]', newCheck)
-            if param:
-                return eval(self.parseCondition(self.logic_defs[no_params]['condition-basic'])) or eval(self.parseCondition(self.logic_defs[no_params]['condition-'+param.group(1)]))
-            else:
-                return eval(self.parseCondition(self.logic_defs[no_params]['condition-basic']))
+            if param and eval(self.parseCondition(node['condition-'+param.group(1)])):
+                return True
+            if eval(self.parseCondition(node['condition-basic'])):
+                return True
+            # LAS Recomp: an enemy's harder-logic ways count too (they were never read)
+            for lv, allowed in (('advanced', ('advanced', 'glitched', 'hell')), ('glitched', ('glitched', 'hell')), ('hell', ('hell',))):
+                if 'condition-' + lv in node and logic in allowed and eval(self.parseCondition(node['condition-' + lv])):
+                    return True
+            return False
         else:
             # For item and follower checks, see if you have access to the region. Otherwise, check on the conditions, if they exist
             region_access = self.hasAccess(access, self.logic_defs[newCheck]['region']) if (self.logic_defs[newCheck]['type'] in ('item', 'follower')) else True
@@ -653,12 +664,25 @@ class ItemShuffler(QtCore.QThread):
                     locations.remove(location_pool[0])
                     placement_tracker.append(location_pool.pop(0))
         
+        # LAS Recomp keysanity: the freed dungeon items are progression - place them with the important items, not after
+        # all the junk (last, only the leftover spots were left: long undo loops)
+        ks_free = {'keys': ('key-',), 'keys+nk': ('key-', 'nightmare-key-'),
+                   'all': ('key-', 'nightmare-key-', 'map', 'compass', 'stone-beak')}.get(
+                       self.settings.get('keysanity', 'off'), ())
+        if ks_free:
+            freed = [s for s in items if s.startswith(ks_free) and s[-2:-1] == 'D' and s[-1].isdigit()]
+            rest = [s for s in items if s not in freed]
+            n_imp = next((k for k, s in enumerate(rest) if self.item_defs[s]['type'] != 'important'), len(rest))
+            items = rest[:n_imp] + freed + rest[n_imp:]
+
         # Shuffle remaining locations
         random.shuffle(locations)
         
         # Place the traps and master stalfos note. These HAVE to go in chests so we need to do them first
         to_place = [s for s in items if s in self.force_chests]
-        chests = [s for s in locations if self.logic_defs[s]['subtype'] == 'chest']
+        chests = [s for s in locations if self.logic_defs[s]['subtype'] == 'chest'
+                  and s not in self.settings.get('absent-locations', ())  # (LAS Recomp: not in the game)
+                  and s not in self.settings.get('junk-locations', ())]  # (LAS Recomp: Link may lose the way there)
         for item in to_place:
             if not self.thread_active:
                 break
@@ -708,6 +732,12 @@ class ItemShuffler(QtCore.QThread):
             access = self.removeAccess(access, items.pop(0))
             locations.remove('tarin')
         
+        # LAS Recomp: one item per location - a pool short of items (a count gone below 0) leaves locations empty:
+        # junk fills them (said, so the cause can be found)
+        short = len(locations) - len(items)
+        if short > 0:
+            print(f'pool short by {short}: rupee-20 added', flush=True)
+            items += ['rupee-20'] * short
         # LAS Recomp: one item per location - room shuffle key counts can leave the pool a few items over; drop junk
         extra = len(items) - len(locations)
         for k in range(len(items) - 1, -1, -1):
@@ -739,6 +769,12 @@ class ItemShuffler(QtCore.QThread):
                     valid_placement = False
                 # special case where if the actual check on the 5 chests room is a zol-trap, nothing happens with the 5th chest
                 elif item == 'zol-trap' and locations[0] == 'taltal-5-chest-puzzle':
+                    valid_placement = False
+                # LAS Recomp: rooms the dungeon room shuffle left out aren't in the game, and rooms Link may lose the
+                # way to (junk-locations: Eagle's Tower's 3rd floor before / after the collapse) - only junk there
+                elif (locations[0] in self.settings.get('absent-locations', ()) or
+                      locations[0] in self.settings.get('junk-locations', ())) and \
+                        self.item_defs[item]['type'] != 'junk':
                     valid_placement = False
                 elif self.item_defs[item]['type'] in ('important', 'trade', 'seashell'):
                     # Check if it's reachable. We only need to do this check for important items!
@@ -799,6 +835,8 @@ class ItemShuffler(QtCore.QThread):
                     and placements[k].startswith(('compass', 'map', 'stone-beak', 'key-', 'nightmare-key'))
                     and placements[k][-2:-1] == 'D' and placements[k][-1].isdigit()]:
             n = int(placements[key][-1])
+            if key.startswith('starting-'):  # (starting dungeon items: given on entering their dungeon)
+                continue
             # (dungeon room shuffle: the dungeon the check's room is in now, not the one its name says)
             if self.settings.get('dungeon-of', {}).get(key, key[:2]) == f'D{n}':
                 continue

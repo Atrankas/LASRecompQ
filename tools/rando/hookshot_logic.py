@@ -25,8 +25,8 @@ def apply(logic_defs):
     n = 0
     for name, alt in ROUTES.items():
         node = logic_defs.get(name)
-        if not node or 'condition-basic' not in node:
-            continue
+        if not node or 'condition-basic' not in node or alt in node['condition-basic']:
+            continue  # (applied again after the entrance shuffle rewrote a moved location's condition)
         node['condition-basic'] = f"({node['condition-basic']}) | ({alt})"
         n += 1
     return n

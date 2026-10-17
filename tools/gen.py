@@ -396,6 +396,14 @@ class Module:
                     v = self.lifter.lift(w, a)
                     if v.kind in ('b', 'bcond') and isinstance(v.target, int) and entry <= v.target < end:
                         labels.add(v.target)
+        hooks_here = [a for a in range(entry, end, 4) if a in HOOKS]
+        if hooks_here:  # (a hook's jump targets need their labels)
+            labels = set(labels)
+            for a in hooks_here:
+                for t in HOOKS[a][1]:
+                    if not entry <= t < end:
+                        raise ValueError(f'hook {a:#x}: target {t:#x} is outside its function')
+                    labels.add(t)
         last = None
         for a in range(entry, end, 4):
             ins = self.lift(a)
@@ -411,6 +419,18 @@ class Module:
                     out.append(f'    {"if" if first else "else if"} (rw == {hx(w)}) {{ ' + ' '.join(self.render_single(v, a, jump, refs)) + ' }')
                     first = False
                 out.append('    else { ' + ' '.join(self.render_single(ins, a, jump, refs)) + ' } }')
+                last = 'op'
+                continue
+            if a + SHIFT in HOOKS:  # hook site (tools/patches.py HOOKS): the runtime decides, the instruction stays as it is
+                flush()
+                word, targets, _ = HOOKS[a + SHIFT]
+                w = struct.unpack_from('<I', self.nso.image, a - self.base)[0]
+                if w != word:
+                    raise ValueError(f'hook {a + SHIFT:#x}: instruction {w:#010x}, expected {word:#010x}')
+                body = ' '.join(self.render_single(ins, a, jump, refs))
+                jumps = ' '.join(f'else if (h_ == {k + 2}) goto L_{t:x};' for k, t in enumerate(targets))  # (unshifted)
+                out.append(f'    {{ int h_ = rt_hook(c, {hx(a)}); if (h_ == 0) {{ {body} }} {jumps} }}'
+                           f'  /* {a + SHIFT:#x}: hook (runtime/hle/hooks.c) */')
                 last = 'op'
                 continue
             if a + SHIFT in PATCHES:  # hand-written replacement for one instruction (tools/patches.py)
@@ -474,7 +494,7 @@ class Module:
         return out
 
 
-from patches import PATCHES
+from patches import HOOKS, PATCHES
 
 import json as _json
 import os as _os

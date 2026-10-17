@@ -237,6 +237,10 @@ def main():
                                                   settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-pots"))
         print('pots:', len(pot_locs), 'locations', ('(no logic for: ' + ', '.join(sorted(skipped)) + ')') if skipped else '',
               flush=True)
+        for name, p in pot_locs.items():  # (pots Link may lose the way to: junk only)
+            if p['room'] in pots_mod.MISSABLE_ROOMS:
+                settings.setdefault('junk-locations', set()).add(name)
+                settings['excluded-locations'].add(name)
 
     bush_locs = {}
     if settings.get('bushes'):  # bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
@@ -301,10 +305,15 @@ def main():
         def with_caves(cv):
             lg = copy.deepcopy(logic_defs)
             n = el.apply_connector_logic(lg, ed, *cv, cextra) if cv[0] else 0
-            for name, b in bush_locs.items():  # a bush on a pocket's screen may stand in the pocket: needs it
+            # a bush / dig tile on a pocket's screen may stand in the pocket: needs it
+            for name, b in list(bush_locs.items()) + list(dig_locs.items()):
                 if cv[0] and pockets.get(b['room']) and name in lg:
                     lg[name]['condition-basic'] = el._and(lg[name].get('condition-basic'), pockets[b['room']])
-            return lg, n + el.apply_logic(lg, ent_doors, ent_entry, ent_exit, extra)
+            n += el.apply_logic(lg, ent_doors, ent_entry, ent_exit, extra)
+            if settings.get('hookshot-anything'):  # (its routes, on conditions the caves' logic replaced)
+                import hookshot_logic
+                hookshot_logic.apply(lg)
+            return lg, n
 
         items = lambda lg: {k for k in el.reach_all(lg, item_defs, settings) if lg[k].get('type') == 'item'}
         want = items(with_caves(([], {}, {}))[0])  # (no caves shuffled)
@@ -345,7 +354,11 @@ def main():
                     continue
                 logic_rows = jumps
             else:
-                layouts, jumps = dungeon_gen.plan_all(cat, sub, romfs), None
+                try:
+                    layouts, jumps = dungeon_gen.plan_all(cat, sub, romfs), None
+                except RuntimeError as e:  # (as Chaos: this round's plan failed - the next one)
+                    print('room layout:', e, '- planning another', flush=True)
+                    continue
                 logic_rows = [row for lv, L in layouts.items() for row in dungeon_gen._jumps(cat, lv, L)]
             logic_defs, item_defs, settings = (copy.deepcopy(x) for x in base)
             print('room logic:', room_logic.apply(cat, romfs, layouts, logic_rows, logic_defs, item_defs, settings, extra),
@@ -354,6 +367,8 @@ def main():
             if not why:
                 break
             print('room layout can\'t be filled -', why, '- planning another', flush=True)
+        else:  # (40 layouts that couldn't be filled: an error, never the last unfillable one)
+            layouts = None
         if layouts is None:
             raise RuntimeError('no dungeon room layout for this seed')
         room_plan = (layouts, jumps)
@@ -391,18 +406,21 @@ def main():
         defs = sh.logic_defs
         env = {'self': sh, 'access': access}
         if defs[no_params]['type'] == 'enemy':
+            node = defs[no_params]
             param = re.search('\\[([a-z]+)\\]', newCheck)
-            if param:
-                return eval(compiled(defs[no_params]['condition-basic']), env) or \
-                    eval(compiled(defs[no_params]['condition-' + param.group(1)]), env)
-            return eval(compiled(defs[no_params]['condition-basic']), env)
-        node = defs[newCheck]
-        if node['type'] in ('item', 'follower') and not sh.hasAccess(access, node['region']):
-            return False
-        if 'condition-basic' in node and eval(compiled(node['condition-basic']), env):
-            return True
-        if 'condition-basic' not in node:
-            return True
+            if param and eval(compiled(node['condition-' + param.group(1)]), env):
+                return True
+            if eval(compiled(node['condition-basic']), env):
+                return True
+            # (falls through: an enemy's advanced / glitched / hell ways, as for any node below)
+        else:
+            node = defs[newCheck]
+            if node['type'] in ('item', 'follower') and not sh.hasAccess(access, node['region']):
+                return False
+            if 'condition-basic' in node and eval(compiled(node['condition-basic']), env):
+                return True
+            if 'condition-basic' not in node:
+                return True
         for lv, allowed in (('advanced', ('advanced', 'glitched', 'hell')), ('glitched', ('glitched', 'hell')), ('hell', ('hell',))):
             if 'condition-' + lv in node and logic in allowed and eval(compiled(node['condition-' + lv]), env):
                 return True
@@ -437,8 +455,8 @@ def main():
     # Independent playthrough check: from nothing, keep collecting whatever is reachable.
     pl = result['placements']
     access = {k: 1 for k, v in settings.items() if v is True}
-    for it in settings.get('starting-items', []):
-        access[it] = access.get(it, 0) + 1
+    # (the starting items come from LAS's starting-item-N / starting-dungeon-item-N locations: counting the setting
+    # too gave two of each - a second sword / shield in logic from the start)
     # LAS logic.yml (also upstream) never defines rooms D6-4D / D6-2A, so LAS treats the Face Shrine boss,
     # instrument and rapids-south-island as unreachable (conservative for placement). The check only needs
     # the vanilla instrument there, so approximate them from the neighbouring room here (check only).
@@ -452,11 +470,11 @@ def main():
         json.dump(sph, f)
     for k in [k for k, v in sh.logic_defs.items() if v.get('_check_only')]:
         del sh.logic_defs[k]
-    missing = [i for i in playthrough.INSTRUMENTS if not access.get(i)]
+    missing = [i for i in playthrough.INSTRUMENTS + ['kill-nightmare'] if not access.get(i)]
     absent = settings.get('absent-locations', set())  # (rooms the dungeon shuffle left out: not in the game)
     locs = [k for k, v in sh.logic_defs.items() if v.get('type') == 'item' and k not in absent]
     unreached = [k for k in locs if k not in seen]
-    print('playthrough:', 'all instruments reachable' if not missing else f'MISSING {missing}',
+    print('playthrough:', 'all instruments reachable, the Nightmare beatable' if not missing else f'MISSING {missing}',
           f'- {len(locs) - len(unreached)}/{len(locs)} item locations reachable', flush=True)
     if os.environ.get('LAS_DEBUG_PLAYTHROUGH'):
         print('  have:', sorted(k for k in access if k in sh.item_defs), flush=True)
@@ -472,7 +490,7 @@ def main():
         print('SHUFFLE ERROR unbeatable seed', missing, file=sys.stderr)
         sys.exit(3)
 
-    if pot_locs or dig_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
+    if pot_locs or bush_locs or dig_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
         import pots as _pots
         print('pot refills marked:', _pots.mark_refills(result['placements']), flush=True)
     pl = result['placements']
@@ -574,8 +592,6 @@ def main():
 
     import escape_bottle  # Tarin gives it with the starting items, in the game's own get-item message box
     print('escape bottle:', escape_bottle.apply(out_dir, romfs), flush=True)
-    import keysanity_text  # (after every flow edit) a dungeon item outside its dungeon names it in the get message
-    keysanity_text.apply(out_dir, romfs, result['placements'])
 
     if soul_kinds:  # where the souls' fairy models stand (after the rooms moved): drawn red there (souls.c)
         print('soul spots:', souls_mod.write_spots(out_dir, leb, result['placements']), flush=True)
@@ -594,22 +610,28 @@ def main():
     from RandomizerCore.Randomizers import item_get as _uw_get, data as _uw_data
     print('underwater:', ', '.join(underwater.apply(mods, out_dir, romfs, _uw_leb, _uw_ev, _ot, _uw_get, _uw_data)),
           flush=True)
+    import keysanity_text  # (after every flow edit, digs / underwater too) a dungeon item outside its dungeon names it
+    keysanity_text.apply(out_dir, romfs, result['placements'])
     if settings.get('enemy-minibosses'):  # the Field's walls for roaming mini-bosses (tools/rando/roam.py)
         import roam
         print('roam:', roam.write(out_dir, _uw_leb, romfs), flush=True)
         import miniboss_guard  # (copies of a mini-boss whose flow gives a check don't give it again)
         print('miniboss guard:', miniboss_guard.apply(out_dir, romfs, _uw_leb, _uw_ev, _ot, settings), flush=True)
+    if pot_locs or bush_locs or dig_locs:  # (after every flow edit) refills at real checks are refills, not the item
+        import refill_gets
+        print('refill gets:', refill_gets.apply(out_dir, romfs, settings), flush=True)
     import bomb_bag_text  # (after every flow edit, digs too) found bombs: "You found your Bomb Bag!"
     print('bomb bag text:', bomb_bag_text.apply(out_dir, romfs, settings), flush=True)
-    print('flags.tsv:', seed_tables.write_flags(out_dir, _ot, romfs), flush=True)
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
         s['absent-locations'] = sorted(s.get('absent-locations', ()))
+        s['junk-locations'] = sorted(s.get('junk-locations', ()))
         s['escape-bottle'] = True  # (runtime/hle/escape.c: older seeds keep three plain bottles)
         s['ghost-item'] = 'ghost' in pets  # (runtime/hle/pets.c: older seeds' Ghost follows Link)
         s['underwater-items'] = True  # (runtime: the sunken heart-piece actors don't hide for an owned heart piece)
         json.dump(s, f, indent=1)
+    print('flags.tsv:', seed_tables.write_flags(out_dir, _ot, romfs), flush=True)  # (reads settings.json)
     stage('Building the check tracker', 0.99)
     import tracker
     if settings.get('randomize-environments'):

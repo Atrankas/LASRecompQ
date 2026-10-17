@@ -38,7 +38,7 @@ typedef struct {
     VkPipelineCache pcache;
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
-    bool custom_border, divisor, host_import;
+    bool custom_border, divisor, host_import, dmabuf;
     uint32_t api;              // the Vulkan version the device is used at (1.3; Android: 1.1 / 1.2 + extensions)
     // window
     VkSurfaceKHR surface;
@@ -49,6 +49,7 @@ typedef struct {
     VkImage sc_images[8];
     VkImageView sc_views[8];
 } VkG;
+void vk_log_memory(const char *why);  // (device.c: per-heap budget and use, at start and on allocation failures)
 extern VkG g_vk;
 
 // ---- submissions (exec.c)

@@ -87,7 +87,9 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 
 static const uint8_t BUILD_ID[8] = {0xae, 0x16, 0xf7, 0x1e, 0x00, 0x2a, 0xf8, 0xcb};  // Link's Awakening v1.0.0 main
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
-// it): beta_<n> until 1.0, then v<major>.<minor>.<patch>.
+// it): beta_<n> until 1.0, then v<major>.<minor>.<patch>. A test build (a pre-release for a few players to try a fix)
+// is test-<name>: the start screen says "Test build <name>" and doesn't check for updates - its players go back to
+// the normal release when it's out.
 #define LARECOMP_VERSION "beta_4"
 
 // ------------------------------------------------------------------ update check
@@ -111,6 +113,7 @@ static std::string tag_label(const std::string &t, bool with_word) {
     int n;
     char end;
     if (sscanf(t.c_str(), "beta_%d%c", &n, &end) == 1) return "Beta " + std::to_string(n);
+    if (!t.compare(0, 5, "test-")) return "Test build " + t.substr(5);
     std::string v = t.size() > 1 && t[0] == 'v' ? t.substr(1) : t;
     return with_word ? "Version " + v : v;
 }
@@ -119,6 +122,7 @@ static std::string g_update_tag;  // a newer release's tag (g_update_lock)
 static pthread_mutex_t g_update_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void *update_thread(void *) {
+    if (!strncmp(LARECOMP_VERSION, "test-", 5)) return NULL;  // (a test build: no update offers)
     std::string body;
     if (const char *t = getenv("LARECOMP_UPDATE_TAGS")) {  // (test) "beta_2,v1.0.0": these releases, no network
         for (const char *p = t; *p;) {
@@ -171,16 +175,46 @@ static bool file_exists(const std::string &p) {
     return stat(p.c_str(), &st) == 0;
 }
 
+// The game's RomFS (v1.0.0) has exactly ROMFS_FILES files: a copy with fewer is incomplete (a copy or unzip that
+// stopped partway) and the game crashes on the first one it misses (issues #24, #35). Only the number ships.
+enum { ROMFS_FILES = 3836 };
+static int count_files(const std::string &dir, int depth = 0) {
+    DIR *d = depth < 12 ? opendir(dir.c_str()) : NULL;
+    if (!d) return 0;
+    int n = 0;
+    while (struct dirent *e = readdir(d)) {
+        if (e->d_name[0] == '.') continue;  // (".", "..", .DS_Store)
+        std::string p = dir + "/" + e->d_name;
+        struct stat st;
+        if (stat(p.c_str(), &st) != 0) continue;
+        n += S_ISDIR(st.st_mode) ? count_files(p, depth + 1) : S_ISREG(st.st_mode) ? 1 : 0;
+    }
+    closedir(d);
+    return n;
+}
+// The copied romfs' file count, counted once (the checks below run every frame): -1 = count again (game files set
+// up, deleted)
+static int g_romfs_count = -1;
+static void game_files_changed(void) { g_romfs_count = -1; }
+
+static std::string incomplete(int have) {
+    char b[96];
+    snprintf(b, sizeof b, "Game files incomplete (%d of %d files)", have, (int)ROMFS_FILES);
+    return b;
+}
+
 // The copied game files alone ("" = there), without the game code built from them
 static std::string check_copied_files(const std::string &root) {
     FILE *f = fopen((root + "/exefs/main").c_str(), "rb");
-    if (!f) return "No game files";
+    if (!f) return "No game files yet";
     uint8_t id[8] = {0};
     fseek(f, 0x40, SEEK_SET);
     size_t n = fread(id, 1, 8, f);
     fclose(f);
-    if (n != 8 || memcmp(id, BUILD_ID, 8)) return "Wrong game version (needs v1.0.0)";
-    if (!file_exists(root + "/romfs/region_common") || !file_exists(root + "/romfs.bin")) return "Game data missing";
+    if (n != 8 || memcmp(id, BUILD_ID, 8)) return "Wrong version of the game";
+    if (!file_exists(root + "/romfs/region_common")) return incomplete(0);
+    if (g_romfs_count < 0) g_romfs_count = count_files(root + "/romfs");
+    if (g_romfs_count < ROMFS_FILES) return incomplete(g_romfs_count);
     return "";
 }
 
@@ -195,10 +229,19 @@ static std::string check_game_files(const std::string &root) {
     return why;
 }
 
+// What to do about a check_game_files() problem (the line under it on the start screen)
+static const char *status_hint(const std::string &why) {
+    if (why.rfind("Game files incomplete", 0) == 0)
+        return "Some of the game's files are missing, usually from a copy or unzip that stopped partway. Copy your game "
+               "files again, then choose that folder and set them up again.";
+    if (why == "Wrong version of the game") return "LAS Recomp needs version 1.0.0 of the game, without updates.";
+    if (why == "Game code not built yet") return "Set up the game files to build it (a few minutes, only once).";
+    return "Set up the game files to play.";
+}
+
 // ------------------------------------------------------------------ setup (background thread)
 // The player brings their own game files: a folder holding exefs/ and romfs/. They're copied into the data root (APFS
-// clones / hard links where the file system allows) and the data image the game reads is built from romfs/
-// (runtime/romfs_build.c).
+// clones / hard links where the file system allows); the game reads romfs/ in place (runtime/services/fs.c).
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::string g_src;           // the picked folder
 static std::string g_job;           // current setup step / result for the status line
@@ -216,19 +259,29 @@ static void set_job(const std::string &s, bool failed = false, const std::string
 
 // Setup failures: a short headline and what to do next (also LARECOMP_LAUNCHER_SHOT=<f>:fail<1-6>, screenshots)
 enum { FAIL_NOT_FOUND = 1, FAIL_UNUSABLE, FAIL_COPY, FAIL_VERSION, FAIL_MISSING, FAIL_BUILD };
-static void set_failure(int k) {
-    static const char *const head[] = {"", "No game files found in that folder", "Those files can't be used",
-                                       "Setup didn't finish", "Wrong version of the game", "Game files incomplete",
+static void set_failure(int k, int have = -1) {
+    static const char *const head[] = {"", "No game files found in that folder", "Those are game packages, not game files",
+                                       "Setup didn't finish", "Wrong version of the game", "Your game files are incomplete",
                                        "The game code didn't build"};
     static const char *const hint[] = {
         "",
-        "Choose the folder that holds the game files.",
-        "Choose the folder that holds the game files.",
+        "Choose the folder that has the game's exefs and romfs folders in it.",
+        "LAS Recomp needs the game's own files (the exefs and romfs folders), not .xci / .nsp / .nca files.",
         "Make sure there's about 12 GB free and try again.",
         "LAS Recomp needs version 1.0.0 of the game, without updates.",
-        "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
+        "Some of the game's files are missing - usually a copy or unzip that stopped partway. Copy the game files "
+        "again so none are missing, then choose the folder again.",
         "Make sure there's about 2 GB free and try again. If it keeps happening, report it on Discord or GitHub."};
-    if (k >= 1 && k <= 6) set_job(head[k], true, hint[k]);
+    if (k < 1 || k > 6) return;
+    if (k == FAIL_MISSING && have >= 0) {
+        char b[320];
+        snprintf(b, sizeof b, "The romfs folder has %d of the game's %d files - some are missing, usually from a copy or "
+                 "unzip that stopped partway. Copy the game files again so none are missing, then choose the folder "
+                 "again.", have, (int)ROMFS_FILES);
+        set_job(head[k], true, b);
+        return;
+    }
+    set_job(head[k], true, hint[k]);
 }
 
 static bool is_dir(const std::string &p) {
@@ -268,12 +321,13 @@ static bool build_id_ok(const std::string &main_path) {
     return n == 8 && !memcmp(id, BUILD_ID, 8);
 }
 
-// progress (the overlay's bar): the romfs copy, then the image build - each about the size of romfs/
+// progress (the overlay's bar): the romfs copy (bytes)
 static std::atomic<unsigned long long> g_done, g_total;
-// The bar: copying and the data image are the first tenth, building the game code (runtime/gamebuild.c) the rest
+// The bar: copying is the first tenth, building the game code (runtime/gamebuild.c) the rest
 static unsigned long long g_phase_base;
 static std::atomic<float> g_build_frac{-1};  // -1: not building
 static bool g_copy_skipped;                  // (only the game code to build: the bar is all of that)
+static bool g_auto_update;                   // started by itself: game files there, game code from an older version
 static void setup_progress(uint64_t done, uint64_t) { g_done = g_phase_base + done; }
 static void build_progress(double f, const char *step) {
     g_build_frac = (float)f;
@@ -302,9 +356,9 @@ static bool build_game_code(void) {
 
 #ifdef __ANDROID__
 // Android: the game files are copied out of the picked folder (the system hands out documents, not paths) straight into
-// extracted/exefs and extracted/romfs (LasActivity.importGameFiles), or were put there over USB; the data image is a
-// thin one (romfs_build_thin: the tables only, the data read from romfs/ itself - no second copy of ~6 GB). The game
-// code isn't built here: liblasgame.so comes from a computer (tools/android/build_game.sh).
+// extracted/exefs and extracted/romfs (LasActivity.importGameFiles), or were put there over USB (the game reads its
+// data from romfs/ itself: runtime/services/fs.c). The game code isn't built here: liblasgame.so comes from a computer
+// (tools/android/build_game.sh).
 static bool in_place_files(const std::string &root) {
     return file_exists(root + "/exefs/main") && is_dir(root + "/romfs/region_common");
 }
@@ -319,7 +373,6 @@ static void *extract_thread(void *) {
     if (!src.empty()) {
         set_job("Copying the game files...");
         mkdir(g_root.c_str(), 0755);
-        remove((g_root + "/romfs.bin").c_str());
         std::string dest = g_root[0] == '/' ? g_root : std::string(rt_data_root()) + "/" + g_root;  // (Java: no cwd)
         const char *err = android_import_game_files(dest.c_str(), import_progress);
         if (err) {
@@ -336,15 +389,7 @@ static void *extract_thread(void *) {
     if (!file_exists(g_root + "/exefs/main")) { set_failure(FAIL_NOT_FOUND); goto done; }
     if (!build_id_ok(g_root + "/exefs/main")) { set_failure(FAIL_VERSION); goto done; }
     if (!in_place_files(g_root)) { set_failure(FAIL_MISSING); goto done; }
-    {
-        set_job("Building the game data image...");
-        char why[256] = "";
-        if (!romfs_build_thin((g_root + "/romfs").c_str(), (g_root + "/romfs.bin").c_str(), why, sizeof why)) {
-            fprintf(stderr, "[launcher] romfs image: %s\n", why);
-            set_failure(FAIL_COPY);
-            goto done;
-        }
-    }
+    game_files_changed();  // (counted again: the copy is new)
     if (!gamelib_present(g_root.c_str())) {
         set_job("Game code not installed", true, "Build liblasgame.so from these game files on a computer "
                 "(tools/android/build_game.sh) and install it.");
@@ -368,6 +413,7 @@ static void *extract_thread(void *) {
     src = g_src;
     pthread_mutex_unlock(&g_lock);
     g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false;
+    game_files_changed();
     std::string exefs, romfs;
     bool unusable = false;  // (game packages rather than its files)
     if (src.empty() && check_copied_files(g_root).empty()) {  // copied already (an update needs new game code)
@@ -379,6 +425,11 @@ static void *extract_thread(void *) {
     find_game(src, 0, exefs, romfs, unusable);
     if (exefs.empty() || romfs.empty()) { set_failure(unusable ? FAIL_UNUSABLE : FAIL_NOT_FOUND); goto done; }
     if (!build_id_ok(exefs + "/main")) { set_failure(FAIL_VERSION); goto done; }
+    if (int have = count_files(romfs); have < ROMFS_FILES) {  // (an incomplete copy: refused before copying it)
+        fprintf(stderr, "[launcher] %s: %d of %d romfs files\n", romfs.c_str(), have, (int)ROMFS_FILES);
+        set_failure(FAIL_MISSING, have);
+        goto done;
+    }
     {
         // (the picked folder can't be LAS Recomp's own copy: setting up again deletes that first)
         char a[4096], b[4096];
@@ -389,9 +440,10 @@ static void *extract_thread(void *) {
             goto done;
         }
         rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's; removes the folder too)
+        game_files_changed();
         mkdir(g_root.c_str(), 0755);
         unsigned long long rbytes = romfs_dir_bytes(romfs.c_str());
-        g_total = 2 * rbytes;
+        g_total = rbytes;
         set_job("Copying the game files...");
         if (!romfs_copy_tree(exefs.c_str(), (g_root + "/exefs").c_str(), NULL) ||
             !romfs_copy_tree(romfs.c_str(), (g_root + "/romfs").c_str(), setup_progress)) {
@@ -399,20 +451,15 @@ static void *extract_thread(void *) {
             goto done;
         }
         g_phase_base = rbytes, g_done = rbytes;
-        set_job("Building the game data image...");
-        char why[256] = "";
-        if (!romfs_build((g_root + "/romfs").c_str(), (g_root + "/romfs.bin").c_str(), setup_progress, why, sizeof why)) {
-            fprintf(stderr, "[launcher] romfs image: %s\n", why);
-            set_failure(FAIL_COPY);
-            goto done;
-        }
         if (!build_game_code()) goto done;
     }
 check:
     {
+        game_files_changed();
         std::string why = check_game_files(g_root);
         if (why.empty()) set_job("Game files ready.");
-        else set_failure(why.find("version") != std::string::npos ? FAIL_VERSION : FAIL_MISSING);
+        else if (why.find("version") != std::string::npos) set_failure(FAIL_VERSION);
+        else set_failure(FAIL_MISSING, g_romfs_count);
     }
 done:
     pthread_mutex_lock(&g_lock);
@@ -438,9 +485,15 @@ static void picked_android(const char *name) {
 #endif
 
 // ------------------------------------------------------------------ the user's own Nintendo fonts (not shipped)
-// runtime/hle/pl.c loads fonts/ first, else a close substitute (Hiragino Sans). Import copies recognized files only.
+// runtime/hle/pl.c loads fonts/ first, else a close substitute of the requested language. Import copies recognized
+// files only: the console's own names for the shared fonts (Standard, Chinese Simplified / its Ext, Chinese
+// Traditional, Korean and NintendoExt).
 static const char *FONT_STD[] = {"nintendo_udsg-r_std_003.bfttf", "nintendo_udsg-r_std_003.ttf",
                                  "nintendo_udsgr_std_003.ttf", "nintendo_udsgr_std_003.bfttf"};
+static const char *FONT_LANG[] = {"nintendo_udsg-r_org_zh-cn_003.bfttf", "nintendo_udsg-r_org_zh-cn_003.ttf",
+                                  "nintendo_udsg-r_ext_zh-cn_003.bfttf", "nintendo_udsg-r_ext_zh-cn_003.ttf",
+                                  "nintendo_udjxh-db_zh-tw_003.bfttf", "nintendo_udjxh-db_zh-tw_003.ttf",
+                                  "nintendo_udsg-r_ko_003.bfttf", "nintendo_udsg-r_ko_003.ttf"};
 static const char *FONT_EXT[] = {"nintendo_ext_003.bfttf", "nintendo_ext_003.ttf"};
 static std::vector<std::string> g_font_picks;
 static std::string g_font_msg;
@@ -467,10 +520,11 @@ static void import_fonts() {
     mkdir("fonts", 0755);
     int ok = 0, skipped = 0;
     for (auto &src : picks) {
-        std::string base = src.substr(src.find_last_of('/') + 1), low = base;
+        std::string base = src.substr(src.find_last_of("/\\") + 1), low = base;  // (Windows paths use '\\' too)
         for (auto &c : low) c = (char)tolower(c);
         bool known = false;
         for (auto n : FONT_STD) known |= low == n;
+        for (auto n : FONT_LANG) known |= low == n;
         for (auto n : FONT_EXT) known |= low == n;
         if (!known) { skipped++; continue; }
         FILE *in = fopen(src.c_str(), "rb"), *out = fopen(("fonts/" + low).c_str(), "wb");
@@ -489,8 +543,9 @@ static void import_fonts() {
 
 static void remove_fonts() {
     for (auto n : FONT_STD) unlink((std::string("fonts/") + n).c_str());
+    for (auto n : FONT_LANG) unlink((std::string("fonts/") + n).c_str());
     for (auto n : FONT_EXT) unlink((std::string("fonts/") + n).c_str());
-    g_font_msg = "Imported fonts removed: the substitute font is used.";
+    g_font_msg = "Imported fonts removed: the substitute fonts are used.";
 }
 
 // ------------------------------------------------------------------ background: a title movie frame
@@ -885,6 +940,7 @@ static void prelaunch_tab(float sc) {
         ImGui::Spacing();
         if (ImGui::Button("Delete", ImVec2(220 * sc, 0))) {
             bool ok = rt_remove_game_files(g_root.c_str());  // (runtime/paths.c: only what the extraction made)
+            game_files_changed();
             set_job(ok ? "Game files deleted." : "Could not delete the game files (not in LAS Recomp's data folder?).", !ok);
             g_files_deleted = true, gb = -1;
             ImGui::CloseCurrentPopup();
@@ -900,18 +956,21 @@ static void prelaunch_tab(float sc) {
     ImGui::Spacing();
     heading("Game font");
     import_fonts();
-    bool fs = have_font(FONT_STD, 4), fe = have_font(FONT_EXT, 2);
-    ImGui::Text("Text: %s    Button icons: %s", fs ? "Nintendo font (imported)" : "substitute (Hiragino Sans)",
-                fe ? "imported" : "substitute");
+    bool fs = have_font(FONT_STD, 4), fl = have_font(FONT_LANG, 8), fe = have_font(FONT_EXT, 2);
+    ImGui::Text("Text: %s    Chinese / Korean: %s    Button icons: %s",
+                fs ? "Nintendo font (imported)" : "substitute (this OS's, per language)",
+                fl ? "Nintendo font (imported)" : "substitute", fe ? "imported" : "substitute");
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("Fonts aren't included. For the original look, dump them from your own Switch and import: "
-                        "nintendo_udsg-r_std_003.bfttf (text) and nintendo_ext_003.bfttf (button icons). "
+    ImGui::TextDisabled("Fonts aren't included. For the original look, dump them from your own Switch and import "
+                        "nintendo_udsg-r_std_003.bfttf (text), the same-named files for Chinese and Korean "
+                        "(nintendo_udsg-r_org_zh-cn_003, nintendo_udsg-r_ext_zh-cn_003, nintendo_udjxh-db_zh-tw_003, "
+                        "nintendo_udsg-r_ko_003) and nintendo_ext_003.bfttf (button icons). "
                         ".ttf versions with the same names work too.");
     ImGui::PopTextWrapPos();
     if (!g_font_msg.empty()) ImGui::Text("%s", g_font_msg.c_str());
     static const SDL_DialogFileFilter font_f[] = {{"Switch fonts", "bfttf;ttf"}};
     if (ImGui::Button("Import fonts")) SDL_ShowOpenFileDialog(picked_fonts, NULL, g_launcher_win, font_f, 1, NULL, true);
-    if (fs || fe) {
+    if (fs || fl || fe) {
         ImGui::SameLine();
         if (ImGui::Button("Use substitute font")) remove_fonts();
     }
@@ -985,6 +1044,10 @@ extern "C" void launcher_run(const char *root) {
     launcher_pad_open_all();
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
 
+    // an older version's game data image: the game reads the romfs/ folder itself now - 5.8 GB back
+    if (check_copied_files(g_root).empty() && file_exists(g_root + "/romfs.bin") &&
+        rt_remove_game_file(g_root.c_str(), "romfs.bin"))
+        fprintf(stderr, "[launcher] removed the old game data image (romfs.bin)\n");
     std::string status = check_game_files(g_root);
     if (status.empty()) load_background(dev);
     std::vector<std::string> seeds = list_seeds();
@@ -1030,9 +1093,23 @@ extern "C" void launcher_run(const char *root) {
         pthread_create(&th, NULL, extract_thread, NULL);
         pthread_detach(th);
     }
+    // An update: the game files are there and only the game code is out of date - rebuilt at once, by itself (only
+    // the pieces that changed: runtime/gamebuild.c), with the progress bar; then the start screen as usual. A failure
+    // stays on the setup page with what went wrong.
+    if (!status.empty() && check_copied_files(g_root).empty() && gamebuild_available() &&
+        !getenv("LARECOMP_LAUNCHER_DELETE")) {
+        fprintf(stderr, "[launcher] game code out of date: updating it\n");
+        g_src.clear();
+        g_busy = true, g_auto_update = true;
+        page = SETUP;
+        pthread_t th;
+        pthread_create(&th, NULL, extract_thread, NULL);
+        pthread_detach(th);
+    }
     if (getenv("LARECOMP_LAUNCHER_DELETE")) {  // (test) what DELETE GAME FILES does, logged; then the start screen
         double gb = rt_game_files_size(g_root.c_str()) / 1e9;
         bool ok = rt_remove_game_files(g_root.c_str());
+        game_files_changed();
         status = check_game_files(g_root);
         fprintf(stderr, "[launcher] delete %.1f GB: %s -> %s\n", gb, ok ? "ok" : "refused", status.c_str());
         if (!status.empty()) { g_bg = 0; page = SETUP; }
@@ -1086,6 +1163,7 @@ extern "C" void launcher_run(const char *root) {
         if (was_busy && !busy) {
             status = check_game_files(g_root);
             if (status.empty()) { load_background(dev); page = MAIN; }
+            g_auto_update = false;
         }
         was_busy = busy;
 
@@ -1445,6 +1523,7 @@ extern "C" void launcher_run(const char *root) {
                     } else {
                         if (opt_action("Yes, delete them", gb, "Deletes the extracted game files now.", true)) {
                             bool ok = rt_remove_game_files(g_root.c_str());
+                            game_files_changed();
                             status = check_game_files(g_root);
                             if (ok) set_job("Game files deleted.");
                             else set_job("Couldn't delete the game files", true, "They aren't in LAS Recomp's data folder, "
@@ -1462,6 +1541,14 @@ extern "C" void launcher_run(const char *root) {
                                               : ImVec4(0.45f, 0.95f, 0.55f, 1), "%s", job_line.c_str());
                     if (failed && !job_hint.empty())  // (what to do next, in the rows' own text colour)
                         ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1), "%s", job_hint.c_str());
+                    ImGui::PopTextWrapPos();
+                } else if (!busy && !status.empty() && status != "No game files yet") {
+                    // (no setup run yet this session: why the game files on disk can't be played - an incomplete copy
+                    // opens this window instead of crashing on Play)
+                    ImGui::Dummy(ImVec2(0, 14 * sc));
+                    ImGui::PushTextWrapPos(0);
+                    ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", status.c_str());
+                    ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1), "%s", status_hint(status));
                     ImGui::PopTextWrapPos();
                 }
                 opt_end();
@@ -1486,9 +1573,10 @@ extern "C" void launcher_run(const char *root) {
                     float f = test_busy ? 0.42f : extract_progress();
                     // (while the game code is built: what's happening, on whose files - runtime/gamebuild.c)
                     bool recompiling = g_build_frac >= 0;
-                    const char *title = recompiling ? "Recompiling the game" : "Setting up the game files";
+                    const char *title = g_auto_update ? "Updating the game" : recompiling ? "Recompiling the game"
+                                                                                         : "Setting up the game files";
                     static const char *const notes[] = {"This only needs to be done once and may take a while."};
-                    int nnotes = recompiling ? 1 : 0;
+                    int nnotes = recompiling && !g_auto_update ? 1 : 0;
                     float tfs = g_font_menu->FontSize * 0.75f, sfs = g_font_small->FontSize * 0.85f;
                     ImVec2 ts = g_font_menu->CalcTextSizeA(tfs, FLT_MAX, 0, title);
                     float line_h = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, "A").y;
@@ -1536,7 +1624,7 @@ extern "C" void launcher_run(const char *root) {
             } else {
                 ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  %s", busy ? "Setting up the game files..." : status.c_str());
                 ImGui::SetCursorPosX(x0);
-                ImGui::TextDisabled("Set up the game files to play.");
+                ImGui::TextDisabled("%s", busy ? "Set up the game files to play." : status_hint(status));
             }
             if (const char *f = getenv("LARECOMP_LAUNCHER_FONT")) {  // (test) which typeface this window shows
                 const char *b = strrchr(f, '/');

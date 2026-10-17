@@ -195,7 +195,7 @@ class ModsProcess(QtCore.QThread):
             if not os.path.exists(actorOutputFolder):
                 os.makedirs(actorOutputFolder)
 
-            files = os.listdir(bfresOutputFolder)
+            files = sorted(os.listdir(bfresOutputFolder))
 
             # Loop through the files and copy them to the destination directory
             for file in files:
@@ -1304,7 +1304,7 @@ class ModsProcess(QtCore.QThread):
         """Replaces the BGM info in the lvb files with the shuffled songs"""
 
         levels_path = f'{self.rom_path}/region_common/level'
-        folders = [f for f in os.listdir(levels_path) if not f.endswith('.ldb')]
+        folders = sorted(f for f in os.listdir(levels_path) if not f.endswith(".ldb"))
 
         for folder in folders:
             if not self.thread_active:
@@ -1864,7 +1864,7 @@ class ModsProcess(QtCore.QThread):
 
         levels_path = f'{self.rom_path}/region_common/level'
         included_folders = ENEMY_DATA['Included_Folders']
-        folders = [f for f in os.listdir(levels_path) if f in included_folders]
+        folders = sorted(f for f in os.listdir(levels_path) if f in included_folders)
         
         num_of_mods = 0
         random.seed(self.seed) # restart the rng so that enemies will be the same regardless of settings
@@ -1873,7 +1873,7 @@ class ModsProcess(QtCore.QThread):
             if not self.thread_active:
                 break
 
-            files = [f for f in os.listdir(f'{levels_path}/{folder}') if f.endswith('.leb')]
+            files = sorted(f for f in os.listdir(f'{levels_path}/{folder}') if f.endswith('.leb'))
 
             for file in files:
                 if not self.thread_active:
@@ -1957,7 +1957,7 @@ class ModsProcess(QtCore.QThread):
 
         # allow companions inside every dungeon
         # exception being the Egg since companions can collide with Nightmare and cause a softlock
-        folders = [f for f in os.listdir(levels_path) if f.startswith('Lv') and not f.startswith('Lv09')]
+        folders = sorted(f for f in os.listdir(levels_path) if f.startswith('Lv') and not f.startswith('Lv09'))
 
         for folder in folders:
             if not self.thread_active:

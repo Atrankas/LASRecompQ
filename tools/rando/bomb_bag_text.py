@@ -4,7 +4,8 @@ message box - "You found your Bomb Bag! Now you can carry bombs again." (the gam
 go!", reads like a single bomb).
 
 With shuffle-bombs the only Bomb that shows a get-item message is the found one (shops, the crane and the guards give
-bombs without one), so every Link.GenericItemGetSequenceByKey of itemKey Bomb in the seed's flows gets the messageEntry
+bombs without one) or a bomb refill at a check (its own message: tools/rando/refill_gets.py), so every
+Link.GenericItemGetSequenceByKey of itemKey Bomb with the default message in the seed's flows gets the messageEntry
 `BombBag`: an Item.bfevfl entry showing System:BombBag, our own text in every language's System.msbt (only the game's
 control tags are reused, as escape_bottle.py).
 
@@ -58,7 +59,8 @@ def apply(out_dir, romfs, settings):
                 act, prm = d.actor_action.v.v, d.params.data
             except AttributeError:
                 continue
-            if act == 'GenericItemGetSequenceByKey' and prm.get('itemKey') == 'Bomb':
+            # (a refill's get has its own message: tools/rando/refill_gets.py)
+            if act == 'GenericItemGetSequenceByKey' and prm.get('itemKey') == 'Bomb' and not prm.get('messageEntry'):
                 prm['messageEntry'] = ENTRY
                 prm['itemKey'] = 'MagicPowder'  # (the sack held up; tinted while FLAG is set)
                 # FLAG on before the get sequence, off after it
@@ -74,23 +76,31 @@ def apply(out_dir, romfs, settings):
             event_tools.writeFlow(p, flow)
     if not n:
         return 0
+    add_message(out_dir, romfs, ENTRY, text)
+    return n
+
+
+def add_message(out_dir, romfs, entry, text_fn):
+    """Item.bfevfl entry `entry` showing System:<entry>, text_fn(the game's end-of-page wait) in every language."""
+    import keysanity_text as kt
+    from RandomizerCore.Tools import event_tools
+    ev_dir = os.path.join(out_dir, 'romfs', 'region_common', 'event')
     ip = os.path.join(ev_dir, 'Item.bfevfl')
     if not os.path.exists(ip):
         with open(os.path.join(romfs, 'region_common', 'event', 'Item.bfevfl'), 'rb') as f, open(ip, 'wb') as g:
             g.write(f.read())
     flow = event_tools.readFlow(ip)
-    if event_tools.findEntryPoint(flow.flowchart, ENTRY) is None:
-        event_tools.addEntryPoint(flow.flowchart, ENTRY)
-        event_tools.createActionChain(flow.flowchart, ENTRY, [('Dialog', 'Show', {'message': f'System:{ENTRY}'})])
+    if event_tools.findEntryPoint(flow.flowchart, entry) is None:
+        event_tools.addEntryPoint(flow.flowchart, entry)
+        event_tools.createActionChain(flow.flowchart, entry, [('Dialog', 'Show', {'message': f'System:{entry}'})])
     event_tools.writeFlow(ip, flow)
     for sysp in sorted(glob.glob(os.path.join(romfs, 'region*', '*', 'message', 'System.msbt'))):
         rel = os.path.relpath(sysp, romfs)
         m = Msbt(_read(out_dir, romfs, rel))
         # the box's end-of-page wait: the one the game's own bomb message ends with
         wait = next((r for k, g, r in reversed(kt._tokens(m.texts.get('GetBomb', b''))) if g == kt.WAIT), b'')
-        m.set(ENTRY, text(wait))
+        m.set(entry, text_fn(wait))
         out = os.path.join(out_dir, 'romfs', rel)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         with open(out, 'wb') as f:
             f.write(m.pack())
-    return n

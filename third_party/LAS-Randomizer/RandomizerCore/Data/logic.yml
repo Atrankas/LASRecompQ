@@ -2788,7 +2788,7 @@ D5-3E:
   condition-basic: (D5-7F & kill-gohma & hookshot & feather & key-D5:3) | (D5-5G & feather & kill-star)
 D5-5G:
   type: room
-  condition-basic: (D5-7F & kill-stalfos-yellow & kill-stalfos-red & (kill-master-stalfos | fast-master-stalfos)) | (D5-3E & key-D5:3 & hookshot & feather & kill-star)
+  condition-basic: (D5-7F & kill-stalfos-yellow & kill-stalfos-red & (kill-master-stalfos | fast-stalfos)) | (D5-3E & key-D5:3 & hookshot & feather & kill-star)
 D5-7F:
   type: room
   condition-basic: D5-8H & key-D5:1
@@ -2888,7 +2888,7 @@ powders:
   condition-basic: ((color-dungeon & (can-farm-rupees | break-pot)) | (D2-7D & feather & hit-crystal-switch) | (D8-8D & kill-vire & feather & break-pot) | (D8-4C & feather & hookshot) | (D8-8D & feather & key-D8:2) | (rapids & (feather | boomerang))) & (powder | !shuffle-powder)
 shoot-arrows:
   type: interaction
-  condition-basic: bow & (can-shop | (armos-maze & break-pot) | (D5-7F & kill-helmasaur & feather) | (D6-8D & break-pot) | (D8-4C & (feather | break-pot)) | (D8-8D & feather & key-D8:2) | arrow-capacity)
+  condition-basic: bow & (can-shop | (armos-maze & break-pot) | (D5-7F & kill-helmasaur & feather) | (D6-8D & break-pot) | (D8-4C & (feather | break-pot)) | (D8-8D & feather & key-D8:2))  # (LAS Recomp: no arrow-capacity - placed unchecked)
 can-shop:
   type: interaction
   condition-basic: can-farm-rupees | sword
@@ -3031,14 +3031,14 @@ kill-spiny:
 kill-stalfos:
   type: enemy
   condition-basic: sword | shoot-arrows | bombs | boomerang
-  condition-pit: powders | hookshot | rod | bottle | shovel
+  condition-pit: powders | hookshot | rod | shovel
 kill-stalfos-yellow:
   type: enemy
   condition-basic: sword | shoot-arrows | bombs | boomerang
 kill-stalfos-red:
   type: enemy
   condition-basic: sword | shoot-arrows | bombs | boomerang | shield:2
-  condition-pit: powders | hookshot | rod | bottle | shovel
+  condition-pit: powders | hookshot | rod | shovel
 kill-stalfos-spear:
   type: enemy
   condition-basic: sword | powders | shoot-arrows | bombs | rod | boomerang | shield:2
@@ -3143,7 +3143,7 @@ kill-nightmare-zol:
   condition-basic: powders
 kill-nightmare-agahnim:
   type: enemy
-  condition-basic: sword | bottle
+  condition-basic: sword  # (LAS Recomp: no bottle - placed unchecked)
 kill-nightmare-moldorm:
   type: enemy
   condition-basic: sword | shoot-arrows | bombs | rod | boomerang
@@ -3208,5 +3208,5 @@ hootshotless-sign-maze:
   condition-basic: dash-jump & bombs & bracelet
 coyote-airclimb:
   type: trick
-  condition-basic: sword & feather & (shield | pegasus-boots)
+  condition-basic: sword & feather & (shield | boots)
 ...

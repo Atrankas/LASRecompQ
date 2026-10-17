@@ -10,6 +10,8 @@
 
 #include "../platform.h"
 
+void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
+
 // ---- guest address space
 // The window is reserved up front and committed per region (plat_commit from the loader / kernel). Anything
 // the guest touches outside a committed region is committed on its first access by the exception handler
@@ -148,40 +150,30 @@ static void require_cpu(void) {
     ExitProcess(1);
 }
 
-// Fatal error (rt_fatal_trace): the last FATAL / exception line of the log in a message box, when there is no console.
+// Fatal error (rt_fatal_trace): what happened in plain words (runtime/crash_explain.c) in a message box, when there is
+// no console; the technical lines stay in the log.
 void plat_fatal_notice(void) {
+    char text[1600];
+    rt_crash_explain(text, sizeof text, g_log_path);
     if (!g_log_path[0]) return;
     fflush(stderr);
-    char text[1024] = "LAS Recomp stopped because of an error.";
-    FILE *f = fopen(g_log_path, "rb");
-    if (f) {
-        static char tail[16384];
-        fseek(f, 0, SEEK_END);
-        long sz = ftell(f), from = sz > (long)sizeof tail - 1 ? sz - (long)sizeof tail + 1 : 0;
-        fseek(f, from, SEEK_SET);
-        size_t got = fread(tail, 1, sizeof tail - 1, f);
-        tail[got] = 0;
-        fclose(f);
-        char *line = NULL;
-        for (char *p = tail; (p = strstr(p, "FATAL: ")) != NULL; p++) line = p;
-        if (!line) for (char *p = tail; (p = strstr(p, "*** ")) != NULL; p++) line = p;
-        if (line) {
-            char *end = strchr(line, '\n');
-            if (end) *end = 0;
-            snprintf(text, sizeof text, "LAS Recomp stopped because of an error:\n\n%.600s", line);
-            if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
-                size_t l = strlen(text);
-                snprintf(text + l, sizeof text - l, "\n\nLAS Recomp needs a graphics driver with Vulkan 1.3: install the "
-                         "latest driver for your GPU (NVIDIA, AMD or Intel).");
-            }
-        }
-    }
-    size_t l = strlen(text);
-    snprintf(text + l, sizeof text - l, "\n\nDetails: %s", g_log_path);
     MessageBoxA(NULL, text, "LAS Recomp", MB_ICONERROR | MB_OK);
 }
 
+bool plat_module_name(uint64_t pc, char *out, size_t n) {
+    HMODULE m;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)(uintptr_t)pc, &m))
+        return false;
+    return GetModuleFileNameA(m, out, (DWORD)n) > 0;
+}
+
 void plat_init(void) {
+    // abort() (rt_fatal_trace, after the crash dialog) without the C runtime's own "Microsoft Visual C++ Runtime
+    // Library - abort() has been called" box and the Windows error report: the player sees only LAS Recomp's dialog
+#ifdef _WRITE_ABORT_MSG  // (MinGW's stdlib.h declares it with these flags)
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
     log_to_file_without_console();
     require_cpu();
     _fmode = _O_BINARY;  // fopen/open default to binary (the runtime's "r"/"w" files are binary or LF text)

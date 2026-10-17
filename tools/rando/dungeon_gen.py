@@ -32,9 +32,11 @@ import fixedhash  # noqa: E402
 import level_builder  # noqa: E402
 import rooms  # noqa: E402
 
+# (substrings of the catalog's actor names, which are cut to 12 characters: ItemThunderD, ItemCoralTri, ItemWindMari)
+# Boss doors stay too: a boss's checks are found from its door (room_logic.py boss_cell).
 NOT_MOVABLE = ('Stairs', 'Downstairs', 'Upstairs', 'Warp', 'Hole', 'PlayerStart', 'Npc', 'Shop', 'Panel',
-               'LevelOpen', 'FullMoon', 'Instrument', 'ConchHorn', 'SeaLily', 'SurfHarp', 'WindMarimba',
-               'CoralTriangle', 'EveningCalm', 'ThunderDrum', 'HeartContainer', 'Owl', 'Return')
+               'LevelOpen', 'FullMoon', 'Instrument', 'ConchHorn', 'SeaLily', 'SurfHarp', 'WindMari',
+               'CoralTri', 'EveningCalm', 'ThunderD', 'HeartContainer', 'Owl', 'Return', 'BossDoor')
 # doorways that only work with their original neighbour (tied to their vanilla partner). Tail Cave 06A's hallway was
 # here until the catalog learnt that cells sharing a camera zone are one room (05A/06A/07A: now a fixed unit).
 PINNED = set()
@@ -109,7 +111,24 @@ def on_map(romfs, level, c, r):
         y0 + MAP_CELL_H <= 259 + MAP_TOL
 
 
+# rooms tied to a room that stays by level-local flags: Bottle Grotto 07G's event box sets 31 / 32 for 06G's blocks
+STAY = {'Lv02BottleGrotto_07G'}
+
+
+def _base_tex(romfs, level, entrance):
+    """Textures the dungeon always loads: its own roof / fade models."""
+    import re
+    out = set()
+    mapdir = os.path.join(romfs, 'region_common', 'map')
+    for f in sorted(os.listdir(mapdir)):
+        if f.startswith('DungeonRoof') and f.endswith('.bfres'):
+            out |= {m.group().decode() for m in re.finditer(rb'MI_[A-Za-z0-9_.]+', open(os.path.join(mapdir, f), 'rb').read())}
+    return out & (set(room_textures(romfs, entrance)) | set(_tex_cache.get(level, set())))
+
+
 def movable(v):
+    if any(u in STAY for u in v.get('unit', ())):
+        return False
     if BOSS_TYPES & set(v.get('types', [])):
         return False
     return not any(k in a for a in v['actors'] for k in NOT_MOVABLE)
@@ -205,14 +224,7 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
         size = len(fixed) + 10
     pool = sorted(k for k, v in cat.items() if len(v['unit']) == 1 and movable(v) and k not in fixed
                   and k not in exclude and not k.startswith('Lv07EagleTower') and (exact is None or k in exact))
-    base_tex = set()
-    if romfs:  # the dungeon's own roof / fade models are always loaded
-        mapdir = os.path.join(romfs, 'region_common', 'map')
-        for f in os.listdir(mapdir):
-            if f.startswith('DungeonRoof') and f.endswith('.bfres'):
-                import re
-                base_tex |= {m.group().decode() for m in re.finditer(rb'MI_[A-Za-z0-9_.]+', open(os.path.join(mapdir, f), 'rb').read())}
-        base_tex &= set(room_textures(romfs, entrance)) | set(_tex_cache.get(level, set()))
+    base_tex = _base_tex(romfs, level, entrance) if romfs else set()
     offgrid = offgrid_rooms(romfs, cat, level) if romfs else []
     level_files = {k for k in cat if k.startswith(level + '_')}  # grid rooms with a file (side-view ones excluded)
     op = {k: openings(cat, k) for k in pool + sorted(fixed)}
@@ -593,12 +605,17 @@ class FlagMap:
     index) = a level-local flag (0..254 per dungeon; rooms from different dungeons collide). Every generated
     dungeon gets fresh numbers; objects sharing a flag in their source room keep sharing it."""
 
-    def __init__(self, next_global=GLOBAL_FLAG_BASE, reserved_local=()):
+    def __init__(self, next_global=GLOBAL_FLAG_BASE, reserved_local=(), keep_global=()):
         self.g, self.l = {}, {}
         self.next_g, self.next_l = next_global, 1
         self.reserved = set(reserved_local)  # local flags of the rooms that keep theirs (anchors)
+        # global flags of this level's rooms that stay: a moved room sharing one (the other half of a locked door,
+        # a shutter pair) keeps it - one lock, as room_logic.py counts it (a fresh flag made it two: a key short)
+        self.keep = set(keep_global)
 
     def glob(self, i):
+        if i in self.keep:
+            return i
         if i not in self.g:
             self.g[i] = self.next_g
             self.next_g += 1
@@ -783,6 +800,8 @@ def plan_all(cat, seed, romfs, levels=None, stats=None, rounds=None):
         if best is None or score < best[0]:
             best = (score, out, dups)
 
+    if best is None:
+        raise RuntimeError('no round passed the boss door check')
     (ndup, unused, moved), out, dups = best
     print(f'dungeons: {ndup} room(s) used twice{": " + ", ".join(dups) if dups else ""}; {unused} room(s) unused; '
           f'{-moved} moved')
@@ -1032,7 +1051,8 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
                                                       rng.random())):
                 L = out[lv]
                 # (the level's map texture archive has a budget: the leftover room's textures must fit too)
-                tex = set().union(*(room_textures(romfs, k) for k in L.values()))
+                tex = _base_tex(romfs, lv, ENTRANCES[lv]).union(  # (as plan(): roofs and side-view passages too)
+                    *(room_textures(romfs, k) for k in list(L.values()) + offgrid_rooms(romfs, cat, lv)))
                 if len(tex | room_textures(romfs, room)) > TEXTURE_BUDGET:
                     continue
                 taken = {cell_pos(k) for k in L}
@@ -1118,6 +1138,15 @@ def write_all(romfs, out, layouts, jumps=None):
         for lv, L in layouts.items():
             for cell in sorted(L):
                 f.write('%s\t%s\t%g\t%g\n' % (lv, cell.rsplit('_', 1)[1], *map_shift(romfs, lv, cell)))
+    if shared.next_g > start:  # the flags taken go into the seed's GlobalFlags sheet: later allocators (underwater.py,
+        # miniboss_guard.py: the highest index + 1) start after them
+        from RandomizerCore.Tools import oead_tools
+        src = sheet_path if os.path.exists(sheet_path) else \
+            os.path.join(romfs, 'region_common', 'datasheets', 'GlobalFlags.gsheet')
+        sheet = oead_tools.readSheet(src)
+        sheet['values'].extend({'symbol': f'LARDungeon{i}', 'index': i} for i in range(start, shared.next_g))
+        os.makedirs(os.path.dirname(sheet_path), exist_ok=True)
+        oead_tools.writeSheet(sheet_path, sheet)
     if shared.next_g > 2048:  # flags past the game's 2048: the runtime extends the bitfield for this seed
         with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'flags_ext'), 'a') as f:
             f.write('dungeon generator: event flags up to %d\n' % shared.next_g)
@@ -1130,16 +1159,27 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
     _, home_zone = _source_records(romfs, entrance)
     # cells the level never had get files of their own: the runtime adds seed files the game's RomFS doesn't have
     # (runtime/services/fs.c add_new_files)
-    zone_ids = {cell: 300 + i for i, cell in enumerate(sorted(layout))}  # one camera zone per moved cell
     from RandomizerCore.Tools import leb
     # rooms at their own cells (anchors: boss, stairs, instrument...; the entrance) keep their files' flags and
     # zone ids; moved rooms get fresh flags around the anchors' level-local ones
     unmoved = {cell for cell, src in layout.items() if src == cell}
+    cat_all = json.load(open(os.path.join(HERE, 'room_catalog.json')))
     reserved = set()
+    kept_zones = set()  # camera zone ids the rooms that stay (and the side-view passages) keep
+    kept_global = set()
     for cell in unmoved:
         for a in leb.Room(open(rooms._leb_path(romfs, cell), 'rb').read()).actors:
             reserved |= {i for t, i in a.switches if t == 0}
-    flags = FlagMap(reserved_local=reserved)
+            kept_global |= {i for t, i in a.switches if t == 1}
+            kept_zones.add(a.roomID)
+    for n in offgrid_rooms(romfs, cat_all, level):
+        for a in leb.Room(open(rooms._leb_path(romfs, n), 'rb').read()).actors:
+            kept_zones.add(a.roomID)
+    # one camera zone per moved cell, numbered after the kept ones (Tail Cave's own run 300-328: a shared id drew
+    # the wrong room / left enemies asleep)
+    first_zone = max([300] + [z + 1 for z in kept_zones if z < 0x10000])
+    zone_ids = {cell: first_zone + i for i, cell in enumerate(sorted(layout))}
+    flags = FlagMap(reserved_local=reserved, keep_global=kept_global)
     cat = json.load(open(os.path.join(HERE, 'room_catalog.json')))
     if shared_flags is not None:  # several dungeons in one seed: global flags continue across them
         flags.next_g = shared_flags.next_g
@@ -1158,6 +1198,7 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
                                       for u in unit)
         corners = [k for k, (dc, dr) in (('UL', (-1, -1)), ('UR', (1, -1)), ('DL', (-1, 1)), ('DR', (1, 1)))
                    if (c0 + dc, r0 + dr) in here]
+        flags.keep = kept_global if src.rsplit('_', 1)[0] == level else set()  # (only this level's own rooms)
         _fix_room(romfs, out, cell, src, None if keep else zone_ids[cell], None if keep else flags, missing, whole,
                   corners)
         area, own = _source_records(romfs, src)

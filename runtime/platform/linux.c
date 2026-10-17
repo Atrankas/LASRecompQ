@@ -5,24 +5,92 @@
 #include <errno.h>
 #include <execinfo.h>
 #include <fcntl.h>
+#include <linux/userfaultfd.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/ucontext.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "../platform.h"
 
+void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
+
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
 #endif
+
+// ---- page write tracking (plat_written_pages), the counterpart of Windows' MEM_WRITE_WATCH
+// The window is registered with a userfaultfd in asynchronous write-protect mode: the kernel itself lifts a page's
+// protection on its first write (no fault handler thread, no signal) and remembers it was written. PAGEMAP_SCAN then
+// lists the written pages of a range and protects them again in one call, like GetWriteWatch(WRITE_WATCH_FLAG_RESET).
+// Pages are only protected once a query has covered them, so memory nobody asks about never faults. Linux 6.7+;
+// without it (older kernel, userfaultfd unavailable): no tracking, as before. LARECOMP_WRITE_TRACKING=0: off.
+#ifndef UFFD_USER_MODE_ONLY
+#define UFFD_USER_MODE_ONLY 1
+#endif
+#ifndef UFFD_FEATURE_WP_UNPOPULATED
+#define UFFD_FEATURE_WP_UNPOPULATED (1 << 13)
+#endif
+#ifndef UFFD_FEATURE_WP_ASYNC
+#define UFFD_FEATURE_WP_ASYNC (1 << 15)
+#endif
+// linux/fs.h's PAGEMAP_SCAN ABI, spelled out (the AppImage builds against Ubuntu 22.04's headers, which predate it)
+typedef struct { uint64_t start, end, categories; } WtRegion;
+typedef struct {
+    uint64_t size, flags, start, end, walk_end, vec, vec_len, max_pages;
+    uint64_t category_inverted, category_mask, category_anyof_mask, return_mask;
+} WtScan;
+#define WT_PAGEMAP_SCAN _IOWR('f', 16, WtScan)
+#define WT_PAGE_IS_WRITTEN (1 << 1)
+#define WT_SCAN_WP_MATCHING (1 << 0)    // protect the pages reported again
+#define WT_SCAN_CHECK_WPASYNC (1 << 1)  // fail (instead of reporting nothing) where the range isn't registered
+
+static int g_uffd = -1, g_pagemap = -1;
+static uint64_t g_wt_lo, g_wt_hi, g_wt_page;
+
+static void wt_off(const char *why) {
+    fprintf(stderr, "[plat] no page write tracking: %s (%s)\n", why, strerror(errno));
+    if (g_pagemap >= 0) close(g_pagemap);
+    if (g_uffd >= 0) close(g_uffd);  // (unregisters the window)
+    g_pagemap = g_uffd = -1;
+}
+
+static bool wt_register(uint64_t lo, uint64_t hi) {
+    struct uffdio_register r = {.range = {.start = lo, .len = hi - lo}, .mode = UFFDIO_REGISTER_MODE_WP};
+    return ioctl(g_uffd, UFFDIO_REGISTER, &r) == 0;
+}
+
+static void wt_init(uint64_t lo, uint64_t hi) {
+    const char *e = getenv("LARECOMP_WRITE_TRACKING");
+    if (e && !atoi(e)) return;
+    // user-mode faults only: allowed without privileges (vm.unprivileged_userfaultfd=0); the asynchronous protection
+    // is lifted by the kernel either way, also for its own writes (read() into guest memory)
+    g_uffd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
+    if (g_uffd < 0) { wt_off("userfaultfd"); return; }
+    struct uffdio_api api = {.api = UFFD_API, .features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED};
+    if (ioctl(g_uffd, UFFDIO_API, &api)) { wt_off("asynchronous write protection needs Linux 6.7"); return; }
+    if (!wt_register(lo, hi)) { wt_off("register"); return; }
+    g_pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+    if (g_pagemap < 0) { wt_off("/proc/self/pagemap"); return; }
+    WtRegion v;
+    uint64_t pg = (uint64_t)sysconf(_SC_PAGESIZE);
+    WtScan s = {.size = sizeof s, .flags = WT_SCAN_CHECK_WPASYNC, .start = lo, .end = lo + pg, .vec = (uintptr_t)&v,
+                .vec_len = 1, .category_mask = WT_PAGE_IS_WRITTEN, .return_mask = WT_PAGE_IS_WRITTEN};
+    if (ioctl(g_pagemap, WT_PAGEMAP_SCAN, &s) < 0) { wt_off("PAGEMAP_SCAN needs Linux 6.7"); return; }
+    g_wt_lo = lo;
+    g_wt_hi = hi;
+    g_wt_page = pg;
+}
 
 // ---- guest address space
 // Everything readable/writable from the start, like macOS: the guest maps at 4K granularity, and untouched pages
@@ -32,20 +100,42 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
     if (p == MAP_FAILED) return false;
     if (p != (void *)(uintptr_t)lo) { munmap(p, hi - lo); return false; }  // (kernels before 4.17: just a hint)
+    wt_init(lo, hi);
     return true;
 }
 
-// Fresh zero pages over the whole window (the old ones are released at once).
+// Fresh zero pages over the whole window (the old ones are released at once). The new mapping is registered again.
 bool plat_reset_guest(uint64_t lo, uint64_t hi) {
-    return mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED,
-                -1, 0) == (void *)(uintptr_t)lo;
+    if (mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED,
+             -1, 0) != (void *)(uintptr_t)lo)
+        return false;
+    if (g_uffd >= 0 && !wt_register(lo, hi)) wt_off("register after reset");
+    return true;
 }
 
 void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
-int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page) {  // (no write tracking)
-    (void)addr; (void)size; (void)pages; (void)max; (void)page;
-    return -1;
+int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page) {
+    if (g_pagemap < 0 || addr < g_wt_lo || addr + size > g_wt_hi || max <= 0) return -1;
+    WtRegion v[64];
+    uint64_t at = addr, end = addr + size;
+    int n = 0;
+    while (at < end && n < max) {
+        WtScan s = {.size = sizeof s, .flags = WT_SCAN_WP_MATCHING | WT_SCAN_CHECK_WPASYNC, .start = at, .end = end,
+                    .vec = (uintptr_t)v, .vec_len = 64, .max_pages = (uint64_t)(max - n),
+                    .category_mask = WT_PAGE_IS_WRITTEN, .return_mask = WT_PAGE_IS_WRITTEN};
+        int r = ioctl(g_pagemap, WT_PAGEMAP_SCAN, &s);  // (stops early when vec or max_pages fills: walk_end)
+        if (r < 0 || s.walk_end <= at) return -1;
+        for (int i = 0; i < r; i++)
+            for (uint64_t p = v[i].start; p < v[i].end && n < max; p += g_wt_page) pages[n++] = p;
+        at = s.walk_end;
+    }
+    if (at < end) {  // (more than fit: protect the rest too, the caller takes all)
+        struct uffdio_writeprotect wp = {.range = {.start = addr, .len = size}, .mode = UFFDIO_WRITEPROTECT_MODE_WP};
+        ioctl(g_uffd, UFFDIO_WRITEPROTECT, &wp);
+    }
+    *page = g_wt_page;
+    return n;
 }
 
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
@@ -161,12 +251,20 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset) {
 }
 
 // Fatal error without a terminal: say so in a message box rather than vanishing (the details are in the log).
+// (what happened in plain words: runtime/crash_explain.c)
 void plat_fatal_notice(void) {
+    char text[1600];
+    rt_crash_explain(text, sizeof text, g_log_path);
     if (!g_log_path[0]) return;
     fflush(stderr);
-    char text[1200];
-    snprintf(text, sizeof text, "LAS Recomp stopped because of an error.\n\nDetails: %s", g_log_path);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp", text, NULL);
+}
+
+bool plat_module_name(uint64_t pc, char *out, size_t n) {
+    Dl_info di = {0};
+    if (!dladdr((void *)(uintptr_t)pc, &di) || !di.dli_fname) return false;
+    snprintf(out, n, "%s", di.dli_fname);
+    return true;
 }
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c

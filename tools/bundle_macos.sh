@@ -19,6 +19,7 @@ VERSION=$(sed -n 's/^#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher
 case "$VERSION" in
     beta_*) VERSION="0.9.${VERSION#beta_}" ;;
     v*) VERSION="${VERSION#v}" ;;
+    test-*) VERSION="0.0.1" ;;  # (a test build: a valid bundle version, below every release)
 esac
 HELPER=build/helper/rando-gen
 GEN_HELPER=build/helper/lasgen
@@ -45,6 +46,8 @@ cp docs/icon/icon.icns "$C/Resources/icon.icns"
 cp docs/icon/icon_1024.png "$C/Resources/icon.png"  # (window / Dock icon at run time)
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$C/Resources/Baloo2-SemiBold.ttf"  # (start screen; OFL, README "License")
 cp third_party/fonts/Baloo2/OFL.txt "$C/Resources/Baloo2-OFL.txt"
+cp third_party/fonts/DejaVu/DejaVuSans.ttf "$C/Resources/DejaVuSans.ttf"  # (the game text's last-resort font)
+cp third_party/fonts/DejaVu/LICENSE "$C/Resources/DejaVu-LICENSE.txt"
 
 # ---- dylibs: copy every non-system dependency, recursively; point all references at @rpath/<name>
 is_system() { case "$1" in /usr/lib/*|/System/*) return 0;; esac; return 1; }

@@ -34,7 +34,8 @@ AREAS = {'mabe-village': 'Mabe Village', 'toronbo-shores': 'Toronbo Shores', 'my
 ITEMS = {'rooster': 'Flying Rooster (pet)', 'ghost': 'Ghost (pet)', 'marin-companion': 'Marin (pet)',
          'seashell': 'Secret Seashell','heart-piece': 'Piece of Heart', 'heart-container': 'Heart Container',
          'rupee-5': '5 Rupees', 'rupee-20': '20 Rupees', 'rupee-50': '50 Rupees', 'rupee-100': '100 Rupees',
-         'rupee-300': '300 Rupees', 'bracelet': 'Power Bracelet', 'feather': "Roc's Feather", 'boots': 'Pegasus Boots',
+         'rupee-300': '300 Rupees', 'pot-rupee-5': '5 Rupees', 'pot-rupee-20': '20 Rupees', 'pot-rupee-50': '50 Rupees',
+         'pot-rupee-100': '100 Rupees', 'bracelet': 'Power Bracelet', 'feather': "Roc's Feather", 'boots': 'Pegasus Boots',
          'rod': 'Magic Rod', 'powder': 'Magic Powder', 'bomb': 'Bombs', 'bombs': 'Bombs', 'bow': 'Bow',
          'hookshot': 'Hookshot', 'boomerang': 'Boomerang', 'shovel': 'Shovel', 'flippers': 'Flippers',
          'ocarina': 'Ocarina', 'shield': 'Shield', 'sword': 'Sword', 'trap': 'Trap!', 'song-ballad': 'Ballad of the Wind Fish',
@@ -49,7 +50,7 @@ ITEMS = {'rooster': 'Flying Rooster (pet)', 'ghost': 'Ghost (pet)', 'marin-compa
          'blue-tunic': 'Blue Tunic', 'golden-leaf': 'Golden Leaf', 'mushroom': 'Sleepy Toadstool',
          'medicine': 'Secret Medicine', 'bottle': 'Bottle', 'zol-trap': 'Trap!', 'bomb-capacity': 'Bomb bag upgrade',
          'arrow-capacity': 'Quiver upgrade', 'powder-capacity': 'Magic Powder upgrade', 'chamber-stone': 'Chamber Stone'}
-JUNK = re.compile(r'^(rupee-\d+|trap|zol-trap|arrows?(-\d+)?|bombs?-\d+|powder-\d+)$')
+JUNK = re.compile(r'^((pot-|dig-)?rupee-\d+|pot-heart|pot-arrows|pot-bombs|pot-powder|trap|zol-trap|arrows?(-\d+)?|bombs?-\d+|powder-\d+)$')
 
 
 def pretty_item(it):

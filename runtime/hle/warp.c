@@ -23,16 +23,30 @@ static volatile uint64_t g_request;
 
 static uint64_t g_req;  // our level-jump request (HLE heap)
 static volatile int g_give_pending;
+// A warp waits for the one before it (issue #41: a jump handed to the game while its last one was still under way
+// crashed in its request processor, null+0x3f8): every level load registers a new request object (g_loads); after a
+// warp the next one waits for that load (or WARP_TIMEOUT frames), then WARP_SETTLE frames after any load.
+enum { WARP_SETTLE = 60, WARP_TIMEOUT = 900 };
+static volatile unsigned g_loads;
+static volatile uint64_t g_frame_now, g_load_frame;
+static unsigned g_loads_at_warp;
+static uint64_t g_warp_frame;
+static int g_warp_waiting;
 RT_ON_RESET(warp_reset) {  // (reboot: nothing queued; the request objects were in the wiped memory)
     g_pending = 0;
     g_request = 0;
     g_req = 0;
     g_give_pending = 0;
+    g_warp_waiting = 0;
 }
 
 // Called from the generated code when a level registers its request object.
 void rt_warp_request_obj(uint64_t r) {
-    if (r != g_request) LOG("[warp] level-jump request object %llx\n", (unsigned long long)r);
+    if (r != g_request) {
+        LOG("[warp] level-jump request object %llx\n", (unsigned long long)r);
+        g_loads++;
+        g_load_frame = g_frame_now;
+    }
     g_request = r;
 }
 
@@ -148,7 +162,24 @@ static void mem_dump_test(uint64_t frame) {
     LOG("[memdump] frame %llu addr %llx bytes %zu\n", (unsigned long long)frame, (unsigned long long)p, n);
 }
 
+// LARECOMP_TEST_CRASH=<frame>:<segv|terminate|fatal> (test): stop the way those crashes do, for the crash dialog's
+// explanations (runtime/crash_explain.c) - segv: a game-memory read at 0; terminate: the uncaught-exception line
+static void crash_test(uint64_t frame) {
+    static const char *e;
+    static int init;
+    if (!init) init = 1, e = getenv("LARECOMP_TEST_CRASH");
+    if (!e || (uint64_t)strtoull(e, NULL, 10) != frame) return;
+    const char *k = strchr(e, ':');
+    k = k ? k + 1 : "";
+    if (!strcmp(k, "terminate")) FATAL("no function at 0 (lr=70044c7380 _ZSt13get_terminatev+20)\n");
+    if (!strcmp(k, "fatal")) FATAL("test fatal error\n");
+    volatile uint64_t *p = NULL;
+    (void)*p;
+}
+
 void warp_frame(uint64_t frame) {
+    g_frame_now = frame;
+    crash_test(frame);
     { extern void shader_tour_tick(uint64_t); shader_tour_tick(frame); }
     warp_test(frame);
     warp_on_load(frame);
@@ -170,11 +201,16 @@ void warp_frame(uint64_t frame) {
 // the fields main+0x81b950 fills and hand it to the game's own request processor.
 void warp_game_tick(Cpu *c) {
     if (!g_pending) return;
+    uint64_t now = g_frame_now;
+    if (g_warp_waiting && g_loads == g_loads_at_warp && now - g_warp_frame < WARP_TIMEOUT)
+        return;  // (the last warp's level isn't loaded yet: this one stays queued)
+    g_warp_waiting = 0;
     if (!game_in_play()) {  // requested from the title screen etc.: drop it (jumping there crashes the game)
         g_pending = 0;
         LOG("[warp] ignored: not in a game\n");
         return;
     }
+    if (now - g_load_frame < WARP_SETTLE) return;  // (a level just loaded: let it settle first)
     if (!g_req) g_req = (uint64_t)(uintptr_t)hle_alloc(0x200);
     uint64_t req = g_req;
     pthread_mutex_lock(&g_lock);
@@ -187,6 +223,7 @@ void warp_game_tick(Cpu *c) {
     g_pending = 0;
     pthread_mutex_unlock(&g_lock);
     LOG("[warp] jumping to %s / %s\n", (char *)(uintptr_t)(req + 0xa8), (char *)(uintptr_t)(req + 0xf0));
+    g_warp_waiting = 1, g_loads_at_warp = g_loads, g_warp_frame = now;
     uint64_t saved[31], sp = c->sp, pc = c->pc;
     memcpy(saved, c->x, sizeof saved);
     c->x[0] = req;

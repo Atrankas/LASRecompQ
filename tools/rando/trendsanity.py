@@ -41,7 +41,8 @@ def enabled(settings):
 def add_to_logic(logic_defs, item_defs, settings):
     """Returns {entrance door: [(location, condition)]} for shuffled interiors."""
     if logic_defs.pop(DROPPED, None):
-        item_defs['rupee-50']['quantity'] -= 1  # (its seashell stays in the pool)
+        junk = max(('rupee-50', 'rupee-20', 'rupee-100', 'rupee-300'), key=lambda k: item_defs[k]['quantity'])
+        item_defs[junk]['quantity'] -= 1  # (its seashell stays in the pool; the most plentiful junk goes)
     settings['excluded-locations'].add(FINAL)
     for loc, _ in CHECKS:
         logic_defs[loc]['condition-basic'] = 'can-farm-rupees'
