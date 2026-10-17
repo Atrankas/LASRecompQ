@@ -26,6 +26,7 @@ uint64_t maxwell_gmem_base, maxwell_gmem_size;
 int maxwell_frag_subgroups = 1;
 int maxwell_h2f_bits = 1;
 int maxwell_gmem_mirror;
+int maxwell_half_native;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -2166,6 +2167,13 @@ static const char glsl_prelude_h2f_bits[] =
 static const char glsl_prelude_h2f_native[] =
     "float h2f(uint h) { return unpackHalf2x16(h).x; }\n"
     "vec2 unpack_h2(uint v) { return unpackHalf2x16(v); }\n";
+// Half-precision instructions (HADD2 / HMUL2 / HFMA2 / HSET(P)2): operands through hx, results through hpack.
+// maxwell_half_native (phones, shaderFloat16): native fp16 - twice the rate on Adreno, and rounded per operation as the
+// Switch's GPU does; else in fp32, rounded when packed.
+static const char glsl_prelude_half_native[] =
+    "f16vec2 hx(uint v, uint swz) { if (swz == 1u) return f16vec2(float16_t(uintBitsToFloat(v))); f16vec2 h = unpackFloat2x16(v); return swz == 2u ? h.xx : (swz == 3u ? h.yy : h); }\n"
+    "f16vec2 saturate(f16vec2 x) { return mix(clamp(x, f16vec2(0.0hf), f16vec2(1.0hf)), f16vec2(0.0hf), isnan(x)); }\n"
+    "uint hpack(f16vec2 r, uint merge, uint old) { if (merge == 1u) return floatBitsToUint(float(r.x)); uint p = packFloat2x16(r); if (merge == 2u) return (old & 0xFFFF0000u) | (p & 0xFFFFu); if (merge == 3u) return (old & 0xFFFFu) | (p & 0xFFFF0000u); return p; }\n";
 static const char glsl_prelude2[] =
     "vec2 hx(uint v, uint swz) { if (swz == 1u) return vec2(uintBitsToFloat(v)); vec2 h = unpack_h2(v); return swz == 2u ? h.xx : (swz == 3u ? h.yy : h); }\n"
     // (one conversion of both halves: the same bits as one per half, and the merge is a constant at each call)
@@ -2195,7 +2203,18 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->fail) { free(body.buf); free(c->body.buf); free(c); return info; }
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
-    sp(&s, "%s%s%s", glsl_prelude, maxwell_h2f_bits ? glsl_prelude_h2f_bits : glsl_prelude_h2f_native, glsl_prelude2);
+    {
+        const char *rest = strchr(glsl_prelude, '\n') + 1;  // (after #version: the fp16 extension goes first)
+        sp(&s, "%.*s", (int)(rest - glsl_prelude), glsl_prelude);
+        if (maxwell_half_native) sp(&s, "#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require\n");
+        sp(&s, "%s%s", rest, maxwell_h2f_bits ? glsl_prelude_h2f_bits : glsl_prelude_h2f_native);
+        if (maxwell_half_native) {
+            const char *hp = strstr(glsl_prelude2, "uint prmt(");  // (the fp32 hx / hpack replaced)
+            sp(&s, "%s%s", glsl_prelude_half_native, hp);
+        } else {
+            sp(&s, "%s", glsl_prelude2);
+        }
+    }
     if (stage == STAGE_FRAGMENT && !maxwell_frag_subgroups)  // the quad's lanes through fine derivatives (SHFL above)
         sp(&s, "uint quad_lane() { ivec2 p = ivec2(gl_FragCoord.xy); return uint(p.x & 1) | (uint(p.y & 1) << 1); }\n"
                "uint quad_xor(uint v, uint m) { vec2 h = vec2(float(v & 0xFFFFu), float(v >> 16)); ivec2 p = ivec2(gl_FragCoord.xy);"

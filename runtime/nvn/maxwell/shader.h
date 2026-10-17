@@ -95,6 +95,9 @@ extern int maxwell_h2f_bits;
 // 1: no heap import (Vulkan without VK_EXT_external_memory_host): every stage reaches its storage buffers through the
 // address table (GMap / GFast), not only compute (runtime/nvn/vulkan/exec.c mirror_table)
 extern int maxwell_gmem_mirror;
+// 1: half-precision instructions as native fp16 in GLSL (GL_EXT_shader_explicit_arithmetic_types_float16; the device
+// enables shaderFloat16)
+extern int maxwell_half_native;
 // Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
 // maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).
 extern const uint8_t *maxwell_dbg_code;

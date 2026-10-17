@@ -12,7 +12,7 @@ import java.nio.charset.StandardCharsets;
 // render thread's commands, then the GPU - so no part looks fully busy, and the phone's governors keep the clocks low
 // (an S20 FE: GPU at 441 of 587 MHz, big cores capped at 1.75 GHz by Samsung's power policy): the overworld ran at 20
 // fps with room to spare everywhere. With root, a small shell script keeps the CPU caps lifted, the fastest core on
-// and the GPU at its top clock, re-applying every second (the system resets them), and puts everything back when the
+// and the GPU at its top clock (also past the skin-temperature cap while the battery is under 45 C), re-applying every second (the system resets them), and puts everything back when the
 // game leaves the front (a marker file it watches). Needs root granted to the app (Magisk asks once). Off when the
 // phone has no su, or in the settings ("root_boost" in the "perf" preferences).
 final class RootBoost {
@@ -28,6 +28,10 @@ final class RootBoost {
         "  echo 1 > $c7 2>/dev/null\n" +
         "  cat $g/devfreq/max_freq > $g/devfreq/min_freq 2>/dev/null\n" +
         "  echo 0 > $g/min_pwrlevel 2>/dev/null\n" +
+        // the GPU's skin-temperature cap too (Samsung's thermal service lowers the top clock from ~42 C skin), while
+        // the battery stays under 45 C; above that the system's thermal control is left alone
+        "  bt=$(cat /sys/class/power_supply/battery/temp 2>/dev/null)\n" +
+        "  [ \"${bt:-999}\" -lt 450 ] && echo 0 > $g/thermal_pwrlevel 2>/dev/null\n" +
         "  sleep 1\n" +
         "done\n" +
         "[ -n \"$gmin\" ] && echo $gmin > $g/devfreq/min_freq 2>/dev/null\n" +
