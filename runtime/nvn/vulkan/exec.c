@@ -307,7 +307,7 @@ static int gp_n;
 static char gp_label[512][112];
 static uint32_t gp_draws[512];
 // LARECOMP_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with LARECOMP_SYNC_SUBMIT=1 the
-// dump ends with the command list that faulted).
+// dump ends with the command list that faulted; =2 each pass, =3 each draw in a submission of its own).
 static char dl_ring[64][128];
 static unsigned dl_n;
 static int dl_on = -1;
@@ -3168,6 +3168,9 @@ static void draw_(CmdRec *r, bool indexed) {
         if (!use_index) vkCmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else vkCmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
     }
+    dl_note("  draw vs %llx fs %llx (hash %016llx) count %u inst %u", (unsigned long long)st.program->stages[0].code_addr,
+            (unsigned long long)st.program->stages[1].code_addr, (unsigned long long)g_cur_fs_hash, (unsigned)count, (unsigned)inst);
+    if (dl_on == 3) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=3: each draw its own submission)
     stat_draws++;
     cum_draws++;
     if (g_gpuprof_frame && gp_n) {

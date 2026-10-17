@@ -23,6 +23,7 @@
 #include "shader.h"
 
 uint64_t maxwell_gmem_base, maxwell_gmem_size;
+int maxwell_frag_subgroups = 1;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -1547,6 +1548,14 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int pd = (int)bits(w, 48, 3);
         if (c->stage == STAGE_VERTEX) {
             set_reg(c, d, R(a));  // no SIMD-group functions in vertex functions: lane-local value
+        } else if (c->glsl && c->stage == STAGE_FRAGMENT && !maxwell_frag_subgroups) {
+            // GPUs with subgroup operations in compute shaders only (Adreno; using them in a fragment shader hung the
+            // GPU): the quad xor, the shaders' way of reading a neighbouring pixel, through fine derivatives
+            // (quad_xor); other shuffles keep the lane's own value
+            bool quad = mode == 3 && bits(w, 28, 1) && bits(w, 20, 5) < 4;
+            if (quad) sprintf(t, "quad_xor(%s, %uu)", R(a), (unsigned)bits(w, 20, 5));
+            else sprintf(t, "%s", R(a));
+            set_reg(c, d, t);
         } else if (c->glsl) {  // a quad xor (lane mask < 4) is the subgroup xor within the quad
             static const char *const fn[] = {"subgroupShuffle", "subgroupShuffleUp", "subgroupShuffleDown", "subgroupShuffleXor"};
             sprintf(t, "%s(%s, uint(%s))", fn[mode], R(a), bv);
@@ -2064,6 +2073,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
         const char *rep = id;
         for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
             if (!strcmp(id, map[i][0])) { rep = map[i][1]; break; }
+        if (!strcmp(id, "lane") && c->stage == STAGE_FRAGMENT && !maxwell_frag_subgroups) rep = "quad_lane()";
         sp(o, "%s", rep);
     }
 }
@@ -2138,6 +2148,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
     sp(&s, "%s", glsl_prelude);
+    if (stage == STAGE_FRAGMENT && !maxwell_frag_subgroups)  // the quad's lanes through fine derivatives (SHFL above)
+        sp(&s, "uint quad_lane() { ivec2 p = ivec2(gl_FragCoord.xy); return uint(p.x & 1) | (uint(p.y & 1) << 1); }\n"
+               "uint quad_xor(uint v, uint m) { vec2 h = vec2(float(v & 0xFFFFu), float(v >> 16)); ivec2 p = ivec2(gl_FragCoord.xy);"
+               " if ((m & 1u) != 0u) { vec2 d = dFdxFine(h); h = (p.x & 1) == 0 ? h + d : h - d; }"
+               " if ((m & 2u) != 0u) { vec2 d = dFdyFine(h); h = (p.y & 1) == 0 ? h + d : h - d; }"
+               " return uint(h.x + 0.5) | (uint(h.y + 0.5) << 16); }\n");
     for (int i = 0; i < 18; i++) {
         if (!(info->cbuf_mask & (1u << i))) continue;
         uint32_t n = info->cbuf_size[i] / 16;

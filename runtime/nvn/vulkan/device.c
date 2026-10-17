@@ -14,6 +14,7 @@
 #include "vk.h"
 #include "../output_scale.h"
 #include "../renderer.h"
+#include "../maxwell/shader.h"
 #ifdef __ANDROID__
 #include <adrenotools/driver.h>
 #include <dlfcn.h>
@@ -224,6 +225,14 @@ static void pick_device(void) {
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
     g_vk.api = g_vk.props.apiVersion < VK_API_VERSION_1_3 ? VK_MAKE_API_VERSION(0, 1, VK_API_VERSION_MINOR(g_vk.props.apiVersion), 0)
                                                           : VK_API_VERSION_1_3;
+    {
+        VkPhysicalDeviceSubgroupProperties sg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sg};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
+        maxwell_frag_subgroups = (sg.supportedStages & VK_SHADER_STAGE_FRAGMENT_BIT) &&
+                                 (sg.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT);
+        if (!maxwell_frag_subgroups) LOG("[vk] no subgroup shuffles in fragment shaders: quad shuffles emulated\n");
+    }
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
     VkQueueFamilyProperties *qp = calloc(nq, sizeof *qp);
