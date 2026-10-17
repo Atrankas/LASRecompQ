@@ -55,17 +55,20 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi) {
 // LARECOMP_WRITE_TRACKING=0: none (every range counts as written).
 enum { WT_UNTRACKED = 0, WT_CLEAN = 1, WT_WRITTEN = 2 };
 static _Atomic uint8_t *wt_state;  // per heap page
-static int wt_on = -1;
+static _Atomic int wt_on = -1;      // (set once wt_state exists: other threads test it before touching the table)
 #define WT_PAGE 4096ull
 
+static void wt_setup(void) {
+    const char *e = getenv("LARECOMP_WRITE_TRACKING");
+    bool on = (!e || atoi(e)) && sysconf(_SC_PAGESIZE) == (long)WT_PAGE;
+    if (on) wt_state = calloc(HEAP_MAX / WT_PAGE, 1);
+    atomic_store(&wt_on, on && wt_state ? 1 : 0);
+}
+
 static bool wt_init(void) {
-    if (wt_on < 0) {
-        const char *e = getenv("LARECOMP_WRITE_TRACKING");
-        wt_on = (!e || atoi(e)) && sysconf(_SC_PAGESIZE) == (long)WT_PAGE;
-        if (wt_on) wt_state = calloc(HEAP_MAX / WT_PAGE, 1);
-        if (!wt_state) wt_on = 0;
-    }
-    return wt_on;
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    if (atomic_load(&wt_on) < 0) pthread_once(&once, wt_setup);
+    return atomic_load(&wt_on) > 0;
 }
 
 static bool wt_range(uint64_t addr, uint64_t size, uint64_t *p0, uint64_t *p1) {
@@ -92,7 +95,7 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
 
 // A write fault in the heap (the only faults there are ours): page written, writable again. Signal handler.
 static bool wt_fault(uint64_t fa) {
-    if (wt_on <= 0 || fa < HEAP_BASE || fa - HEAP_BASE >= HEAP_MAX) return false;
+    if (atomic_load(&wt_on) <= 0 || fa < HEAP_BASE || fa - HEAP_BASE >= HEAP_MAX) return false;
     uint64_t p = (fa - HEAP_BASE) / WT_PAGE;
     atomic_store(&wt_state[p], WT_WRITTEN);
     return mprotect((void *)(uintptr_t)(HEAP_BASE + p * WT_PAGE), WT_PAGE, PROT_READ | PROT_WRITE) == 0;
@@ -101,7 +104,7 @@ static bool wt_fault(uint64_t fa) {
 // (the OS is about to write [addr, addr + size): a read-only page would make the call fail rather than fault)
 void plat_commit(uint64_t addr, uint64_t size) {
     uint64_t p0, p1;
-    if (wt_on <= 0 || !wt_range(addr, size, &p0, &p1)) return;
+    if (atomic_load(&wt_on) <= 0 || !wt_range(addr, size, &p0, &p1)) return;
     bool any = false;
     for (uint64_t p = p0; p < p1; p++)
         if (atomic_exchange(&wt_state[p], WT_WRITTEN) == WT_CLEAN) any = true;
