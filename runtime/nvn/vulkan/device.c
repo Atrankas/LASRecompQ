@@ -2,6 +2,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -543,6 +544,9 @@ static void device_created(void) {
 }
 
 void vk_pipeline_cache_save(void) {
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;  // (autosave job, background, exit)
+    if (!g_vk.pcache) return;
+    pthread_mutex_lock(&lock);
     size_t sz = 0;
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return;
     void *data = malloc(sz);
@@ -556,6 +560,7 @@ void vk_pipeline_cache_save(void) {
         }
     }
     free(data);
+    pthread_mutex_unlock(&lock);
 }
 
 // ================================================================== swapchain
@@ -660,7 +665,10 @@ static void recreate_swapchain(void) {
 static bool SDLCALL lifecycle_watch(void *user, SDL_Event *e) {
     (void)user;
     if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND || e->type == SDL_EVENT_DID_ENTER_BACKGROUND) {
-        if (!atomic_exchange(&g_background, true)) LOG("[vk] in the background: game paused\n");
+        if (!atomic_exchange(&g_background, true)) {
+            LOG("[vk] in the background: game paused\n");
+            vk_pipeline_cache_save();  // (phones end apps in the background without exit(): the exit handler never runs)
+        }
     } else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND && atomic_load(&g_background)) {
         LOG("[vk] in front again\n");
         atomic_store(&g_surface_stale, true);
@@ -972,6 +980,8 @@ void backend_present_gpu(NvnTexture *t) {
     g_frame_counter++;
     extern void vk_level_change_check(void);
     vk_level_change_check();
+    extern void vk_pipeline_cache_autosave(void);
+    vk_pipeline_cache_autosave();
     static long shot_every = -1;
     if (shot_every < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
     extern bool g_debug_frame;

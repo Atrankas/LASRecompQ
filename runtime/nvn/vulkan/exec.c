@@ -687,6 +687,7 @@ static void run_job(void (*fn)(void *), void *arg) {
         int n = SDL_GetNumLogicalCPUCores() - 4;
         if (n < 4) n = 4;
         if (n > 16) n = 16;
+        if (getenv("LARECOMP_VK_JOBS")) n = atoi(getenv("LARECOMP_VK_JOBS")) > 0 ? atoi(getenv("LARECOMP_VK_JOBS")) : 1;
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
     }
     Job *j = malloc(sizeof *j);
@@ -696,6 +697,18 @@ static void run_job(void (*fn)(void *), void *arg) {
     jobs_tail = j;
     pthread_cond_signal(&jobs_cond);
     pthread_mutex_unlock(&jobs_lock);
+}
+
+// The driver's pipeline cache (cache/vk_pipelines.bin) saved once new pipelines have settled: a few seconds after the
+// last one built, on a worker. Phones end apps without exit() (swiped away, killed in the background), so the exit
+// handler's save never came and every start built every pipeline again: pop-in and CPU in every area. Per frame.
+static _Atomic uint64_t g_pipes_built;  // pipelines created (build_pipeline, build_compute)
+static void cache_save_job(void *arg) { (void)arg; extern void vk_pipeline_cache_save(void); vk_pipeline_cache_save(); }
+void vk_pipeline_cache_autosave(void) {
+    static uint64_t last_n, saved_n, changed_at;
+    uint64_t n = atomic_load(&g_pipes_built), now = SDL_GetTicksNS();
+    if (n != last_n) { last_n = n; changed_at = now; return; }
+    if (n != saved_n && now - changed_at > 4000000000ull) { saved_n = n; run_job(cache_save_job, NULL); }
 }
 
 // ================================================================== state
@@ -1605,6 +1618,7 @@ static void build_pipeline(void *arg) {
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = k->prog->layout};
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pp->pipe);
+    atomic_fetch_add(&g_pipes_built, 1);
     if (r != VK_SUCCESS) {
         static int n;
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
@@ -2897,6 +2911,7 @@ static void build_compute(void *arg) {
                                                 .pSpecializationInfo = &spec},
                                       .layout = cp->p.layout};
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
+    atomic_fetch_add(&g_pipes_built, 1);
     atomic_fetch_add(&stat_compiles, 1);
     atomic_store(&cp->p.state, r == VK_SUCCESS ? 1 : 2);
     if (r != VK_SUCCESS) LOG("[compute] pipeline failed: %d\n", r);
