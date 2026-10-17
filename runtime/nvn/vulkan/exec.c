@@ -1179,6 +1179,12 @@ static void pg_mark(VkCommandBuffer cb, const char *fmt, ...) {
     va_end(ap);
     vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pg_qp, (uint32_t)pg_n++);
 }
+// LARECOMP_VK_PASS_GPU_DRAWS=1: a timestamp after each draw too; the report sums the time up to each draw by its shaders
+static bool pg_draws_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_VK_PASS_GPU_DRAWS") != NULL;
+    return on;
+}
 static void pg_report(void) {  // (present: the frame's GPU work is done a few frames later)
     if (pg_state == 1 && renderer_present_count() != pg_frame) pg_state = 2;
     if (pg_state != 2 || renderer_present_count() < pg_frame + 4 || pg_n < 2) return;
@@ -1194,6 +1200,23 @@ static void pg_report(void) {  // (present: the frame's GPU work is done a few f
     LOG("[passgpu] frame %llu: %d marks, %.2f ms first to last\n", (unsigned long long)pg_frame, pg_n, total);
     for (int i = 0; i < pg_n - 1 && i < 40; i++)
         LOG("[passgpu] %6.3f ms  #%d %s\n", (t[order[i] + 1] - t[order[i]]) * per, order[i], pg_what[order[i]]);
+    if (pg_draws_on()) {  // (each draw mark closes the time since the mark before it: that draw's)
+        static struct { char what[112]; double ms; int n; } sum[256];
+        int ns = 0;
+        for (int i = 1; i < pg_n; i++) {
+            if (strncmp(pg_what[i], "draw ", 5)) continue;
+            int k = 0;
+            while (k < ns && strcmp(sum[k].what, pg_what[i])) k++;
+            if (k == ns && ns < 256) snprintf(sum[ns++].what, sizeof sum[0].what, "%s", pg_what[i]);
+            if (k < 256) sum[k].ms += (t[i] - t[i - 1]) * per, sum[k].n++;
+        }
+        for (int i = 0; i < ns && i < 25; i++) {
+            int b = i;
+            for (int j = i + 1; j < ns; j++) if (sum[j].ms > sum[b].ms) b = j;
+            if (b != i) { __typeof__(sum[0]) x = sum[i]; sum[i] = sum[b]; sum[b] = x; }
+            LOG("[drawgpu] %6.3f ms  %3d draws  %s\n", sum[i].ms, sum[i].n, sum[i].what);
+        }
+    }
 }
 
 void vk_pass_gpu_report(void) { pg_report(); }  // (device.c, each present on the render thread)
@@ -4053,6 +4076,8 @@ static void draw_(CmdRec *r, bool indexed) {
         if (!use_index) vkCmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else vkCmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
     }
+    if (pg_state == 1 && pg_draws_on()) pg_mark(cb, "draw fs %llx vs %llx", (unsigned long long)st.program->stages[1].code_addr,
+                                                (unsigned long long)st.program->stages[0].code_addr);
     dl_note("  draw vs %llx fs %llx (hash %016llx) count %u inst %u", (unsigned long long)st.program->stages[0].code_addr,
             (unsigned long long)st.program->stages[1].code_addr, (unsigned long long)g_cur_fs_hash, (unsigned)count, (unsigned)inst);
     if (dl_on == 3) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=3: each draw its own submission)

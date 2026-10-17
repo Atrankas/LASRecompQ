@@ -488,6 +488,7 @@ static void create_device(void) {
         {   // native fp16 for the guest's half-precision instructions (translate.c maxwell_half_native)
             const char *e = getenv("LARECOMP_HALF_NATIVE");
             if (h12.shaderFloat16 && (!e || atoi(e))) f12.shaderFloat16 = VK_TRUE, maxwell_half_native = 1;
+            maxwell_precise_pos = 0;  // (translate.c: the Adreno compiler without precise)
         }
 #endif
         if (!h13.robustImageAccess) LOG("[vk] driver lacks robustImageAccess\n");

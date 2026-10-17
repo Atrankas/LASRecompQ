@@ -27,6 +27,7 @@ int maxwell_frag_subgroups = 1;
 int maxwell_h2f_bits = 1;
 int maxwell_gmem_mirror;
 int maxwell_half_native;
+int maxwell_precise_pos = 1;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -2302,8 +2303,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
         // depth pre-pass + EQUAL test needs identical positions from different shaders: invariant, and precise so no
         // compiler fuses or reorders the math feeding it (MSL gets this from preserveInvariance; without it foliage
-        // drawn twice flickered black)
-        sp(&s, "invariant gl_Position;\nprecise gl_Position;\n");
+        // drawn twice flickered black). Phones (maxwell_precise_pos 0): invariant alone - the Adreno compiler places
+        // both passes alike, and precise kept it from fusing anything: the Field's tall grass (one draw, thousands of
+        // instances) took 5 ms of the frame's GPU time instead of 1.8. LARECOMP_VK_PRECISE_POS=0/1 overrides.
+        static int prec = -1;
+        if (prec < 0) prec = getenv("LARECOMP_VK_PRECISE_POS") ? atoi(getenv("LARECOMP_VK_PRECISE_POS")) != 0 : maxwell_precise_pos;
+        sp(&s, prec ? "invariant gl_Position;\nprecise gl_Position;\n" : "invariant gl_Position;\n");
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "layout(location = %d) out vec4 v%d;\n", i, i);
     } else if (stage == STAGE_FRAGMENT) {
