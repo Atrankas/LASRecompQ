@@ -548,6 +548,8 @@ static void device_created(void) {
         VK_CHECK(vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache));
     }
     free(data);
+    extern void vk_headstart_begin(void);
+    vk_headstart_begin();  // (the shaders and pipelines seen before, built in the background from now: exec.c)
 }
 
 void vk_pipeline_cache_save(void) {

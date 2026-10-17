@@ -850,23 +850,45 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
 // First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
 // LARECOMP_SYNC_SHADERS=1 builds on first use, blocking (deterministic tests).
 typedef struct Job { void (*fn)(void *); void *arg; struct Job *next; } Job;
-static Job *jobs_head, *jobs_tail;
-static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
+// A queue for its threads: the game's own work first, the shader head start's (bg) when there's none
+typedef struct {
+    Job *head, *tail, *bhead, *btail;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    pthread_once_t once;
+} JobQueue;
+static JobQueue g_jobs = {.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .once = PTHREAD_ONCE_INIT};
+static JobQueue g_tjobs = {.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .once = PTHREAD_ONCE_INIT};
+
+static void queue_run(JobQueue *q) {
+    for (;;) {
+        pthread_mutex_lock(&q->lock);
+        while (!q->head && !q->bhead) pthread_cond_wait(&q->cond, &q->lock);
+        Job **h = q->head ? &q->head : &q->bhead, **t = q->head ? &q->tail : &q->btail;
+        Job *j = *h;
+        *h = j->next;
+        if (!*h) *t = NULL;
+        pthread_mutex_unlock(&q->lock);
+        j->fn(j->arg);
+        free(j);
+    }
+}
+
+static void queue_push(JobQueue *q, void (*fn)(void *), void *arg, bool bg) {
+    Job *j = malloc(sizeof *j);
+    j->fn = fn; j->arg = arg; j->next = NULL;
+    pthread_mutex_lock(&q->lock);
+    Job **h = bg ? &q->bhead : &q->head, **t = bg ? &q->btail : &q->tail;
+    if (*t) (*t)->next = j; else *h = j;
+    *t = j;
+    pthread_cond_signal(&q->cond);
+    pthread_mutex_unlock(&q->lock);
+}
 
 static void *worker(void *a) {
     plat_thread_name("vk-pipeline");
     (void)a;
-    for (;;) {
-        pthread_mutex_lock(&jobs_lock);
-        while (!jobs_head) pthread_cond_wait(&jobs_cond, &jobs_lock);
-        Job *j = jobs_head;
-        jobs_head = j->next;
-        if (!jobs_head) jobs_tail = NULL;
-        pthread_mutex_unlock(&jobs_lock);
-        j->fn(j->arg);
-        free(j);
-    }
+    queue_run(&g_jobs);
     return NULL;
 }
 
@@ -879,58 +901,34 @@ static bool sync_shaders(void) {
 // Shader translation: one dedicated thread (the translator isn't re-entrant - translate.c's RSC2 string ring - and
 // translating on the game thread cost up to ~90 ms per frame on entering an area). Compiles go on to the workers.
 static pthread_mutex_t translate_lock = PTHREAD_MUTEX_INITIALIZER;  // (compute shaders translate on the game thread)
-static Job *tjobs_head, *tjobs_tail;
-static pthread_mutex_t tjobs_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t tjobs_cond = PTHREAD_COND_INITIALIZER;
 static void *translator(void *a) {
     plat_thread_name("vk-translate");
     (void)a;
-    for (;;) {
-        pthread_mutex_lock(&tjobs_lock);
-        while (!tjobs_head) pthread_cond_wait(&tjobs_cond, &tjobs_lock);
-        Job *j = tjobs_head;
-        tjobs_head = j->next;
-        if (!tjobs_head) tjobs_tail = NULL;
-        pthread_mutex_unlock(&tjobs_lock);
-        j->fn(j->arg);
-        free(j);
-    }
+    queue_run(&g_tjobs);
     return NULL;
 }
-static bool sync_shaders(void);
-static void run_translate(void (*fn)(void *), void *arg) {
-    if (sync_shaders()) { fn(arg); return; }
-    static bool started;
-    if (!started) { started = true; pthread_t t; pthread_create(&t, NULL, translator, NULL); }
-    Job *j = malloc(sizeof *j);
-    j->fn = fn; j->arg = arg; j->next = NULL;
-    pthread_mutex_lock(&tjobs_lock);
-    if (tjobs_tail) tjobs_tail->next = j; else tjobs_head = j;
-    tjobs_tail = j;
-    pthread_cond_signal(&tjobs_cond);
-    pthread_mutex_unlock(&tjobs_lock);
+static void start_translator(void) { pthread_t t; pthread_create(&t, NULL, translator, NULL); }
+static void run_translate_q(void (*fn)(void *), void *arg, bool bg) {
+    if (sync_shaders() && !bg) { fn(arg); return; }
+    pthread_once(&g_tjobs.once, start_translator);
+    queue_push(&g_tjobs, fn, arg, bg);
 }
+static void run_translate(void (*fn)(void *), void *arg) { run_translate_q(fn, arg, false); }
 
-static void run_job(void (*fn)(void *), void *arg) {
-    if (sync_shaders()) { fn(arg); return; }
-    static bool started;
-    if (!started) {
-        started = true;
-        // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
-        int n = SDL_GetNumLogicalCPUCores() - 4;
-        if (n < 4) n = 4;
-        if (n > 16) n = 16;
-        if (getenv("LARECOMP_VK_JOBS")) n = atoi(getenv("LARECOMP_VK_JOBS")) > 0 ? atoi(getenv("LARECOMP_VK_JOBS")) : 1;
-        for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
-    }
-    Job *j = malloc(sizeof *j);
-    j->fn = fn; j->arg = arg; j->next = NULL;
-    pthread_mutex_lock(&jobs_lock);
-    if (jobs_tail) jobs_tail->next = j; else jobs_head = j;
-    jobs_tail = j;
-    pthread_cond_signal(&jobs_cond);
-    pthread_mutex_unlock(&jobs_lock);
+static void start_workers(void) {
+    // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
+    int n = SDL_GetNumLogicalCPUCores() - 4;
+    if (n < 4) n = 4;
+    if (n > 16) n = 16;
+    if (getenv("LARECOMP_VK_JOBS")) n = atoi(getenv("LARECOMP_VK_JOBS")) > 0 ? atoi(getenv("LARECOMP_VK_JOBS")) : 1;
+    for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
 }
+static void run_job_q(void (*fn)(void *), void *arg, bool bg) {
+    if (sync_shaders() && !bg) { fn(arg); return; }
+    pthread_once(&g_jobs.once, start_workers);
+    queue_push(&g_jobs, fn, arg, bg);
+}
+static void run_job(void (*fn)(void *), void *arg) { run_job_q(fn, arg, false); }
 
 // The driver's pipeline cache (cache/vk_pipelines.bin) saved once new pipelines have settled: a few seconds after the
 // last one built, on a worker. Phones end apps without exit() (swiped away, killed in the background), so the exit
@@ -1602,8 +1600,11 @@ typedef struct {
     bool vs_uses_vid;
     bool fs_hashed;     // fs_hash computed (draw_: the hash of its fragment code, fixed as the code is - see prog_tab)
     uint64_t fs_hash;
+    uint64_t chash;     // its code's and keys' content hash (the shader head start's key)
+    bool headstart;     // made from cache/headstart.bin (its code copied: not recorded again)
     _Atomic int state;  // 0 building, 1 ready, 2 failed
 } Prog;
+static void hs_record_program(const Prog *p);
 
 static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, VkShaderStageFlags s1) {
     p->set_layout[0] = vk_set_layout(p->binds, p->nbinds, 0, s0);
@@ -1702,6 +1703,7 @@ static void translate_program(void *arg) {
         return;
     }
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
+    hs_record_program(p);
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
     run_job(compile_program, p);
@@ -1709,6 +1711,85 @@ static void translate_program(void *arg) {
 
 #define PROG_TAB 4096
 static struct { uint64_t key; Prog *prog; } prog_tab[PROG_TAB];
+
+// ---- shader head start (cache/headstart.bin): every program translated in play is recorded (its code and keys),
+// and so is every pipeline (its key, the program by content hash). The next start translates, compiles and builds
+// all of them in the background, at the lowest priority, from the moment the renderer starts (the start screen, the
+// game's boot and intro): an area seen before no longer stops to translate and build on entry - no hitches, no
+// models popping in. As the WWHD port's shader head start; LARECOMP_HEADSTART=0 turns it off.
+#define HS_MAGIC 0x3253484cu  // "LHS2"
+#define HS_PROG 1
+#define HS_PIPE 2
+typedef struct { uint32_t type, size; } HsRec;
+static uint64_t hash_words(uint64_t h, const void *p, size_t n);
+static uint32_t pipekey_size(void);
+static pthread_mutex_t hs_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { uint64_t key; Prog *prog; bool taken; } hs_tab[PROG_TAB];  // by content hash
+static FILE *hs_out;
+static _Atomic int hs_total, hs_done;  // head start progress (programs and pipelines)
+
+static uint64_t prog_content_hash(const uint8_t *vc, uint64_t vn, const uint8_t *fc, uint64_t fn, const ShaderKey *vkey,
+                                  const ShaderKey *fkey) {
+    uint64_t h = hash_words(0x6c61732d68730001ull, vc, vn);
+    h = hash_words(h, fc, fn);
+    h = hash_words(h, vkey, sizeof *vkey);
+    h = hash_words(h, fkey->rt_kind, sizeof fkey->rt_kind);
+    return h ? h : 1;
+}
+
+static bool headstart_on(void) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_HEADSTART") || atoi(getenv("LARECOMP_HEADSTART"));
+    return on;
+}
+
+static void hs_add_locked(Prog *p, bool taken) {
+    uint32_t slot = (uint32_t)(p->chash ^ (p->chash >> 31)) & (PROG_TAB - 1);
+    for (int n = 0; n < PROG_TAB && hs_tab[slot].key && hs_tab[slot].key != p->chash; n++) slot = (slot + 1) & (PROG_TAB - 1);
+    if (hs_tab[slot].key) return;
+    hs_tab[slot].prog = p, hs_tab[slot].taken = taken, hs_tab[slot].key = p->chash;
+}
+static void hs_add(Prog *p) { pthread_mutex_lock(&hs_lock); hs_add_locked(p, true); pthread_mutex_unlock(&hs_lock); }
+
+// the program with this content, built ahead (or by another code address of the same shader)
+static Prog *hs_take(uint64_t ch) {
+    pthread_mutex_lock(&hs_lock);
+    uint32_t slot = (uint32_t)(ch ^ (ch >> 31)) & (PROG_TAB - 1);
+    for (int n = 0; n < PROG_TAB && hs_tab[slot].key && hs_tab[slot].key != ch; n++) slot = (slot + 1) & (PROG_TAB - 1);
+    Prog *p = hs_tab[slot].key == ch ? hs_tab[slot].prog : NULL;
+    if (p) hs_tab[slot].taken = true;
+    pthread_mutex_unlock(&hs_lock);
+    return p;
+}
+
+static void hs_write(uint32_t type, const void *a, size_t na, const void *b, size_t nb, const void *c, size_t nc) {
+    if (!headstart_on()) return;
+    pthread_mutex_lock(&hs_lock);
+    if (!hs_out) {
+        mkdir("cache", 0755);
+        hs_out = fopen("cache/headstart.bin", "ab");
+        if (hs_out && ftell(hs_out) == 0) {
+            uint32_t hdr[2] = {HS_MAGIC, pipekey_size()};
+            fwrite(hdr, sizeof hdr, 1, hs_out);
+        }
+    }
+    if (hs_out) {
+        HsRec r = {type, (uint32_t)(na + nb + nc)};
+        fwrite(&r, sizeof r, 1, hs_out);
+        fwrite(a, 1, na, hs_out);
+        if (nb) fwrite(b, 1, nb, hs_out);
+        if (nc) fwrite(c, 1, nc, hs_out);
+        fflush(hs_out);
+    }
+    pthread_mutex_unlock(&hs_lock);
+}
+
+// a program translated in play (translator thread): its code and keys, once
+static void hs_record_program(const Prog *p) {
+    if (p->headstart) return;
+    struct { uint64_t chash, cmax[2]; ShaderKey vkey, fkey; } h = {p->chash, {p->cmax[0], p->cmax[1]}, p->vkey, p->fkey};
+    hs_write(HS_PROG, &h, sizeof h, (const void *)(uintptr_t)p->code[0], p->cmax[0], (const void *)(uintptr_t)p->code[1], p->cmax[1]);
+}
 
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     if (!(np->stage_mask & 1) || !(np->stage_mask & 2)) return NULL;
@@ -1721,15 +1802,28 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
     if (prog_tab[slot].key) return prog_tab[slot].prog;
-    Prog *p = calloc(1, sizeof *p);
+    uint64_t cmax[2];
+    for (int i = 0; i < 2; i++) cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
+    uint64_t ch = prog_content_hash((const uint8_t *)(uintptr_t)np->stages[0].code_addr, cmax[0],
+                                    (const uint8_t *)(uintptr_t)np->stages[1].code_addr, cmax[1], vkey, fkey);
+    Prog *p = hs_take(ch);  // (built ahead by the shader head start: its code, live from now on)
+    if (p) {
+        for (int i = 0; i < 2; i++) p->code[i] = np->stages[i].code_addr;
+        prog_tab[slot].prog = p;
+        prog_tab[slot].key = h;
+        return p;
+    }
+    p = calloc(1, sizeof *p);
     prog_tab[slot].key = h;
     prog_tab[slot].prog = p;
     for (int i = 0; i < 2; i++) {
         p->code[i] = np->stages[i].code_addr;
-        p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
+        p->cmax[i] = cmax[i];
     }
     p->vkey = *vkey;
     p->fkey = *fkey;
+    p->chash = ch;
+    hs_add(p);
     run_translate(translate_program, p);
     return p;
 }
@@ -2006,6 +2100,127 @@ static void build_pipeline(void *arg) {
     }
     atomic_fetch_add(&stat_compiles, 1);
     atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
+}
+
+static uint32_t pipekey_size(void) { return (uint32_t)sizeof(PipeKey); }
+
+// ---- shader head start: pipelines (see hs_tab above). Built ahead into their own table; draw_ takes one over on
+// its first use (pipe_tab belongs to the recording thread).
+static struct { uint64_t key; Pipe *pipe; } hs_pipes[PIPE_TAB];
+static uint64_t pipe_key_hash(const PipeKey *k) {
+    uint64_t ph = hash_words(0xcbf29ce484222325ull, k, sizeof *k);
+    return ph ? ph : 1;
+}
+static Pipe *hs_pipe_take(uint64_t ph) {
+    pthread_mutex_lock(&hs_lock);
+    uint32_t slot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
+    for (int n = 0; n < PIPE_TAB && hs_pipes[slot].key && hs_pipes[slot].key != ph; n++) slot = (slot + 1) & (PIPE_TAB - 1);
+    Pipe *pp = hs_pipes[slot].key == ph ? hs_pipes[slot].pipe : NULL;
+    pthread_mutex_unlock(&hs_lock);
+    return pp;
+}
+static bool hs_pipe_put(uint64_t ph, Pipe *pp) {
+    pthread_mutex_lock(&hs_lock);
+    uint32_t slot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
+    int n = 0;
+    for (; n < PIPE_TAB && hs_pipes[slot].key && hs_pipes[slot].key != ph; n++) slot = (slot + 1) & (PIPE_TAB - 1);
+    bool fresh = n < PIPE_TAB && !hs_pipes[slot].key;
+    if (fresh) hs_pipes[slot].pipe = pp, hs_pipes[slot].key = ph;
+    pthread_mutex_unlock(&hs_lock);
+    return fresh;
+}
+// a pipeline made in play: its key, the program by content hash
+static void hs_record_pipe(const PipeKey *k) {
+    PipeKey r = *k;
+    uint64_t ch = k->prog->chash;
+    memcpy(&r.prog, &ch, sizeof ch);
+    hs_write(HS_PIPE, &r, sizeof r, NULL, 0, NULL, 0);
+}
+
+static void *headstart_thread(void *arg) {
+    (void)arg;
+    plat_thread_name("vk-headstart");
+    double t0 = SDL_GetTicksNS() / 1e6;
+    FILE *f = fopen("cache/headstart.bin", "rb");
+    if (!f) return NULL;
+    uint32_t hdr[2];
+    if (fread(hdr, sizeof hdr, 1, f) != 1 || hdr[0] != HS_MAGIC || hdr[1] != pipekey_size()) {
+        fclose(f);
+        LOG("[vk] shader head start: cache/headstart.bin from another version, started again\n");
+        remove("cache/headstart.bin");
+        return NULL;
+    }
+    PipeKey *pk = NULL;
+    size_t npk = 0, cap = 0;
+    int nprog = 0;
+    HsRec r;
+    while (fread(&r, sizeof r, 1, f) == 1) {
+        uint8_t *buf = malloc(r.size);
+        if (!buf || fread(buf, 1, r.size, f) != r.size) { free(buf); break; }
+        if (r.type == HS_PIPE && r.size == sizeof(PipeKey)) {
+            if (npk == cap) { cap = cap ? cap * 2 : 1024; pk = realloc(pk, cap * sizeof *pk); }
+            memcpy(&pk[npk++], buf, sizeof(PipeKey));
+            free(buf);
+            continue;
+        }
+        struct { uint64_t chash, cmax[2]; ShaderKey vkey, fkey; } h;
+        if (r.type != HS_PROG || r.size < sizeof h) { free(buf); continue; }
+        memcpy(&h, buf, sizeof h);
+        if (r.size != sizeof h + h.cmax[0] + h.cmax[1] || hs_take(h.chash)) { free(buf); continue; }
+        Prog *p = calloc(1, sizeof *p);
+        p->code[0] = (uint64_t)(uintptr_t)(buf + sizeof h);  // (the record's copy: kept, the translation reads it)
+        p->code[1] = p->code[0] + h.cmax[0];
+        p->cmax[0] = h.cmax[0], p->cmax[1] = h.cmax[1];
+        p->vkey = h.vkey, p->fkey = h.fkey, p->chash = h.chash, p->headstart = true;
+        pthread_mutex_lock(&hs_lock);
+        hs_add_locked(p, false);
+        pthread_mutex_unlock(&hs_lock);
+        run_translate_q(translate_program, p, true);
+        nprog++;
+    }
+    fclose(f);
+    atomic_store(&hs_total, nprog + (int)npk);
+    // pipelines, as their programs become ready
+    int built = 0, dropped = 0, left = (int)npk;
+    uint8_t *done = calloc(npk ? npk : 1, 1);
+    while (left > 0) {
+        int progress = 0;
+        for (size_t i = 0; i < npk; i++) {
+            if (done[i]) continue;
+            uint64_t ch;
+            memcpy(&ch, &pk[i].prog, sizeof ch);
+            Prog *p = hs_take(ch);
+            int state = p ? atomic_load(&p->state) : 2;
+            if (state == 0) continue;
+            if (state == 1) {
+                Pipe *pp = calloc(1, sizeof *pp);
+                pp->k = pk[i];
+                pp->k.prog = p;
+                if (hs_pipe_put(pipe_key_hash(&pp->k), pp)) run_job_q(build_pipeline, pp, true), built++;
+                else free(pp);
+            } else {
+                dropped++;
+            }
+            done[i] = 1;
+            left--, progress++;
+            atomic_fetch_add(&hs_done, 1);
+        }
+        if (!progress) SDL_Delay(5);
+    }
+    free(pk);
+    free(done);
+    LOG("[vk] shader head start: %d programs, %d pipelines queued (%d unresolved) in %.0f ms\n", nprog, built, dropped,
+        SDL_GetTicksNS() / 1e6 - t0);
+    return NULL;
+}
+
+void vk_headstart_begin(void) {
+    static bool begun;
+    if (begun || !headstart_on() || sync_shaders()) return;
+    begun = true;
+    pthread_t t;
+    pthread_create(&t, NULL, headstart_thread, NULL);
+    pthread_detach(t);
 }
 
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)
@@ -3734,11 +3949,15 @@ static void draw_(CmdRec *r, bool indexed) {
     while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
     Pipe *pp = pipe_tab[pslot].pipe;
     if (!pp) {
-        pp = calloc(1, sizeof *pp);
-        pp->k = k;
+        pp = hs_pipe_take(ph);  // (built ahead by the shader head start)
+        if (!pp) {
+            pp = calloc(1, sizeof *pp);
+            pp->k = k;
+            if (hs_pipe_put(ph, pp)) hs_record_pipe(&k);  // (a new one: into cache/headstart.bin)
+            run_job(build_pipeline, pp);
+        }
         pipe_tab[pslot].key = ph;
         pipe_tab[pslot].pipe = pp;
-        run_job(build_pipeline, pp);
     }
     if (atomic_load(&pp->state) != 1) { stat_skipped++; return; }
     ss_enabled();
