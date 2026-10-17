@@ -90,8 +90,11 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
 - [x] Resolução dinâmica padrão no celular (50-75%, segurando os 30 fps do jogo): o overworld vai de 20 para ~30 fps
 - [x] Envios antecipados entre passes (a GPU começa antes; o jogo espera menos pela fence do frame)
 - [x] Breadcrumbs de GPU (`LARECOMP_VK_BREADCRUMBS`): no device lost, qual operação a GPU estava fazendo
-- [ ] Travamentos raros de GPU: os breadcrumbs apontaram a espera pela imagem da janela (semáforo do compositor);
-      agora a imagem é esperada na CPU (fence). Validar com mais partidas
+- [x] Travamentos raros de GPU (~1 em 8 partidas no overworld): eram do driver Turnip 26.3 (Mesa main). Com o
+      Turnip 24.1.0 R18 a6xx (agora o embutido): 24 de 24 partidas sem travar. Custo: o overworld fica em 20 fps
+      (casas e dungeons seguem em 30). Testar drivers novos quando saírem (Video > driver)
+- [ ] Overworld a 30 fps com o driver estável: reduzir CPU da thread de render (cópias de vértices: cache entre
+      frames) e o custo de gravar comandos do driver antigo
 - [ ] Limite do aparelho: `restricted_device_performance=1, 1` (configuração da Samsung) prende os núcleos
       grandes em 1.75 GHz; o núcleo principal (cpu7) fica isolado pelo core_ctl; sem ADPF, sem THP
 - [ ] SPIR-V otimizado (`LARECOMP_VK_OPT=1`) trava o Turnip (device lost): investigar
