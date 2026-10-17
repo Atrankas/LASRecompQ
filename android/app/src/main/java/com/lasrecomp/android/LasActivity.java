@@ -63,10 +63,12 @@ public class LasActivity extends SDLActivity {
         View d = getWindow().getDecorView();
         d.removeCallbacks(mHideBars);
         d.postDelayed(mHideBars, 1000);
+        RootBoost.start(this);
     }
 
     @Override
     protected void onPause() {
+        RootBoost.stop(this);
         getWindow().getDecorView().removeCallbacks(mHideBars);
         super.onPause();
     }
