@@ -1746,7 +1746,7 @@ static void flow_emit_region(Flow *f, int r, int ind) {
             // (the guard: graphics loops end far sooner - a loop over data a skipped pass never wrote must not run
             // into the GPU's hang detection over a whole screen of pixels)
             sp(&f->o, "%*sfor (uint g%d = 0u; f%d && g%d < %uu; g%d++) {\n", ind, "", h, h, h,
-               f->c->stage == STAGE_COMPUTE ? 100000u : 1024u, h);
+               f->c->stage == STAGE_COMPUTE ? 16384u : 1024u, h);
             flow_emit_region(f, l, ind + 2);
             sp(&f->o, "%*s}\n", ind, "");
             continue;

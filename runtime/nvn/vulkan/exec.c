@@ -2997,6 +2997,9 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     if (cp->si->uses_gmem_map && !vk_gmem_mirror()) gfast_prepare(cb);
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL);
+    // (mirrored storage: what was recorded before - this submission's or an earlier one's - may still read the slots this
+    // dispatch rewrites; a list rewritten under a shader walking it hung the GPU)
+    if (vk_gmem_mirror() && cp->si->uses_gmem_map && cp->si->uses_gmem_store) vk_full_barrier(cb);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     vkCmdDispatch(cb, gx, gy, gz);
