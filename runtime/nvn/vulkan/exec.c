@@ -856,21 +856,30 @@ typedef struct {
     pthread_mutex_t lock;
     pthread_cond_t cond;
     pthread_once_t once;
+    int bg_running, bg_max;  // (head start jobs at most bg_max at a time: the rest of the threads stay the game's)
 } JobQueue;
-static JobQueue g_jobs = {.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .once = PTHREAD_ONCE_INIT};
-static JobQueue g_tjobs = {.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .once = PTHREAD_ONCE_INIT};
+static JobQueue g_jobs = {.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .once = PTHREAD_ONCE_INIT, .bg_max = 2};
+static JobQueue g_tjobs = {.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .once = PTHREAD_ONCE_INIT, .bg_max = 1};
 
 static void queue_run(JobQueue *q) {
     for (;;) {
         pthread_mutex_lock(&q->lock);
-        while (!q->head && !q->bhead) pthread_cond_wait(&q->cond, &q->lock);
-        Job **h = q->head ? &q->head : &q->bhead, **t = q->head ? &q->tail : &q->btail;
+        while (!q->head && !(q->bhead && q->bg_running < q->bg_max)) pthread_cond_wait(&q->cond, &q->lock);
+        bool bg = !q->head;
+        Job **h = bg ? &q->bhead : &q->head, **t = bg ? &q->btail : &q->tail;
         Job *j = *h;
         *h = j->next;
         if (!*h) *t = NULL;
+        if (bg) q->bg_running++;
         pthread_mutex_unlock(&q->lock);
         j->fn(j->arg);
         free(j);
+        if (bg) {
+            pthread_mutex_lock(&q->lock);
+            q->bg_running--;
+            pthread_cond_broadcast(&q->cond);
+            pthread_mutex_unlock(&q->lock);
+        }
     }
 }
 
@@ -2140,6 +2149,10 @@ static void hs_record_pipe(const PipeKey *k) {
 static void *headstart_thread(void *arg) {
     (void)arg;
     plat_thread_name("vk-headstart");
+    // not while the game boots: its threads starved of CPU there (a cold start compiling everything) left it waiting
+    // for itself, on a black screen. From its first couple of seconds of frames on (the title, the intro).
+    extern uint64_t renderer_present_count(void);
+    while (renderer_present_count() < 120) SDL_Delay(50);
     double t0 = SDL_GetTicksNS() / 1e6;
     FILE *f = fopen("cache/headstart.bin", "rb");
     if (!f) return NULL;

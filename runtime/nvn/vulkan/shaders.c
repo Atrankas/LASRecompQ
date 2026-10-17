@@ -19,8 +19,20 @@ static shaderc_shader_kind kind_of(int stage) {
 
 // SPIR-V disk cache: cache/spirv/<hash of stage + source>.spv, so a known shader costs a file read instead of a
 // GLSL compile (the driver's pipeline cache only covers the step after this one).
+// SPIR-V post-processing choices (tests): LARECOMP_VK_NO_CONTRACT=0 leaves vertex shaders' arithmetic to the driver,
+// LARECOMP_VK_OPT_FS=1 optimises fragment shaders (spirv-opt). Part of the cache key.
+static int spv_flags(void) {
+    static int f = -1;
+    if (f < 0) {
+        const char *nc = getenv("LARECOMP_VK_NO_CONTRACT"), *of = getenv("LARECOMP_VK_OPT_FS");
+        f = (nc && !atoi(nc) ? 1 : 0) | (of && atoi(of) ? 2 : 0);
+    }
+    return f;
+}
+
 static uint64_t src_hash(const char *src, int stage) {
     uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 3;  // + version of the post-processing (no_contraction)
+    h ^= (uint64_t)spv_flags() << 40;
     if (g_vk.api < VK_API_VERSION_1_3) h ^= (uint64_t)g_vk.api << 32;  // (SPIR-V for an older device: vk_glsl_to_spirv)
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
     return h;
@@ -128,8 +140,8 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
                                            g_vk.api >= VK_API_VERSION_1_3 ? shaderc_env_version_vulkan_1_3
                                            : g_vk.api >= VK_API_VERSION_1_2 ? shaderc_env_version_vulkan_1_2
                                                                             : shaderc_env_version_vulkan_1_1);
-    shaderc_compile_options_set_optimization_level(o, getenv("LARECOMP_VK_OPT") ? shaderc_optimization_level_performance
-                                                                                  : shaderc_optimization_level_zero);
+    bool opt = getenv("LARECOMP_VK_OPT") || ((spv_flags() & 2) && stage != STAGE_VERTEX);
+    shaderc_compile_options_set_optimization_level(o, opt ? shaderc_optimization_level_performance : shaderc_optimization_level_zero);
     shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind_of(stage), name, "main", o);
     shaderc_compile_options_release(o);
     if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
@@ -140,7 +152,7 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
         out = malloc(n);
         memcpy(out, shaderc_result_get_bytes(r), n);
         *nwords = n / 4;
-        if (stage == STAGE_VERTEX) out = no_contraction(out, nwords);
+        if (stage == STAGE_VERTEX && !(spv_flags() & 1)) out = no_contraction(out, nwords);
         if (!nocache) cache_store(h, out, *nwords);
     }
     shaderc_result_release(r);
