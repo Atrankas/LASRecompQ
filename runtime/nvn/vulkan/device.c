@@ -898,6 +898,16 @@ void vk_frame_end(const char *shot_path) {
 }
 
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h) {
+#ifdef __ANDROID__
+    // (a relative path would name an APK asset: under the app's files folder instead, its folders made)
+    char full[1024];
+    const char *dir = SDL_GetAndroidExternalStoragePath();
+    if (path[0] != '/' && dir) {
+        snprintf(full, sizeof full, "%s/%s", dir, path);
+        for (char *q = full + strlen(dir) + 1; (q = strchr(q, '/')); q++) { *q = 0; mkdir(full, 0755); *q = '/'; }
+        path = full;
+    }
+#endif
     SDL_Surface *s = SDL_CreateSurfaceFrom((int)w, (int)h, SDL_PIXELFORMAT_ABGR8888, (void *)rgba, (int)w * 4);
     if (!s || !SDL_SavePNG(s, path)) LOG("[vk] saving %s failed: %s\n", path, SDL_GetError());
     else LOG("[vk] saved %s (%ux%u)\n", path, w, h);
@@ -1158,6 +1168,7 @@ void ui_window_init(void) {
     }
     window = SDL_CreateWindow("LAS Recomp", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
+    rt_window_display(window);
     SDL_AddEventWatch(lifecycle_watch, NULL);
     rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows

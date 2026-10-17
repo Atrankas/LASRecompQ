@@ -250,3 +250,22 @@ void rt_window_icon(SDL_Window *w) {
     SDL_Surface *s = SDL_LoadPNG(p);
     if (s) SDL_SetWindowIcon(w, s), SDL_DestroySurface(s);
 }
+
+// LARECOMP_DISPLAY=<number from 0, or part of its name, e.g. Built-in>: the window opens centred on that display
+// (test runs on a laptop's own screen while the external one stays free).
+void rt_window_display(SDL_Window *w) {
+    const char *e = getenv("LARECOMP_DISPLAY");
+    if (!e || !*e) return;
+    int n = 0;
+    SDL_DisplayID *ids = SDL_GetDisplays(&n);
+    SDL_DisplayID pick = 0;
+    char *end;
+    long i = strtol(e, &end, 10);
+    if (!*end && i >= 0 && i < n) pick = ids[i];
+    for (int k = 0; !pick && k < n; k++) {
+        const char *name = SDL_GetDisplayName(ids[k]);
+        if (name && strstr(name, e)) pick = ids[k];
+    }
+    SDL_free(ids);
+    if (pick) SDL_SetWindowPosition(w, SDL_WINDOWPOS_CENTERED_DISPLAY(pick), SDL_WINDOWPOS_CENTERED_DISPLAY(pick));
+}

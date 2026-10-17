@@ -42,6 +42,7 @@ unsigned long long rt_game_files_size(const char *game_dir);
 
 typedef struct SDL_Window SDL_Window;
 void rt_window_icon(SDL_Window *w);  // the shipped icon.png, if any
+void rt_window_display(SDL_Window *w);  // LARECOMP_DISPLAY: which display the window opens on
 
 #ifdef __cplusplus
 }

@@ -2458,8 +2458,9 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (dbg && pc == maxwell_dbg_pc) {
             int rr = maxwell_dbg_reg % 1000, half = maxwell_dbg_reg / 1000;  // +1000: low f16, +2000: high f16
             c->reg_used[rr] = 1;
-            if (half) sp(&c->body, c->glsl ? "    dbgv = unpackHalf2x16(r%d)[%d];\n" : "    dbgv = float(as_type<half2>(r%d)[%d]);\n", rr, half - 1);
-            else sp(&c->body, "    dbgv = as_type<float>(r%d);\n", rr);
+            if (half == 3) sp(&c->body, "    dbgv = float(r%d) * 0.125f;\n", rr);  // +3000: an integer, / 8
+            else if (half) sp(&c->body, c->glsl ? "    dbgv = unpackHalf2x16(r%d)[%d];\n" : "    dbgv = float(as_type<half2>(r%d)[%d]);\n", rr, half - 1);
+            else sp(&c->body, c->glsl ? "    dbgv = as_f(r%d);\n" : "    dbgv = as_type<float>(r%d);\n", rr);
         }
         info->num_insts++;
     }

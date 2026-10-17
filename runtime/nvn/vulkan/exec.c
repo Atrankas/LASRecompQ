@@ -1,6 +1,7 @@
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_timer.h>
+#include <SDL3/SDL_system.h>
 #include <float.h>
 #include <math.h>
 #include <stdarg.h>
@@ -1340,8 +1341,8 @@ static void begin_pass(void) {
         log_passes = getenv("LARECOMP_VK_LOG_PASSES") ? atol(getenv("LARECOMP_VK_LOG_PASSES")) : 0;
         if (log_passes == 1) log_passes = 300;
     }
-    if (log_passes > 0) {
-        log_passes--;
+    if (log_passes > 0 || g_debug_frame) {  // (and every pass of LARECOMP_DEBUG_FRAME's frame)
+        if (log_passes > 0) log_passes--;
         LOG("[vk] pass %ux%u: %u color", minw, minh, pass_ncolor);
         for (uint32_t i = 0; i < pass_ncolor; i++) {
             TexBackend *b = !placed && st.rt.color[i] ? st.rt.color[i]->backend : NULL;
@@ -1593,10 +1594,15 @@ static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, V
 
 static void save_glsl(const char *src, uint64_t addr, const char *suffix) {
     if (!getenv("LARECOMP_SAVE_MSL")) return;
-    mkdir("build", 0755);
-    mkdir("build/glsl", 0755);
-    char path[256];
-    snprintf(path, sizeof path, "build/glsl/%llx_%s.glsl", (unsigned long long)addr, suffix);
+    char dir[512] = "build";
+#ifdef __ANDROID__
+    if (SDL_GetAndroidExternalStoragePath()) snprintf(dir, sizeof dir, "%s/build", SDL_GetAndroidExternalStoragePath());
+#endif
+    char path[600];
+    mkdir(dir, 0755);
+    snprintf(path, sizeof path, "%s/glsl", dir);
+    mkdir(path, 0755);
+    snprintf(path, sizeof path, "%s/glsl/%llx_%s.glsl", dir, (unsigned long long)addr, suffix);
     FILE *f = fopen(path, "w");
     if (f) { fputs(src, f); fclose(f); }
 }
@@ -1646,6 +1652,16 @@ static void translate_program(void *arg) {
     maxwell_gmem_size = HEAP_MAX;
     maxwell_gmem_chunk_shift = gmem_chunk_shift();
     pthread_mutex_lock(&translate_lock);
+    {   // LARECOMP_DBG_FS=<fs code addr hex>:<pc hex>:<reg> (as renderer.m): that register at that pc as the colour
+        static int parsed;
+        static unsigned long long dbg_addr;
+        static unsigned dbg_pc;
+        static int dbg_reg;
+        if (!parsed) { parsed = 1; const char *e = getenv("LARECOMP_DBG_FS"); if (e) sscanf(e, "%llx:%x:%d", &dbg_addr, &dbg_pc, &dbg_reg); }
+        maxwell_dbg_code = dbg_addr ? (const uint8_t *)(uintptr_t)dbg_addr : NULL;
+        maxwell_dbg_pc = dbg_pc;
+        maxwell_dbg_reg = dbg_reg;
+    }
     p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
     if (p->vi->msl) {
         p->fkey.vs_out_mask = p->vi->out_mask;
@@ -2792,11 +2808,16 @@ static void mirror_table(int stage, bool store, VkCommandBuffer cb, uint32_t *ta
     mirror_init();
     memset(tab, 0, sizeof gmap_tab);
     if (store) mir_nstored = 0;
-    struct { uint64_t lo, hi; } r[16];
+    // the stage's storage buffers, and a compute dispatch's uniform buffers too: the driver constants hand it their
+    // addresses (cbuf_info), and shaders read them as global memory - the light culling reads its parameters that way,
+    // and without them it made no lights at all: a dark, flat world (point lights, the lamps' glow)
+    struct { uint64_t lo, hi; bool ro; } r[32];
     int n = 0;
-    for (int i = 0; i < 16; i++) {
-        uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
+    for (int i = 0; i < (stage == 5 ? 32 : 16); i++) {
+        bool ubo = i >= 16;
+        uint64_t a = ubo ? st.ubuf[stage][i - 16].addr : st.sbuf[stage][i].addr, sz = ubo ? st.ubuf[stage][i - 16].size : st.sbuf[stage][i].size;
         if (!a || !sz) continue;
+        if (ubo && (a < HEAP_BASE || a + sz > HEAP_BASE + HEAP_MAX)) continue;
         if (a < HEAP_BASE || a + sz > HEAP_BASE + HEAP_MAX) {
             static int nlog;
             if (nlog++ < 20) LOG("[vk] gmem mirror: stage %d buffer %d %llx+%llx outside the heap: reads zero\n", stage, i,
@@ -2806,11 +2827,11 @@ static void mirror_table(int stage, bool store, VkCommandBuffer cb, uint32_t *ta
         uint64_t lo = a & ~3ull, hi = (a + sz + 3) & ~3ull;  // (words: what's merged)
         int k = n++;
         while (k > 0 && r[k - 1].lo > lo) { r[k] = r[k - 1]; k--; }
-        r[k].lo = lo; r[k].hi = hi;
+        r[k].lo = lo; r[k].hi = hi; r[k].ro = ubo;
     }
     int m = 0;
     for (int i = 0; i < n; i++) {
-        if (m && r[i].lo < r[m - 1].hi) { if (r[i].hi > r[m - 1].hi) r[m - 1].hi = r[i].hi; }
+        if (m && r[i].lo < r[m - 1].hi) { if (r[i].hi > r[m - 1].hi) r[m - 1].hi = r[i].hi; r[m - 1].ro &= r[i].ro; }
         else r[m++] = r[i];
     }
     uint64_t pending = vk_pending_seq();
@@ -2821,7 +2842,7 @@ static void mirror_table(int stage, bool store, VkCommandBuffer cb, uint32_t *ta
         MirSlot *slot = NULL;
         for (int k = 0; k < MIR_SLOTS && !slot; k++)
             if (mir_slot[k].used && mir_slot[k].lo <= lo && hi <= mir_slot[k].hi) slot = &mir_slot[k];
-        if (!slot && store) {  // a new GPU copy, starting from the CPU's
+        if (!slot && store && !r[i].ro) {  // a new GPU copy, starting from the CPU's
             int k = 0;
             while (k < MIR_SLOTS && mir_slot[k].used) k++;
             uint64_t at = k < MIR_SLOTS ? mirror_slot_alloc(hi - lo) : ~0ull;
@@ -2841,7 +2862,7 @@ static void mirror_table(int stage, bool store, VkCommandBuffer cb, uint32_t *ta
             else if (slot->gpu_seq < pending) mirror_cpu_changes(slot, vk_upload_cmd());
             off = slot->off + (lo - slot->lo);
             slot->last_use = pending;
-            if (store && mir_nstored < 16) mir_stored[mir_nstored++] = slot;
+            if (store && !r[i].ro && mir_nstored < 16) mir_stored[mir_nstored++] = slot;
         } else {
             for (int k = 0; k < 64 && off == ~0ull; k++)  // (the same range again in this submission: its copy)
                 if (mir_snap_memo[k].seq == pending && mir_snap_memo[k].lo == lo && mir_snap_memo[k].hi == hi) off = mir_snap_memo[k].off;
@@ -3573,6 +3594,18 @@ static void draw_(CmdRec *r, bool indexed) {
         for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { stat_skipped++; return; }
         extern bool pot_level_active(void);
         if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { stat_skipped++; return; }
+        {   // LARECOMP_DUMP_UBO=<fs code addr hex> (as renderer.m): that shader's uniform buffers in the debug frame
+            static uint64_t dump_fs = 1;
+            if (dump_fs == 1) { const char *e = getenv("LARECOMP_DUMP_UBO"); dump_fs = e ? strtoull(e, NULL, 16) : 0; }
+            if (g_debug_frame && dump_fs && fs == dump_fs)
+                for (int i = 0; i < 18; i++) {
+                    if (!st.ubuf[1][i].addr) continue;
+                    const float *f = (const float *)(uintptr_t)st.ubuf[1][i].addr;
+                    LOG("[ubo] f%d (%llu):", i, (unsigned long long)st.ubuf[1][i].size);
+                    for (uint64_t k = 0; k < st.ubuf[1][i].size / 4 && k < 1200; k++) LOG(" %g", f[k]);
+                    LOG("\n");
+                }
+        }
         if (g_debug_frame && getenv("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
         extern void widescreen_backdrop_seen(uint64_t hash);
