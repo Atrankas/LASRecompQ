@@ -32,6 +32,7 @@ Settings g_settings = {
     .touch_size = 1.0f,
 #ifdef __ANDROID__
     .res_mode = RES_DYNAMIC,  // (phones: the display's resolution, down to 50% while the GPU can't hold 30 fps)
+    .frame_gen = 1,           // (phones: 60 on the screen from the game's 30)
 #endif
 };
 
@@ -139,6 +140,7 @@ void settings_load(void) {
         else if (!strcmp(key, "move_360")) g_settings.move_360 = atoi(val) != 0;
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
+        else if (!strcmp(key, "frame_gen")) g_settings.frame_gen = atoi(val);
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
         else if (!strcmp(key, "prompts")) g_settings.prompts = !strcmp(val, "nintendo") ? PROMPTS_NINTENDO : !strcmp(val, "xbox") ?
                                                               PROMPTS_XBOX : !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION : PROMPTS_AUTO;
@@ -198,8 +200,8 @@ void settings_save(void) {
     else fprintf(f, "resolution = match\n");
     fprintf(f, "inv_keys = %d\n", g_settings.inv_keys);
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);
-    fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\n", g_settings.move_360, g_settings.blur_removal,
-            g_settings.hide_hero_icon);
+    fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\nframe_gen = %d\n", g_settings.move_360, g_settings.blur_removal,
+            g_settings.hide_hero_icon, g_settings.frame_gen);
     static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation"};
     fprintf(f, "prompts = %s\n", prompts[g_settings.prompts & 3]);
     fprintf(f, "mirror_mode = %d\n", g_settings.mirror_mode);

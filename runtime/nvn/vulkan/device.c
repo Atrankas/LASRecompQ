@@ -578,7 +578,11 @@ static VkPresentModeKHR present_mode(void) {
     // queued behind the one waiting for a window image, so the game's fence waits followed the presentation engine:
     // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
     // 60). No tearing. LARECOMP_VK_PRESENT=fifo|immediate|mailbox to choose.
+    // Frame generation (framegen.c): FIFO, which shows the in-between frame, presented right after the real one, a
+    // refresh later.
+    extern bool fg_enabled(void);
     const char *e = getenv("LARECOMP_VK_PRESENT");
+    if (!e && fg_enabled()) e = "fifo";
     VkPresentModeKHR want = !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
                           : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
     uint32_t n = 0;
@@ -866,6 +870,7 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
+static bool g_fg_copy;  // vk_frame_end: copy the window picture for frame generation (backend_present_gpu)
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
@@ -873,6 +878,11 @@ void vk_frame_end(const char *shot_path) {
     vkCmdEndRendering(cb);
     VkSpan shot = {0};
     if (shot_path) save_window_image(cb, &shot);
+    if (g_fg_copy) {  // (frame generation: the real window picture, for the in-between frame)
+        extern void fg_copy_window(VkCommandBuffer cb, VkImage sc, VkFormat fmt, uint32_t w, uint32_t h);
+        fg_copy_window(cb, g_vk.sc_images[cur_frame.image], g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height);
+        g_fg_copy = false;
+    }
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     uint32_t img = cur_frame.image;
     if (!done_sem[img]) done_sem[img] = binary_semaphore();
@@ -1030,7 +1040,21 @@ void backend_present_gpu(NvnTexture *t) {
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)total_frames + 1 == win_shot;
-        vk_frame_end(shot ? "build/window.png" : NULL);
+        extern bool fg_frame_wanted(uint64_t frame, TexBackend *fin);
+        extern bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBackend *fin, const float rect[4],
+                            const float crop[4], bool flip_present);
+        bool gen = fg_frame_wanted(total_frames, b);
+        g_fg_copy = gen;
+        // LARECOMP_FG_SHOT=<frame>: that frame's window picture, its in-between one and the next real one (build/fg_*.png)
+        static long fg_shot = -1;
+        if (fg_shot < 0) fg_shot = getenv("LARECOMP_FG_SHOT") ? atol(getenv("LARECOMP_FG_SHOT")) : 0;
+        bool fs0 = fg_shot && (long)total_frames == fg_shot, fs1 = fg_shot && (long)total_frames == fg_shot + 1;
+        vk_frame_end(shot ? "build/window.png" : fs0 ? "build/fg_real0.png" : fs1 ? "build/fg_real1.png" : NULL);
+        if (gen && vk_frame_begin(black)) {  // the in-between frame: the next swapchain image, presented a refresh later
+            float rect[4] = {(float)vx, (float)vy, (float)vw, (float)vh};
+            fg_draw(vk_cmd(), g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height, b, rect, crop, pv[0] > 0.5f);
+            vk_frame_end(fs0 ? "build/fg_gen0.png" : NULL);
+        }
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
         renderer_submit();

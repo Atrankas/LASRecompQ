@@ -38,6 +38,7 @@ typedef struct {
     bool move_360;       // analog movement in any direction (the game snaps the stick to 8): runtime/hle/qol.c
     bool blur_removal;   // no tilt-shift blur at the top / bottom of the screen
     bool hide_hero_icon; // no Hero Mode icon on the HUD
+    int frame_gen;       // 60 fps (generated): in-between frames while the game runs at 30 (Vulkan: framegen.c)
     bool mirror_mode;    // the world mirrored left to right (Gameplay tab): renderers + runtime/hle/input.c
     int language;        // LANG_AUTO or an index into g_language_codes: the game's text language
     int prompts;         // PROMPTS_*: button glyphs (auto = follow the controller SDL reports): runtime/nvn/texpatch.c

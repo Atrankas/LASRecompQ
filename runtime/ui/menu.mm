@@ -589,6 +589,14 @@ static void tab_display(void) {
     opt_choice("Anti-aliasing", &g_settings.antialias, aa, 2, AA_OFF,
                "Smooths jagged edges of the game image before it is scaled to the window. SMAA: finds the edges and "
                "blends only along them, so textures stay sharp. Most useful at a lower internal resolution.");
+#ifndef __APPLE__
+    static const char *fgn[] = {"Off", "60 fps (generated)"};
+    opt_choice("Frame generation", &g_settings.frame_gen, fgn, 2, 0,
+               "60 fps (generated): while the game runs at its own 30 frames a second, an in-between frame is made "
+               "after each one from the picture, the scene's depth and the camera's movement, and shown a refresh "
+               "later - camera movement looks like 60. Characters' own movement stays at 30. It pauses by itself when "
+               "the game can't hold its 30. Takes effect at the next start of the app.");
+#endif
 
     opt_section("Game");
     opt_toggle("Remove blur", &g_settings.blur_removal, false,

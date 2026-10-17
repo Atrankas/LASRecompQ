@@ -3823,6 +3823,7 @@ static void draw_(CmdRec *r, bool indexed) {
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || atomic_load(&pr->state) != 1) { stat_skipped++; return; }
     g_mirror_w = 0;
+    bool scene_composite = false;  // (frame generation copies the picture right after it: framegen.c)
     {   // mirror mode (runtime/hle/mirror.c; as renderer.m): the scene's composite into the window image is mirrored
         extern bool mirror_draw(bool composite);
         extern bool mirror_scene_size(uint32_t sw, uint32_t sh, uint32_t w, uint32_t h);
@@ -3833,6 +3834,7 @@ static void draw_(CmdRec *r, bool indexed) {
             NvnTexture *t0 = shader_texture_object(1, &pr->fi->tex[0]);
             composite = t0 && mirror_scene_size(t0->width, t0->height, st.rt.color[0]->width, st.rt.color[0]->height);
         }
+        scene_composite = composite;
         if (mirror_draw(composite)) {
             vkey.flip_x = fkey.flip_x = true;
             pr = get_program(st.program, &vkey, &fkey);
@@ -3972,6 +3974,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (ss_need(SS_DT, ss.dt == (VkBool32)dt)) { ss.dt = dt; vkCmdSetDepthTestEnable(cb, dt); }
     VkBool32 dw = dt && st.ds[1];
     if (ss_need(SS_DW, ss.dw == dw)) { ss.dw = dw; vkCmdSetDepthWriteEnable(cb, dw); }
+    if (dw) { extern void fg_note_draw(NvnTexture *depth, uint32_t pass_w, uint32_t pass_h); fg_note_draw(st.rt.depth, pass_w, pass_h); }
     VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
     // EQUAL against a depth pre-pass written by a different vertex shader (foliage, trees) needs both shaders to land
     // on identical depths. They do since the translator stopped using unpackHalf2x16 (NVIDIA ran the half math after
@@ -4300,6 +4303,11 @@ static void draw_(CmdRec *r, bool indexed) {
     dl_note("  draw vs %llx fs %llx (hash %016llx) count %u inst %u", (unsigned long long)st.program->stages[0].code_addr,
             (unsigned long long)st.program->stages[1].code_addr, (unsigned long long)g_cur_fs_hash, (unsigned)count, (unsigned)inst);
     if (dl_on == 3) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=3: each draw its own submission)
+    if (scene_composite) {
+        extern bool fg_enabled(void);
+        extern void fg_scene_composited(VkCommandBuffer cb, TexBackend *rt);
+        if (fg_enabled()) { vk_end_pass(); fg_scene_composited(vk_cmd(), st.rt.color[0]->backend); }
+    }
     stat_draws++;
     cum_draws++;
     work_since_submit++;
