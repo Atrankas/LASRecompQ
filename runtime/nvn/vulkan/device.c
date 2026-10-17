@@ -480,6 +480,10 @@ static void create_device(void) {
         HAVE(f12, h12, shaderInt8) HAVE(f12, h12, samplerMirrorClampToEdge) HAVE(f12, h12, uniformAndStorageBuffer8BitAccess)
         HAVE(f12, h12, storageBuffer8BitAccess) HAVE(f12, h12, scalarBlockLayout) HAVE(f11, h11, storageBuffer16BitAccess)
 #undef HAVE
+        // guest shaders fetch texels and images with coordinates nobody checked: out of the image, a phone GPU may
+        // fault (device lost) where desktop ones just return zero
+        f13.robustImageAccess = h13.robustImageAccess;
+        if (!h13.robustImageAccess) LOG("[vk] driver lacks robustImageAccess\n");
     }
 #endif
     float prio = 1.0f;

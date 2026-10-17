@@ -94,8 +94,12 @@ typedef struct {
     uint64_t start;  // first record of the list being recorded
     uint64_t callback, callback_data;
     bool recording;
+    bool fences;     // the list being recorded has a fence sync or calls lists (marked in its first record)
     uint64_t guest;  // the guest NVNcommandBuffer*
 } NvnCmdBuf;
+// A list's first record (CMD_BARRIER) has x[6] == CMD_LIST_FENCES when the list has fences or calls other lists: the
+// render thread (gpu_thread.c mark_fences) looks through only those.
+#define CMD_LIST_FENCES 0x46454e4345534cull
 
 // One recorded command: header, the call's integer and float arguments, then copied data.
 typedef struct {

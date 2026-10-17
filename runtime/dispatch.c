@@ -129,6 +129,8 @@ GuestFn dispatch_lookup(uint64_t addr) {
 
 // Small direct-mapped cache in front of the binary search
 #define DCACHE (sizeof ((Cpu *)0)->dcache / sizeof ((Cpu *)0)->dcache[0])  // (in Cpu: cpu.h)
+// (functions start 16-byte aligned, and call targets cluster: pc >> 2 alone left 3 slots in 4 unused)
+static inline unsigned dcache_slot(uint64_t pc) { return (unsigned)((pc >> 4) ^ (pc >> 14)) & (DCACHE - 1); }
 
 static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
@@ -149,7 +151,7 @@ static GuestFn dispatch_slow(Cpu *c) {
         const char *s = loader_symbol_at(c->x[30], &off);
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
     }
-    unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
+    unsigned h = dcache_slot(pc);
     c->dcache[h].addr = pc;
     c->dcache[h].fn = f;
     return f;
@@ -162,7 +164,7 @@ __attribute__((noinline)) static void dispatch_miss(Cpu *c) {
     __attribute__((musttail)) return f(c);
 }
 __attribute__((no_stack_protector)) void rt_dispatch(Cpu *c) {
-    unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
+    unsigned h = dcache_slot(c->pc);
     if (__builtin_expect(c->dcache[h].addr == c->pc, 1)) __attribute__((musttail)) return c->dcache[h].fn(c);
     __attribute__((musttail)) return dispatch_miss(c);
 }

@@ -32,6 +32,7 @@ typedef struct {
 #define GT_N 1024
 static GtOp ring[GT_N];
 static uint64_t head, tail;  // ops queued / ops done (mu)
+static bool idle;           // the render thread waits for work (mu): only then is it woken
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv_work = PTHREAD_COND_INITIALIZER, cv_done = PTHREAD_COND_INITIALIZER;
 static _Atomic int g_on = -1;
@@ -76,7 +77,11 @@ static void *gt_main(void *arg) {
     plat_crash_handler_install();
     pthread_mutex_lock(&mu);
     for (;;) {
-        while (tail == head) pthread_cond_wait(&cv_work, &mu);
+        while (tail == head) {
+            idle = true;
+            pthread_cond_wait(&cv_work, &mu);
+        }
+        idle = false;
         GtOp o = ring[tail % GT_N];
         pthread_mutex_unlock(&mu);
         run(&o);
@@ -140,7 +145,7 @@ static uint64_t push(GtOp o) {
     }
     ring[head % GT_N] = o;
     uint64_t t = ++head;
-    pthread_cond_signal(&cv_work);
+    if (idle) pthread_cond_signal(&cv_work);
     pthread_mutex_unlock(&mu);
     return t;
 }
@@ -161,6 +166,8 @@ void gt_call(void (*fn)(void *), void *arg) {
 
 // Fences recorded in a list (and the lists it calls): their syncs are signaled by this queued op.
 static void mark_fences(uint64_t handle, uint64_t ticket, int depth) {
+    const CmdRec *first = (const CmdRec *)(uintptr_t)handle;
+    if (first->op == CMD_BARRIER && first->x[6] != CMD_LIST_FENCES) return;  // (none: cmdbuf.c EndRecording)
     uint64_t p = handle;
     for (int guard = 0; guard < 10000000; guard++) {
         const CmdRec *r = (const CmdRec *)(uintptr_t)p;
