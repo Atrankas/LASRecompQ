@@ -735,7 +735,11 @@ static int new_chunk(uint64_t size) {
         ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         r = vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info);
     }
-    VK_CHECK(r);
+    if (r != VK_SUCCESS) {  // (system memory too: vk_transient waits for a chunk to come free instead - issue #45)
+        LOG("[vk] transient ring: no memory for chunk %d (%llu MB, error %d)\n", nchunks, (unsigned long long)(size >> 20), r);
+        vk_log_memory("ring chunk failed");
+        return -1;
+    }
     c->ptr = info.pMappedData;
     c->size = size;
     static bool spilled;  // (the first chunk in system memory: logged too)
@@ -769,6 +773,17 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
     for (int i = 0; i < nchunks; i++)
         if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
     if (pick < 0) pick = new_chunk(size > CHUNK_SIZE ? size : CHUNK_SIZE);
+    if (pick < 0) {  // no memory for another chunk (a GTX 1060 with 6 GB: issue #45): wait for the work already submitted,
+        // which frees the chunks only it used, and take one of those (the recording in progress keeps its own)
+        vk_wait_seq(submit_seq);
+        done = vk_completed_seq();
+        for (int i = 0; i < nchunks; i++)
+            if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
+        if (pick < 0) FATAL("the graphics card ran out of memory for uploads (%llu MB needed, %d chunks in use)\n",
+                            (unsigned long long)(size >> 20), nchunks);
+        static int nlog;
+        if (nlog++ < 5) LOG("[vk] transient ring: reused chunk %d after waiting for the GPU\n", pick);
+    }
     active = pick;
     chunks[pick].used = size;
     chunks[pick].seq = pending;
