@@ -82,6 +82,7 @@ static char g_log_path[1024];
 static FILE *g_log_file;
 
 static void *log_pump(void *arg) {
+    plat_thread_name("log");
     int fd = (int)(intptr_t)arg;
     char buf[4096], line[4096];
     size_t n_line = 0;
@@ -233,3 +234,5 @@ static int rm_entry(const char *path, const struct stat *sb, int flag, struct FT
 bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0; }
 
 void plat_terminate(void) { _exit(0); }
+
+void plat_thread_name(const char *name) { pthread_setname_np(pthread_self(), name); }

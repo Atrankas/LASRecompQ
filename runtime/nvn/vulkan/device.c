@@ -1101,7 +1101,29 @@ int ui_run(void) {
     for (;;) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
+        static int log_events = -1;  // LARECOMP_LOG_EVENTS=1: what the window loop gets, every 5 s
+        static uint64_t ev_n[0x10000 >> 8], loops, ev_t0;
+        if (log_events < 0) log_events = getenv("LARECOMP_LOG_EVENTS") != NULL;
+        if (log_events) {
+            loops++;
+            uint64_t now = SDL_GetTicks();
+            if (now - ev_t0 > 5000) {
+                LOG("[events] %llu loops in 5 s:", (unsigned long long)loops);
+                for (int k = 0; k < (0x10000 >> 8); k++) if (ev_n[k]) LOG(" %#x00:%llu", k, (unsigned long long)ev_n[k]);
+                LOG("\n");
+                memset(ev_n, 0, sizeof ev_n), loops = 0, ev_t0 = now;
+            }
+        }
+#ifdef __ANDROID__
+        // (SDL_WaitEventTimeout spins there: a big core busy all the time for nothing. Touch events are queued by the
+        // Java side as they come; looking every 4 ms is quicker than any finger)
+        bool any = SDL_PollEvent(&e);
+        if (!any) SDL_Delay(4);
+        for (bool got = any; got; got = SDL_PollEvent(&e)) {
+#else
         while (SDL_WaitEventTimeout(&e, 16)) {
+#endif
+            if (log_events) ev_n[(e.type >> 8) & 0xff]++;
             if (e.type == SDL_EVENT_QUIT) {
                 LOG("window closed\n");
                 exit(0);

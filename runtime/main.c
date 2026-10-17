@@ -197,6 +197,7 @@ static void android_env_file(void) {
 
 int main(int argc, char **argv) {
     plat_init();
+    plat_thread_name("las-main");
 #ifdef _WIN32
     setvbuf(stderr, NULL, _IONBF, 0);  // the Windows CRT treats _IOLBF as full buffering
 #else

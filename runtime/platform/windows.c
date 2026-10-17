@@ -384,3 +384,5 @@ bool plat_remove_tree(const char *dir) {
 
 // End the process at once, skipping DLL teardown (from an atexit handler, after flushing). Exit status 0.
 void plat_terminate(void) { TerminateProcess(GetCurrentProcess(), 0); }
+
+void plat_thread_name(const char *name) { (void)name; }

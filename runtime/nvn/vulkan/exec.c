@@ -616,6 +616,7 @@ static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 
 static void *worker(void *a) {
+    plat_thread_name("vk-pipeline");
     (void)a;
     for (;;) {
         pthread_mutex_lock(&jobs_lock);
@@ -643,6 +644,7 @@ static Job *tjobs_head, *tjobs_tail;
 static pthread_mutex_t tjobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t tjobs_cond = PTHREAD_COND_INITIALIZER;
 static void *translator(void *a) {
+    plat_thread_name("vk-translate");
     (void)a;
     for (;;) {
         pthread_mutex_lock(&tjobs_lock);

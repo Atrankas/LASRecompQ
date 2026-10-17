@@ -9,6 +9,7 @@ import android.os.StatFs;
 import android.provider.DocumentsContract;
 import android.provider.DocumentsContract.Document;
 import android.util.Log;
+import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
@@ -43,6 +44,31 @@ public class LasActivity extends SDLActivity {
         String saved = getPreferences(MODE_PRIVATE).getString("tree", null);
         if (saved != null) sTree = Uri.parse(saved);
         immersive();
+    }
+
+    // SDL sets its fullscreen through the old system UI flags (Android 15+ ignores them, and they bring the bars back
+    // over the game on some systems) and owns the window's insets listener: while in front, the bars are checked
+    // every 3 s and hidden again (after a swipe that showed them too)
+    private final Runnable mHideBars = new Runnable() {
+        @Override public void run() {
+            // (unconditionally: the window's own idea of the bars can be out of step with what the system shows)
+            immersive();
+            getWindow().getDecorView().postDelayed(this, 3000);
+        }
+    };
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        View d = getWindow().getDecorView();
+        d.removeCallbacks(mHideBars);
+        d.postDelayed(mHideBars, 1000);
+    }
+
+    @Override
+    protected void onPause() {
+        getWindow().getDecorView().removeCallbacks(mHideBars);
+        super.onPause();
     }
 
     @Override

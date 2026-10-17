@@ -187,6 +187,9 @@ void rt_unwind_point(void) {
 static void *thread_main(void *arg) {
     KThread *t = arg;
     t_cur = t;
+    char name[16];
+    snprintf(name, sizeof name, "guest %x p%d", t->handle, t->prio);
+    plat_thread_name(name);
     crash_handler_install();
     rt_set_fpcr(0);
     if (!setjmp(t->unwind)) guest_call(&t->cpu, t->entry);
