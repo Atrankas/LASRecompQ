@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <atomic>
 #include <vector>
+#include "touch_ui.h"
 #ifdef __ANDROID__
 #include <string>
 #endif
@@ -52,7 +53,7 @@ static std::atomic<bool> g_text_busy{false};  // a text field / the on-screen ke
 static std::atomic<bool> g_want_fullscreen_apply{false};
 
 struct QEvent {
-    enum { KEY, ANALOG, MOUSE_POS, MOUSE_BUTTON, WHEEL, TEXT } kind;
+    enum { KEY, ANALOG, MOUSE_POS, MOUSE_BUTTON, WHEEL, SCROLL_PX, TEXT } kind;
     ImGuiKey key;
     bool down;
     float value, x, y;
@@ -261,20 +262,13 @@ bool menu_handle_event(const SDL_Event *e) {
 #ifdef __ANDROID__
     case SDL_EVENT_FINGER_DOWN: case SDL_EVENT_FINGER_UP: case SDL_EVENT_FINGER_MOTION: case SDL_EVENT_FINGER_CANCELED:
         if (!capturing()) return false;
-        {   // touch screens: a finger is the mouse (SDL's touch-made mouse events carry no window, which ImGui drops)
-            QEvent q = {};
-            q.kind = QEvent::MOUSE_POS, q.x = e->tfinger.x * g_win_px_w, q.y = e->tfinger.y * g_win_px_h;
-            push(q);
-            if (e->type != SDL_EVENT_FINGER_MOTION) {
-                q = {};
-                q.kind = QEvent::MOUSE_BUTTON, q.button = 0, q.down = e->type == SDL_EVENT_FINGER_DOWN;
-                push(q);
-            }
-            if (e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_CANCELED) {  // (no hover left behind)
-                q = {};
-                q.kind = QEvent::MOUSE_POS, q.x = -FLT_MAX, q.y = -FLT_MAX;
-                push(q);
-            }
+        {   // touch screens (touch_ui.h): taps click, drags scroll (SDL's touch-made mouse events carry no window, which
+            // ImGui drops)
+            static TouchUi touch;
+            touch.event(e, (float)g_win_px_w, (float)g_win_px_h,
+                        [](float x, float y) { QEvent q = {}; q.kind = QEvent::MOUSE_POS, q.x = x, q.y = y; push(q); },
+                        [](bool down) { QEvent q = {}; q.kind = QEvent::MOUSE_BUTTON, q.button = 0, q.down = down; push(q); },
+                        [](float px) { QEvent q = {}; q.kind = QEvent::SCROLL_PX, q.y = px; push(q); });
         }
         return true;
 #endif
@@ -405,6 +399,7 @@ static void drain_events(ImGuiIO &io) {
         case QEvent::MOUSE_POS: io.AddMousePosEvent(q.x, q.y); break;
         case QEvent::MOUSE_BUTTON: io.AddMouseButtonEvent(q.button, q.down); break;
         case QEvent::WHEEL: io.AddMouseWheelEvent(q.x, q.y); break;
+        case QEvent::SCROLL_PX: io.AddMouseWheelEvent(0, q.y / (5 * ImGui::GetFontSize())); break;  // (ImGui: 5 lines a step)
         case QEvent::TEXT: io.AddInputCharactersUTF8(q.text); break;
         }
     }
@@ -496,14 +491,14 @@ static void gpu_driver_rows(void) {
     std::string d = "The Vulkan driver the game renders with. System: your device's own. An installed driver (such as "
                     "Mesa Turnip for Adreno) can be faster or fix glitches - or be slower; one that doesn't start is "
                     "replaced by System at the next start.\n\nChanges apply at the next start of the app. Running now: ";
-    d += active ? name : "System";
+    d += active ? (name.empty() ? "Turnip (built in)" : name) : "System";  // (no installed one: the APK's own runs)
     if (failed) d += std::string(".\n\n") + failed + " didn't start: System runs instead";
     d += ".";
     std::string names[2] = {"System", name};
     if (use != active) names[use] += " (next start)";
     const char *np[2] = {names[0].c_str(), names[1].c_str()};
     int v = use;
-    if (name.empty()) opt_disable_next(), opt_action("GPU driver", "System", d.c_str());
+    if (name.empty()) opt_disable_next(), opt_action("GPU driver", active ? "Turnip (built in)" : "System", d.c_str());
     else if (opt_choice("GPU driver", &v, np, 2, 0, d.c_str())) android_gpu_driver_select(use = v);
 
     pthread_mutex_lock(&g_driver_lock);

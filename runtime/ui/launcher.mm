@@ -21,6 +21,7 @@
 #include <atomic>
 
 #include "imgui.h"
+#include "touch_ui.h"
 #include "imgui_internal.h"  // (SetKeyOwner)
 #include "option_rows.h"
 #include "osk.h"
@@ -1143,13 +1144,14 @@ extern "C" void launcher_run(const char *root) {
 #ifdef __ANDROID__
             if (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_MOTION ||
                 e.type == SDL_EVENT_FINGER_CANCELED) {
-                // touch screens: a finger is the mouse (SDL's touch-made mouse events carry no window: ImGui drops them)
+                // touch screens (touch_ui.h): taps click, drags scroll (SDL's touch-made mouse events carry no window:
+                // ImGui drops them)
+                static TouchUi touch;
                 ImGuiIO &tio = ImGui::GetIO();
                 tio.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
-                tio.AddMousePosEvent(e.tfinger.x * tio.DisplaySize.x, e.tfinger.y * tio.DisplaySize.y);
-                if (e.type != SDL_EVENT_FINGER_MOTION) tio.AddMouseButtonEvent(0, e.type == SDL_EVENT_FINGER_DOWN);
-                if (e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED)
-                    tio.AddMousePosEvent(-FLT_MAX, -FLT_MAX);  // (no hover left behind)
+                touch.event(&e, tio.DisplaySize.x, tio.DisplaySize.y, [&](float x, float y) { tio.AddMousePosEvent(x, y); },
+                            [&](bool down) { tio.AddMouseButtonEvent(0, down); },
+                            [&](float px) { tio.AddMouseWheelEvent(0, px / (5 * ImGui::GetFontSize())); });
                 continue;
             }
 #endif
