@@ -1669,6 +1669,11 @@ static bool flow_leaves(int k) { return k == FLOW_BRA || k == FLOW_EXIT || k == 
 #define FLOW_DEPTH 16
 #define FLOW_SUCC 128  // successors of a block: 2, or a BRX's possible targets
 typedef struct { uint8_t n[3]; uint32_t v[3][FLOW_DEPTH]; } FlowStacks;  // ssy, pbk, pcnt
+static bool stacks_eq(const FlowStacks *a, const FlowStacks *b) {  // (the live entries: popped ones stay behind in v)
+    for (int s = 0; s < 3; s++)
+        if (a->n[s] != b->n[s] || memcmp(a->v[s], b->v[s], sizeof a->v[s][0] * a->n[s])) return false;
+    return true;
+}
 typedef struct {
     size_t first, last;   // instruction words of the block (last: its terminator, if it has one)
     int succ[FLOW_SUCC], nsucc;  // blocks after it (-1: the end); guarded: [0] taken, [1] not; BRX: its targets
@@ -1796,7 +1801,16 @@ static char *structure_body(Ctx *c, const uint64_t *code, size_t end, const uint
     size_t *brx_end = calloc(end + 1, sizeof(size_t));
     // BRX (a jump table): any instruction from it up to where its cases meet may be a target - the nearest SSY / PBK
     // target past it, or else the nearest target of an unconditional branch forward from its cases
-    memcpy(lab, label, end);
+    // (not the translator's labels: with a BRX those are every instruction) the targets of BRA / SSY / PBK / PCNT
+    memset(lab, 0, end + 1);
+    lab[1] = 1;
+    for (size_t j = 0; j < end; j++) {
+        int k = j % 4 ? flow_kind(code[j]) : FLOW_NONE;
+        if (k != FLOW_BRA && k != FLOW_SSY && k != FLOW_PBK && k != FLOW_PCNT) continue;
+        int64_t t = norm_target((int64_t)(j * 8) + 8 + sbits(code[j], 20, 24));
+        if (t >= 0 && (size_t)(t / 8) < end) lab[t / 8] = 1;
+    }
+    (void)label;
     for (size_t i = 0; i < end; i++) {
         if (i % 4 == 0 || flow_kind(code[i]) != FLOW_BRX) continue;
         size_t lim = 0;
@@ -1811,9 +1825,20 @@ static char *structure_body(Ctx *c, const uint64_t *code, size_t end, const uint
             size_t t = norm_target((int64_t)(j * 8) + 8 + sbits(code[j], 20, 24)) / 8;
             if (t > j && t < end) lim = t;
         }
-        if (!lim || lim - i > FLOW_SUCC * 4 / 3 - 4) FLOW_FAIL(1);
-        brx_end[i] = lim;
-        for (size_t j = i + 1; j < lim; j++) if (j % 4) lab[j] = 1;
+        if (lim && lim - i <= FLOW_SUCC * 4 / 3 - 4) {
+            brx_end[i] = lim;
+            for (size_t j = i + 1; j < lim; j++) if (j % 4) lab[j] = 1;
+            continue;
+        }
+        // else (a table of whole sections, each ending the program: compute shaders' switch on a constant) the
+        // targets can only be where code starts that nothing falls into: after an unconditional terminator, or a label
+        brx_end[i] = end;
+        for (size_t j = i + 1, prev = i; j < end; j++) {
+            if (j % 4 == 0) continue;
+            int pk = flow_kind(code[prev]);
+            if (flow_leaves(pk) && bits(code[prev], 16, 4) == PT) lab[j] = 1;
+            prev = j;
+        }
     }
     label = lab;
     // blocks: from labels and after flow that leaves, to such flow
@@ -1876,8 +1901,11 @@ static char *structure_body(Ctx *c, const uint64_t *code, size_t end, const uint
         int n = 0;
         FlowStacks sst[FLOW_SUCC];
         if (x->brx >= 0) {  // every possible target, with the stacks as they are (then the fallthrough if guarded)
-            for (size_t j = x->last + 1; j < brx_end[x->last] && n < FLOW_SUCC - 1; j++)
-                if (j % 4 && bof[j] >= 0 && f.b[bof[j]].first == j) x->succ[n] = bof[j], sst[n++] = st;
+            for (size_t j = x->last + 1; j < brx_end[x->last]; j++)
+                if (j % 4 && bof[j] >= 0 && f.b[bof[j]].first == j) {
+                    if (n == FLOW_SUCC - 1) FLOW_FAIL(12);
+                    x->succ[n] = bof[j], sst[n++] = st;
+                }
             if (guarded) x->succ[n] = id + 1 < f.nb ? id + 1 : -1, sst[n++] = st;
         } else {
             if (tgt != -2) x->succ[n] = tgt, sst[n++] = taken;
@@ -1888,7 +1916,15 @@ static char *structure_body(Ctx *c, const uint64_t *code, size_t end, const uint
             int s = x->succ[k];
             if (s < 0) continue;
             if (!f.b[s].seen) f.b[s].seen = true, f.b[s].in = sst[k], work[nw++] = s;
-            else if (memcmp(&f.b[s].in, &sst[k], sizeof sst[k])) FLOW_FAIL(8);
+            else if (!stacks_eq(&f.b[s].in, &sst[k])) {
+                if (getenv("LARECOMP_LOG_STRUCTURE"))
+                    fprintf(stderr, "[shader] structure: pc %zx from pc %zx: stacks %d/%d/%d top %x/%x, before %d/%d/%d top %x/%x\n",
+                            f.b[s].first * 8, x->last * 8, sst[k].n[0], sst[k].n[1], sst[k].n[2],
+                            sst[k].n[0] ? sst[k].v[0][sst[k].n[0] - 1] : 0, sst[k].n[1] ? sst[k].v[1][sst[k].n[1] - 1] : 0,
+                            f.b[s].in.n[0], f.b[s].in.n[1], f.b[s].in.n[2],
+                            f.b[s].in.n[0] ? f.b[s].in.v[0][f.b[s].in.n[0] - 1] : 0, f.b[s].in.n[1] ? f.b[s].in.v[1][f.b[s].in.n[1] - 1] : 0);
+                FLOW_FAIL(8);
+            }
         }
     }
     // loops: back edges of a depth-first walk; reducible flow only (the loop's header dominates the edge's source)
