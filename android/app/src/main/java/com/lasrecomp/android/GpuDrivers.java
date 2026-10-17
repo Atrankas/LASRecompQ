@@ -2,6 +2,7 @@ package com.lasrecomp.android;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.util.Log;
 
@@ -113,10 +114,13 @@ final class GpuDrivers {
     // marker file (.probe, removed by device.c once the driver drew its first frame) catches a driver that crashed
     // or hung at its last start: the system driver then runs, and failed() names it once.
     static String config(Context c) {
-        if (!supported() || !selected(c)) return "";
-        Driver d = find(c);
+        if (!supported()) return "";
+        Driver d = selected(c) ? find(c) : auto(c) ? bundled(c) : null;
+        if (d == null) return "";
         File probe = new File(d.dir, ".probe");
-        if (probe.exists()) {
+        if (probe.exists() && selected(c)) {  // (the bundled one stays: the system's can't run the game at all)
+            //noinspection ResultOfMethodCallIgnored
+            probe.delete();
             select(c, false);
             prefs(c).edit().putString("failed", d.name).commit();
             return "";
@@ -131,6 +135,41 @@ final class GpuDrivers {
         }
         return d.dir.getAbsolutePath() + "/\n" + d.library + "\n" + hooks + "\n" + c.getCacheDir().getAbsolutePath() + "/\n"
                + probe.getAbsolutePath();
+    }
+
+    // No choice made in the menu, and the system's driver is older than Vulkan 1.3, which the renderer needs (Adreno 6xx
+    // phones that stopped getting updates, e.g. the Galaxy S20 FE's 1.1): the Turnip build the APK carries runs
+    static boolean auto(Context c) {
+        return !prefs(c).contains("use")
+               && !c.getPackageManager().hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION, 0x403000);
+    }
+
+    // The driver in the APK's assets (turnip/: meta.json and its library, tools/android/build_deps.sh), copied out once
+    // per APK into gpu_driver/bundled (a driver loads only from the app's private storage). null if the APK has none.
+    static Driver bundled(Context c) {
+        File dir = new File(root(c), "bundled");
+        String apk = c.getApplicationInfo().sourceDir;
+        String stamp = apk + ":" + new File(apk).lastModified();
+        File stampFile = new File(dir, ".apk");
+        try {
+            if (!(stampFile.isFile() && stamp.equals(new String(Files.readAllBytes(stampFile.toPath()), StandardCharsets.UTF_8)))) {
+                String[] names = c.getAssets().list("turnip");
+                if (names == null || names.length == 0) return null;
+                deleteTree(dir);
+                if (!dir.mkdirs()) throw new IOException("cannot create " + dir);
+                for (String n : names)
+                    try (InputStream in = c.getAssets().open("turnip/" + n); OutputStream out = new FileOutputStream(new File(dir, n))) {
+                        byte[] buf = new byte[1 << 16];
+                        for (int k; (k = in.read(buf)) > 0; ) out.write(buf, 0, k);
+                    }
+                Files.write(stampFile.toPath(), stamp.getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "bundled GPU driver", e);
+            deleteTree(dir);
+            return null;
+        }
+        return read(dir);
     }
 
     // The driver that failed at its last start (see config), once; else null

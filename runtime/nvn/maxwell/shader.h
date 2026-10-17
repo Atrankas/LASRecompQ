@@ -76,6 +76,7 @@ typedef struct {
                             // target scale, [1 + i] = allocation scale of texture i
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
+    bool structured;  // GLSL: branches rebuilt as structured code (translate.c structure_body), not the pc state machine
     char error[256];        // set when translation fails
 } ShaderInfo;
 

@@ -1632,6 +1632,353 @@ static bool is_branch_target_op(uint64_t w) {
     return ((w & 0xfff0000000000020ull) == 0xe240000000000000ull);
 }
 
+// ------------------------------------------------------------------ structured control flow (GLSL)
+// Shaders with branches ran as a `switch (pc)` state machine with the SSY / PBK / PCNT stacks in arrays. Phone GPUs
+// take that badly: arrays indexed at run time live in scratch memory, every taken branch goes back through the
+// dispatch loop, and the compiler can't schedule across it - a 320x180 blur of the title screen's beach took 33 ms of
+// a 39 ms frame on an Adreno 650. Instead the program is rebuilt as structured code: the stacks are resolved where
+// they are fixed at each instruction (as in shaders a compiler made), the blocks run behind flags (`bool f<n>`: a
+// branch sets its target's flag) in an order where every forward jump goes down, and each natural loop becomes a
+// `for` running while its header's flag is set. The same instructions run in the same order. Irreducible flow, stacks
+// that differ between paths into one instruction, indexed branches (BRX): the state machine, as before.
+// LARECOMP_SHADER_PC_MACHINE=1 keeps the state machine for every shader (comparisons).
+enum { FLOW_NONE, FLOW_BRA, FLOW_EXIT, FLOW_SYNC, FLOW_BRK, FLOW_CONT, FLOW_SSY, FLOW_PBK, FLOW_PCNT, FLOW_BRX };
+static int flow_kind(uint64_t w) {
+    if ((w & 0xfff0000000000000ull) == 0xe300000000000000ull) return FLOW_EXIT;
+    if ((w & 0xfff0000000000020ull) == 0xe240000000000000ull) return FLOW_BRA;
+    if ((w & 0xfff0000000000020ull) == 0xe290000000000000ull) return FLOW_SSY;
+    if ((w & 0xfff0000000000020ull) == 0xe2a0000000000000ull) return FLOW_PBK;
+    if ((w & 0xfff0000000000020ull) == 0xe2b0000000000000ull) return FLOW_PCNT;
+    if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull) return FLOW_SYNC;
+    if ((w & 0xfff0000000000000ull) == 0xe340000000000000ull) return FLOW_BRK;
+    if ((w & 0xfff0000000000000ull) == 0xe350000000000000ull) return FLOW_CONT;
+    if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) return FLOW_BRX;
+    return FLOW_NONE;
+}
+static bool flow_leaves(int k) { return k == FLOW_BRA || k == FLOW_EXIT || k == FLOW_SYNC || k == FLOW_BRK || k == FLOW_CONT; }
+
+#define FLOW_DEPTH 16
+#define FLOW_SUCC 128  // successors of a block: 2, or a BRX's possible targets
+typedef struct { uint8_t n[3]; uint32_t v[3][FLOW_DEPTH]; } FlowStacks;  // ssy, pbk, pcnt
+typedef struct {
+    size_t first, last;   // instruction words of the block (last: its terminator, if it has one)
+    int succ[FLOW_SUCC], nsucc;  // blocks after it (-1: the end); guarded: [0] taken, [1] not; BRX: its targets
+    int pr;               // the terminator's guard
+    int brx;              // BRX: its register (the targets: succ[0..nsucc), plus the fallthrough last when guarded)
+    bool prn, seen;
+    FlowStacks in;        // the stacks on entry
+    int loop;             // innermost loop holding it, -1 none
+} FlowBlock;
+typedef struct { int header, parent, size; uint8_t *in; } FlowLoop;
+typedef struct {
+    Ctx *c;
+    const uint64_t *code;
+    const size_t *off0, *off1;  // each instruction's text in c->body
+    FlowBlock *b;
+    int nb, nloops;
+    FlowLoop *loops;
+    Str o;
+    bool fail;
+} Flow;
+
+// The node block i belongs to in region r (a loop, -1: the program): nb + the loop just inside r holding it, or i;
+// -1 when i isn't in r
+static int flow_node(Flow *f, int i, int r) {
+    int l = f->b[i].loop, n = -1;
+    while (l >= 0 && l != r) n = l, l = f->loops[l].parent;
+    if (l != r) return -1;
+    return n >= 0 ? f->nb + n : i;
+}
+
+static void flow_jump(Flow *f, int to, int ind) {
+    if (to >= 0) sp(&f->o, "%*sf%d = true;\n", ind, "", to);
+}
+
+static void flow_emit_region(Flow *f, int r, int ind) {
+    int nn = f->nb + f->nloops;
+    int *indeg = calloc(nn, sizeof(int)), *ord = malloc(sizeof(int) * nn), no = 0;
+    uint8_t *present = calloc(nn, 1), *edge = calloc((size_t)nn * nn, 1);
+    for (int i = 0; i < f->nb; i++) {
+        if (!f->b[i].seen) continue;
+        int u = flow_node(f, i, r);
+        if (u < 0) continue;
+        present[u] = 1;
+        for (int k = 0; k < f->b[i].nsucc; k++) {
+            int s = f->b[i].succ[k];
+            if (s < 0 || (r >= 0 && s == f->loops[r].header)) continue;  // (the end; the region's back edges)
+            int v = flow_node(f, s, r);
+            if (v < 0 || v == u || edge[(size_t)u * nn + v]) continue;
+            edge[(size_t)u * nn + v] = 1;
+            indeg[v]++;
+        }
+    }
+    int *q = malloc(sizeof(int) * nn), qh = 0, qt = 0;
+    for (int u = 0; u < nn; u++) if (present[u] && !indeg[u]) q[qt++] = u;
+    while (qh < qt) {
+        int u = q[qh++];
+        ord[no++] = u;
+        for (int v = 0; v < nn; v++)
+            if (edge[(size_t)u * nn + v] && !--indeg[v]) q[qt++] = v;
+    }
+    int np = 0;
+    for (int u = 0; u < nn; u++) np += present[u];
+    if (no != np || (r >= 0 && (no == 0 || ord[0] != f->loops[r].header))) f->fail = true;
+    for (int k = 0; k < no && !f->fail; k++) {
+        int u = ord[k];
+        if (u >= f->nb) {
+            int l = u - f->nb, h = f->loops[l].header;
+            sp(&f->o, "%*sfor (uint g%d = 0u; f%d && g%d < 100000u; g%d++) {\n", ind, "", h, h, h, h);
+            flow_emit_region(f, l, ind + 2);
+            sp(&f->o, "%*s}\n", ind, "");
+            continue;
+        }
+        FlowBlock *x = &f->b[u];
+        sp(&f->o, "%*sif (f%d) {\n%*sf%d = false;\n", ind, "", u, ind + 2, "", u);
+        for (size_t i = x->first; i <= x->last; i++) {
+            if (i % 4 == 0 || flow_kind(f->code[i]) != FLOW_NONE) continue;
+            sp(&f->o, "%.*s", (int)(f->off1[i] - f->off0[i]), f->c->body.buf + f->off0[i]);
+        }
+        if (x->brx >= 0) {
+            // a jump table (a switch the shader's compiler made): to the block its target starts, as BRX computes it
+            char buf[16];
+            uint64_t w = f->code[x->last];
+            uint32_t pc = (uint32_t)(x->last * 8);
+            bool g = !(x->pr == PT && !x->prn);
+            int nt = x->nsucc - (g ? 1 : 0);
+            if (g) sp(&f->o, "%*sif (%s) {\n", ind + 2, "", pred(f->c, x->pr, x->prn, buf));
+            if (x->brx != RZ) f->c->reg_used[x->brx] = 1;
+            sp(&f->o, "%*s{ uint t = %uu + %s%d + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u; switch (t) {", ind + 4, "",
+               pc + 8, x->brx == RZ ? "0u * " : "r", x->brx == RZ ? 0 : x->brx, (uint32_t)sbits(w, 20, 24));
+            for (int k = 0; k < nt; k++)
+                if (x->succ[k] >= 0) sp(&f->o, " case %uu: f%d = true; break;", (uint32_t)(f->b[x->succ[k]].first * 8), x->succ[k]);
+            sp(&f->o, " default: break; } }\n");
+            if (g) {
+                sp(&f->o, "%*s} else {\n", ind + 2, "");
+                flow_jump(f, x->succ[x->nsucc - 1], ind + 4);
+                sp(&f->o, "%*s}\n", ind + 2, "");
+            }
+        } else if (x->nsucc == 2) {
+            char buf[16];
+            sp(&f->o, "%*sif (%s) {\n", ind + 2, "", pred(f->c, x->pr, x->prn, buf));
+            flow_jump(f, x->succ[0], ind + 4);
+            sp(&f->o, "%*s} else {\n", ind + 2, "");
+            flow_jump(f, x->succ[1], ind + 4);
+            sp(&f->o, "%*s}\n", ind + 2, "");
+        } else if (x->nsucc == 1) {
+            flow_jump(f, x->succ[0], ind + 2);
+        }
+        sp(&f->o, "%*s}\n", ind, "");
+    }
+    free(q), free(indeg), free(ord), free(present), free(edge);
+}
+
+// The structured body (MSL spelling, as c->body), or NULL: keep the state machine.
+// (LARECOMP_LOG_STRUCTURE=1: why a shader kept the state machine)
+#define FLOW_FAIL(why) do { if (getenv("LARECOMP_LOG_STRUCTURE")) fprintf(stderr, "[shader] structure: case %d at block %d\n", why, f.nb); goto out; } while (0)
+static char *structure_body(Ctx *c, const uint64_t *code, size_t end, const uint8_t *label, const size_t *off0,
+                            const size_t *off1) {
+    static int disabled = -1;
+    if (disabled < 0) disabled = getenv("LARECOMP_SHADER_PC_MACHINE") != NULL;
+    if (disabled) return NULL;
+    Flow f = {.c = c, .code = code, .off0 = off0, .off1 = off1};
+    int *bof = malloc(sizeof(int) * (end + 1)), *work = NULL;
+    f.b = calloc(end + 1, sizeof *f.b);
+    uint8_t *lab = malloc(end + 1);
+    size_t *brx_end = calloc(end + 1, sizeof(size_t));
+    // BRX (a jump table): any instruction from it up to where its cases meet may be a target - the nearest SSY / PBK
+    // target past it, or else the nearest target of an unconditional branch forward from its cases
+    memcpy(lab, label, end);
+    for (size_t i = 0; i < end; i++) {
+        if (i % 4 == 0 || flow_kind(code[i]) != FLOW_BRX) continue;
+        size_t lim = 0;
+        for (size_t j = 0; j < i; j++) {
+            int k = j % 4 ? flow_kind(code[j]) : FLOW_NONE;
+            if (k != FLOW_SSY && k != FLOW_PBK) continue;
+            size_t t = norm_target((int64_t)(j * 8) + 8 + sbits(code[j], 20, 24)) / 8;
+            if (t > i && t < end && (!lim || t < lim)) lim = t;
+        }
+        for (size_t j = i + 1; !lim && j < end; j++) {
+            if (j % 4 == 0 || flow_kind(code[j]) != FLOW_BRA || bits(code[j], 16, 4) != PT) continue;
+            size_t t = norm_target((int64_t)(j * 8) + 8 + sbits(code[j], 20, 24)) / 8;
+            if (t > j && t < end) lim = t;
+        }
+        if (!lim || lim - i > FLOW_SUCC * 4 / 3 - 4) FLOW_FAIL(1);
+        brx_end[i] = lim;
+        for (size_t j = i + 1; j < lim; j++) if (j % 4) lab[j] = 1;
+    }
+    label = lab;
+    // blocks: from labels and after flow that leaves, to such flow
+    for (size_t i = 0; i < end; i++) {
+        bof[i] = -1;
+        if (i % 4 == 0) continue;
+        int pk = f.nb ? flow_kind(code[f.b[f.nb - 1].last]) : FLOW_NONE;
+        if (!f.nb || label[i] || flow_leaves(pk) || pk == FLOW_BRX) f.b[f.nb++].first = i;
+        f.b[f.nb - 1].last = i;
+        bof[i] = f.nb - 1;
+    }
+    if (!f.nb) FLOW_FAIL(2);
+    // successors, walking the stacks from the entry (a block must always be entered with the same stacks)
+    work = malloc(sizeof(int) * f.nb);
+    int nw = 0;
+    f.b[0].seen = true;
+    work[nw++] = 0;
+    while (nw) {
+        int id = work[--nw];
+        FlowBlock *x = &f.b[id];
+        FlowStacks st = x->in, taken = st;
+        int tgt = -2;  // -2: no flow at the end, -1: the end of the program
+        bool guarded = false;
+        x->pr = PT, x->prn = false, x->brx = -1;
+        for (size_t i = x->first; i <= x->last; i++) {
+            if (i % 4 == 0) continue;
+            uint64_t w = code[i];
+            int k = flow_kind(w);
+            uint32_t t = norm_target((int64_t)(i * 8) + 8 + sbits(w, 20, 24));
+            if (k == FLOW_SSY || k == FLOW_PBK || k == FLOW_PCNT) {
+                int s = k - FLOW_SSY;
+                if (st.n[s] >= FLOW_DEPTH) FLOW_FAIL(3);
+                st.v[s][st.n[s]++] = t;
+                continue;
+            }
+            if (k == FLOW_BRX && i == x->last) {
+                int pr = (int)bits(w, 16, 3);
+                bool prn = bits(w, 19, 1);
+                if (pr == PT && prn) continue;
+                guarded = !(pr == PT && !prn);
+                x->pr = pr, x->prn = prn, x->brx = (int)bits(w, 8, 8);
+                continue;
+            }
+            if (!flow_leaves(k)) continue;
+            int pr = (int)bits(w, 16, 3);
+            bool prn = bits(w, 19, 1);
+            if (pr == PT && prn) continue;  // @!pt: never taken
+            guarded = !(pr == PT && !prn);
+            x->pr = pr, x->prn = prn;
+            taken = st;
+            uint32_t to = 0;
+            if (k == FLOW_BRA) to = t;
+            else if (k == FLOW_SYNC) { if (!taken.n[0]) FLOW_FAIL(4); to = taken.v[0][--taken.n[0]]; }
+            else if (k == FLOW_BRK) { if (!taken.n[1]) FLOW_FAIL(5); to = taken.v[1][--taken.n[1]]; }
+            else if (k == FLOW_CONT) { if (!taken.n[2]) FLOW_FAIL(6); to = taken.v[2][taken.n[2] - 1]; }
+            if (k == FLOW_EXIT) tgt = -1;
+            else if (to / 8 < end && bof[to / 8] >= 0 && f.b[bof[to / 8]].first == to / 8) tgt = bof[to / 8];
+            else FLOW_FAIL(7);
+        }
+        int n = 0;
+        FlowStacks sst[FLOW_SUCC];
+        if (x->brx >= 0) {  // every possible target, with the stacks as they are (then the fallthrough if guarded)
+            for (size_t j = x->last + 1; j < brx_end[x->last] && n < FLOW_SUCC - 1; j++)
+                if (j % 4 && bof[j] >= 0 && f.b[bof[j]].first == j) x->succ[n] = bof[j], sst[n++] = st;
+            if (guarded) x->succ[n] = id + 1 < f.nb ? id + 1 : -1, sst[n++] = st;
+        } else {
+            if (tgt != -2) x->succ[n] = tgt, sst[n++] = taken;
+            if (tgt == -2 || guarded) x->succ[n] = id + 1 < f.nb ? id + 1 : -1, sst[n++] = st;
+        }
+        x->nsucc = n;
+        for (int k = 0; k < n; k++) {
+            int s = x->succ[k];
+            if (s < 0) continue;
+            if (!f.b[s].seen) f.b[s].seen = true, f.b[s].in = sst[k], work[nw++] = s;
+            else if (memcmp(&f.b[s].in, &sst[k], sizeof sst[k])) FLOW_FAIL(8);
+        }
+    }
+    // loops: back edges of a depth-first walk; reducible flow only (the loop's header dominates the edge's source)
+    {
+        int nb = f.nb, *state = calloc(nb, sizeof(int)), *stk = malloc(sizeof(int) * nb * 2), ns = 0;
+        int *rpo = malloc(sizeof(int) * nb), nr = nb, *order = malloc(sizeof(int) * nb), *idom = malloc(sizeof(int) * nb);
+        uint8_t *back = calloc((size_t)nb * FLOW_SUCC, 1);
+        bool ok = true;
+        stk[ns++] = 0, stk[ns++] = 0, state[0] = 1;
+        while (ns) {
+            int id = stk[ns - 2], k = stk[ns - 1];
+            if (k < f.b[id].nsucc) {
+                stk[ns - 1]++;
+                int s = f.b[id].succ[k];
+                if (s < 0) continue;
+                if (state[s] == 1) back[id * FLOW_SUCC + k] = 1;
+                else if (!state[s]) state[s] = 1, stk[ns++] = s, stk[ns++] = 0;
+            } else {
+                state[id] = 2, rpo[--nr] = id, ns -= 2;
+            }
+        }
+        for (int i = 0; i < nb; i++) order[i] = -1, idom[i] = -1;
+        for (int i = nr; i < nb; i++) order[rpo[i]] = i;
+        idom[0] = 0;
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (int i = nr + 1; i < nb; i++) {
+                int id = rpo[i], nd = -1;
+                for (int p = 0; p < nb; p++)
+                    for (int k = 0; k < f.b[p].nsucc; k++) {
+                        if (f.b[p].succ[k] != id || idom[p] < 0 || back[p * FLOW_SUCC + k]) continue;
+                        if (nd < 0) { nd = p; continue; }
+                        int u = p, v = nd;
+                        while (u != v) {
+                            while (order[u] > order[v]) u = idom[u];
+                            while (order[v] > order[u]) v = idom[v];
+                        }
+                        nd = u;
+                    }
+                if (nd >= 0 && idom[id] != nd) idom[id] = nd, changed = true;
+            }
+        }
+        int *qq = malloc(sizeof(int) * nb);
+        for (int p = 0; p < nb && ok; p++)
+            for (int k = 0; k < f.b[p].nsucc && ok; k++) {
+                if (!back[p * FLOW_SUCC + k]) continue;
+                int h = f.b[p].succ[k], d = p;
+                while (d != h && d != 0) d = idom[d];
+                if (d != h) { ok = false; break; }
+                int li = -1;
+                for (int l = 0; l < f.nloops; l++) if (f.loops[l].header == h) li = l;
+                if (li < 0) {
+                    f.loops = realloc(f.loops, sizeof *f.loops * (f.nloops + 1));
+                    f.loops[f.nloops] = (FlowLoop){h, -1, 1, calloc(nb, 1)};
+                    f.loops[f.nloops].in[h] = 1;
+                    li = f.nloops++;
+                }
+                // the natural loop: what reaches the edge's source without passing the header
+                int nq = 0;
+                if (!f.loops[li].in[p]) f.loops[li].in[p] = 1, f.loops[li].size++, qq[nq++] = p;
+                while (nq) {
+                    int y = qq[--nq];
+                    for (int z = 0; z < nb; z++)
+                        for (int kk = 0; kk < f.b[z].nsucc; kk++)
+                            if (f.b[z].succ[kk] == y && f.b[z].seen && !f.loops[li].in[z])
+                                f.loops[li].in[z] = 1, f.loops[li].size++, qq[nq++] = z;
+                }
+            }
+        free(qq), free(state), free(stk), free(rpo), free(order), free(idom), free(back);
+        if (!ok) FLOW_FAIL(9);
+    }
+    // nesting: a loop's parent is the smallest other loop holding its header; loops must nest or be apart
+    for (int l = 0; l < f.nloops; l++) {
+        int best = -1;
+        for (int m = 0; m < f.nloops; m++)
+            if (m != l && f.loops[m].in[f.loops[l].header] && (best < 0 || f.loops[m].size < f.loops[best].size)) best = m;
+        f.loops[l].parent = best;
+        if (best >= 0 && f.loops[best].size <= f.loops[l].size) FLOW_FAIL(10);
+        for (int i = 0; best >= 0 && i < f.nb; i++) if (f.loops[l].in[i] && !f.loops[best].in[i]) FLOW_FAIL(11);
+    }
+    for (int i = 0; i < f.nb; i++) {
+        f.b[i].loop = -1;
+        for (int l = 0; l < f.nloops; l++)
+            if (f.loops[l].in[i] && (f.b[i].loop < 0 || f.loops[l].size < f.loops[f.b[i].loop].size)) f.b[i].loop = l;
+    }
+    for (int i = 0; i < f.nb; i++) if (f.b[i].seen) sp(&f.o, "  bool f%d = %s;\n", i, i ? "false" : "true");
+    flow_emit_region(&f, -1, 2);
+    if (f.fail) {
+        if (getenv("LARECOMP_LOG_STRUCTURE")) fprintf(stderr, "[shader] structure: region order\n");
+        free(f.o.buf);
+        f.o.buf = NULL;
+    }
+out:
+    for (int l = 0; l < f.nloops; l++) free(f.loops[l].in);
+    free(f.loops), free(f.b), free(bof), free(work);
+    free(lab), free(brx_end);
+    return f.o.buf;
+}
+
 // ------------------------------------------------------------------ GLSL output
 static bool id_start(char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'; }
 static bool id_char(char ch) { return id_start(ch) || (ch >= '0' && ch <= '9'); }
@@ -1983,12 +2330,15 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     static int annotate = -1;
     if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
     c->branchy = any_branch;
+    size_t *off0 = calloc(end + 1, sizeof(size_t)), *off1 = calloc(end + 1, sizeof(size_t));  // (each instruction's text)
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
         uint32_t pc = (uint32_t)(i * 8);
         if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
         if (annotate) sp(&c->body, "    // pc %x: %016llx\n", pc, (unsigned long long)((const uint64_t *)code)[i]);
+        off0[i] = c->body.len;
         emit_insn(c, ((const uint64_t *)code)[i], pc);
+        off1[i] = c->body.len;
         if (dbg && pc == maxwell_dbg_pc) {
             int rr = maxwell_dbg_reg % 1000, half = maxwell_dbg_reg / 1000;  // +1000: low f16, +2000: high f16
             c->reg_used[rr] = 1;
@@ -1997,6 +2347,16 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         }
         info->num_insts++;
     }
+    if (!c->fail && c->glsl && any_branch && !dbg) {  // phone GPUs: structured flow instead of the pc state machine
+        char *sb = structure_body(c, (const uint64_t *)code, end, label, off0, off1);
+        if (sb) {
+            free(c->body.buf);
+            c->body.buf = sb, c->body.len = strlen(sb), c->body.cap = c->body.len + 1;
+            any_branch = false;
+            info->structured = true;
+        }
+    }
+    free(off0), free(off1);
     free(label);
     if (c->fail) { free(c->body.buf); free(c); return info; }
     if (c->glsl) return glsl_finish(c, any_branch, dbg);

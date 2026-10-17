@@ -88,4 +88,11 @@ if [ ! -f "$P/lib/libshaderc_combined.a" ]; then
     cp "$W/shaderc/LICENSE" "$P/shaderc-LICENSE.txt"
     rm -rf "$W/shaderc"  # (~1 GB of sources and objects)
 fi
+# Mesa Turnip (MIT), the Vulkan 1.3 driver the app carries for Adreno 6xx / 7xx phones whose own driver is older (the
+# Galaxy S20 FE's is 1.1): the build that held 60 fps on an S20 FE in WindWakerHD-Android-Plus
+if [ ! -f "$P/turnip/meta.json" ]; then
+    fetch https://github.com/The412Banner/Banners-Turnip/releases/download/v26.3.0-20261013-r2/Turnip-v26.3.0-20261013-r2.zip \
+          6e2aec3a552f6de298c21bd389c9a70274f7f6d52d46744faa285445bc0d6f24 Turnip-v26.3.0-20261013-r2.zip
+    mkdir -p "$P/turnip" && unzip -o -q "$S/Turnip-v26.3.0-20261013-r2.zip" -d "$P/turnip"
+fi
 echo "deps: $P"

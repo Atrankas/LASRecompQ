@@ -93,6 +93,8 @@ tasks.register('lasAssets', Copy) {
     from('../../third_party/fonts/Baloo2/Baloo2-SemiBold.ttf')
     from('../../third_party/fonts/DejaVu/DejaVuSans.ttf')  // (the game text's font without the user's Switch fonts)
     from('../../docs/icon/icon_1024.png') { rename { 'icon.png' } }
+    // Mesa Turnip for Adreno phones whose own driver is older than Vulkan 1.3 (GpuDrivers.auto; build_deps.sh)
+    from('../../build/android/deps/turnip') { into 'turnip' }
     into "$buildDir/generated/las-assets"
 }
 preBuild.dependsOn lasAssets
