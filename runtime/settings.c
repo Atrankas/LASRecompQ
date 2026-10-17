@@ -30,7 +30,7 @@ Settings g_settings = {
     .touch_opacity = 0.6f,
     .touch_size = 1.0f,
 #ifdef __ANDROID__
-    .res_mode = RES_Q75,  // (phones: 75% of the display, FSR 1 up to it)
+    .res_mode = RES_DYNAMIC,  // (phones: 50-75% of the display as the frame rate allows, Snapdragon GSR up to it)
 #endif
 };
 

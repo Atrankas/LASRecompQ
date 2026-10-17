@@ -2266,6 +2266,7 @@ static uint64_t mir_head;
 #define MIR_RB 4  // readbacks of a slot in flight
 typedef struct {
     uint64_t lo, hi, off, gpu_seq, last_use;  // guest range, its copy (offset), last storing / any use (submissions)
+    uint64_t checked_seq;                     // submission whose CPU changes went in (mirror_cpu_changes: once each)
     uint8_t *base;                            // guest memory as of the last merge
     uint64_t rb_off[MIR_RB], rb_seq[MIR_RB];  // readback areas: the slot after a storing dispatch, until merged
     uint8_t *rb_base[MIR_RB];                 // ... and the base it started from
@@ -2373,9 +2374,14 @@ static uint64_t mirror_slot_alloc(uint64_t size) {
 
 // What the CPU changed in a slot's range since the last merge: into the slot, recorded on cb (mir_lock)
 static void mirror_cpu_changes(MirSlot *m, VkCommandBuffer cb) {
-    uint64_t n = (m->hi - m->lo) / 4;
+    uint64_t n = (m->hi - m->lo) / 4, pending = vk_pending_seq();
     const uint32_t *guest = (const uint32_t *)(uintptr_t)m->lo;
     uint32_t *base = (uint32_t *)m->base;
+    // once a submission (a list's draws see guest memory as of its translation, like every other copy), and the
+    // common case - nothing changed - by memcmp (a whole frame's draws bind the light lists: 110 word scans of 32 KB)
+    if (m->checked_seq == pending) return;
+    m->checked_seq = pending;
+    if (!memcmp(guest, base, n * 4)) return;
     int ncp = 0;
     for (uint64_t w = 0; w < n;) {
         if (guest[w] == base[w]) { w++; continue; }
