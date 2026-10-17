@@ -3402,7 +3402,8 @@ static void depth_blit_via_color(VkCommandBuffer cb, TexBackend *s, TexBackend *
         VkBuffer nb;
         VmaAllocation nm;
         if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &nb, &nm, NULL) != VK_SUCCESS) return;
-        buf = nb; buf_mem = nm; buf_size = need;
+        buf = nb; buf_mem = nm; buf_size = need;  // (the allocation is kept, never freed: see above)
+        (void)buf_mem;
     }
     if (!scratch_image(&a, (uint32_t)sw, (uint32_t)sh, cf) || !scratch_image(&b, (uint32_t)dw, (uint32_t)dh, cf)) return;
     VkBufferImageCopy c = {.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, slv, sly, 1}, .imageOffset = {sx, sy, 0},
