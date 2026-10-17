@@ -1743,7 +1743,10 @@ static void flow_emit_region(Flow *f, int r, int ind) {
         int u = ord[k];
         if (u >= f->nb) {
             int l = u - f->nb, h = f->loops[l].header;
-            sp(&f->o, "%*sfor (uint g%d = 0u; f%d && g%d < 100000u; g%d++) {\n", ind, "", h, h, h, h);
+            // (the guard: graphics loops end far sooner - a loop over data a skipped pass never wrote must not run
+            // into the GPU's hang detection over a whole screen of pixels)
+            sp(&f->o, "%*sfor (uint g%d = 0u; f%d && g%d < %uu; g%d++) {\n", ind, "", h, h, h,
+               f->c->stage == STAGE_COMPUTE ? 100000u : 1024u, h);
             flow_emit_region(f, l, ind + 2);
             sp(&f->o, "%*s}\n", ind, "");
             continue;
@@ -2282,7 +2285,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0u; uint pbk[16]; uint pbk_n = 0u; uint pcnt[16]; uint pcnt_n = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
-        sp(&s, "  for (uint guard = 0u; guard < 100000u; guard++) {\n  switch (pc) {\n");
+        sp(&s, "  for (uint guard = 0u; guard < %uu; guard++) {\n  switch (pc) {\n", stage == STAGE_COMPUTE ? 100000u : 16384u);
         sp(&s, "%s", body.buf ? body.buf : "");
         sp(&s, "    exit_now = true; break;\n  default: exit_now = true; break;\n  }\n  if (exit_now) break;\n  }\n");
     } else {

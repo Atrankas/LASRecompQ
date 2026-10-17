@@ -75,10 +75,18 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
       Passo principal do Field 15.8 -> 8.5 ms, GPU 21 ms/frame
 - [x] Cache de despacho por thread dentro do `Cpu` (sem `__thread`: no Android cada acesso passava pelo
       resolvedor de TLS dinâmico)
-- [ ] Thread de render (`runtime/nvn/gpu_thread.c`): o executor + driver eram ~1/3 da thread do jogo
-- [ ] O heap do jogo (3.15 GB) não é compartilhado com a GPU no Turnip (sem `VK_EXT_external_memory_host`):
-      vértices/índices copiados a cada draw e leituras de memória global em shader voltam zero. Ideia: mapear
-      só os memory pools da NVN (~300 MB acessíveis pela CPU) como dma-buf
+- [x] Thread de render (`runtime/nvn/gpu_thread.c`): o executor + driver eram ~1/3 da thread do jogo
+- [x] Memória global dos shaders sem importar o heap (Turnip não tem `VK_EXT_external_memory_host`; 3 GB de
+      heap não cabem como memória do driver): storage buffers espelhados num buffer persistente
+      (`exec.c mirror_table`). Voltaram o mato alto e as plantações de Mabe Village
+- [x] Código do jogo mais enxuto: `Cpu *restrict`, sem o `FN_ENTER` do profiler (-10% de instruções),
+      cache de despacho com hash melhor
+- [x] "Device lost" de vez em quando: era **GPU hang** (dmesg via `adb bugreport`: `kgsl: GPU hang detected`).
+      Dispatches de compute pulados enquanto o pipeline compilava deixavam a lista de luzes sem escrever e o
+      shader de fragmento percorria lixo até o guarda de 100000 iterações. Agora dispatches esperam o pipeline
+      e laços de shaders gráficos têm guarda menor
+- [ ] Limite do aparelho: `restricted_device_performance=1, 1` (configuração da Samsung) prende os núcleos
+      grandes em 1.75 GHz; o núcleo principal (cpu7) fica isolado pelo core_ctl; sem ADPF, sem THP
 - [ ] SPIR-V otimizado (`LARECOMP_VK_OPT=1`) trava o Turnip (device lost): investigar
 - [ ] Ajustes de resolução / FSR para GPUs de celular (padrão no Android: 75% da tela + FSR 1)
 - [ ] Afinidade de threads nos núcleos grandes, dicas de desempenho (ADPF), escala por temperatura

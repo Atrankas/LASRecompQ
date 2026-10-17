@@ -2231,9 +2231,11 @@ static void gfast_finish(VkCommandBuffer cb) {
 // (translate.c maxwell_gmem_mirror), into one persistent host-visible buffer - phone GPUs share the memory, so the
 // CPU fills it directly:
 //  - ranges only read: copied from guest memory once per submission (snapshot ring, recycled by submission);
-//  - ranges a compute dispatch stores to: a slot that stays the GPU's copy - later draws and dispatches (and vertex
-//    fetches: guest_direct) use it - until its submission is done, when it's copied back into guest memory and the
-//    CPU's copy counts again (mirror_writeback: at submission and after the game's waits).
+//  - ranges a compute dispatch stores to: a slot, the GPU's own copy, which draws, dispatches and vertex fetches use
+//    from then on. CPU and GPU both write such buffers (the game resets a list the GPU fills, every frame), so the
+//    two copies are merged by word against a base (guest memory as of the last merge): what the CPU changed goes to
+//    the slot in GPU order before its next use, and after each storing dispatch the slot is copied to a readback
+//    area whose words the GPU changed go to guest memory once that submission is done (mirror_merge).
 #define MIR_SIZE (64ull << 20)
 #define MIR_SNAP (48ull << 20)  // [0, MIR_SNAP): snapshot ring; the rest: slots
 #define MIR_SLOTS 64
@@ -2245,7 +2247,16 @@ static pthread_mutex_t mir_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct { uint64_t off, end, seq; } mir_fifo[MIR_FIFO];  // snapshot allocations in ring order
 static int mir_fh, mir_ft;
 static uint64_t mir_head;
-typedef struct { uint64_t lo, hi, off, gpu_seq, last_use; bool active, used; } MirSlot;
+#define MIR_RB 4  // readbacks of a slot in flight
+typedef struct {
+    uint64_t lo, hi, off, gpu_seq, last_use;  // guest range, its copy (offset), last storing / any use (submissions)
+    uint8_t *base;                            // guest memory as of the last merge
+    uint64_t rb_off[MIR_RB], rb_seq[MIR_RB];  // readback areas: the slot after a storing dispatch, until merged
+    uint8_t *rb_base[MIR_RB];                 // ... and the base it started from
+    bool used;
+} MirSlot;
+static MirSlot *mir_stored[16];  // the slots the dispatch being recorded stores to (mirror_after_dispatch)
+static int mir_nstored;
 static MirSlot mir_slot[MIR_SLOTS];
 static struct { uint64_t lo, hi, seq, off; } mir_snap_memo[64];
 
@@ -2288,50 +2299,96 @@ static uint64_t mirror_snap_alloc(uint64_t size) {
     return off;
 }
 
-static uint64_t mirror_slot_alloc(uint64_t size) {  // first fit in the slot area among regions still held
-    size = (size + 255) & ~255ull;
+static uint64_t mir_slot_end(const MirSlot *m) { return m->off + (uint64_t)(MIR_RB + 1) * ((m->hi - m->lo + 255) & ~255ull); }
+
+// GPU writes come back: a slot's readbacks whose submission is done, oldest first, merged into guest memory (mir_lock)
+static void mirror_merge_locked(void) {
     uint64_t done = vk_completed_seq();
+    for (int i = 0; i < MIR_SLOTS; i++) {
+        MirSlot *m = &mir_slot[i];
+        if (!m->used) continue;
+        for (;;) {
+            int k = -1;
+            for (int j = 0; j < MIR_RB; j++)
+                if (m->rb_seq[j] && m->rb_seq[j] <= done && (k < 0 || m->rb_seq[j] < m->rb_seq[k])) k = j;
+            if (k < 0) break;
+            uint64_t n = (m->hi - m->lo) / 4;
+            vmaInvalidateAllocation(g_vk.vma, mir_mem, m->rb_off[k], n * 4);
+            const uint32_t *gpu = (const uint32_t *)(mir_ptr + m->rb_off[k]), *was = (const uint32_t *)m->rb_base[k];
+            uint32_t *guest = (uint32_t *)(uintptr_t)m->lo, *base = (uint32_t *)m->base;
+            for (uint64_t w = 0; w < n; w++)
+                if (gpu[w] != was[w]) guest[w] = base[w] = gpu[w];  // (a word the GPU changed)
+            m->rb_seq[k] = 0;
+        }
+    }
+}
+
+void vk_mirror_writeback(void) {
+    if (!mir_buf) return;
+    pthread_mutex_lock(&mir_lock);
+    mirror_merge_locked();
+    pthread_mutex_unlock(&mir_lock);
+}
+
+// A slot region (its copy + MIR_RB readback areas): first fit among slots; ones unused for a while are dropped
+static uint64_t mirror_slot_alloc(uint64_t size) {
+    size = (uint64_t)(MIR_RB + 1) * ((size + 255) & ~255ull);
+    uint64_t done = vk_completed_seq(), pending = vk_pending_seq();
+    for (int i = 0; i < MIR_SLOTS; i++) {
+        MirSlot *m = &mir_slot[i];
+        bool busy = m->last_use > done;
+        for (int j = 0; j < MIR_RB; j++) busy |= m->rb_seq[j] != 0;
+        if (m->used && !busy && m->last_use + 600 < pending) {  // (~10 s unused: a level's buffers, gone)
+            free(m->base);
+            for (int j = 0; j < MIR_RB; j++) free(m->rb_base[j]);
+            memset(m, 0, sizeof *m);
+        }
+    }
     for (uint64_t at = MIR_SNAP; at + size <= MIR_SIZE;) {
         bool clash = false;
-        for (int i = 0; i < MIR_SLOTS; i++) {
+        for (int i = 0; i < MIR_SLOTS && !clash; i++) {
             MirSlot *m = &mir_slot[i];
-            if (!m->used) continue;
-            if (!m->active && m->last_use <= done && m->gpu_seq <= done) { m->used = false; continue; }
-            uint64_t e = m->off + ((m->hi - m->lo + 255) & ~255ull);
-            if (m->off < at + size && at < e) { at = e; clash = true; break; }
+            if (m->used && m->off < at + size && at < mir_slot_end(m)) at = mir_slot_end(m), clash = true;
         }
         if (!clash) return at;
     }
     return ~0ull;
 }
 
-// GPU-written slots whose submission is done: back into guest memory (the CPU's copy counts again)
-void vk_mirror_writeback(void) {
-    if (!mir_buf) return;
-    pthread_mutex_lock(&mir_lock);
-    uint64_t done = vk_completed_seq();
-    bool inval = false;
-    for (int i = 0; i < MIR_SLOTS; i++) {
-        MirSlot *m = &mir_slot[i];
-        if (!m->used || !m->active || m->gpu_seq > done) continue;
-        if (!inval) { vmaInvalidateAllocation(g_vk.vma, mir_mem, MIR_SNAP, MIR_SIZE - MIR_SNAP); inval = true; }
-        memcpy((void *)(uintptr_t)m->lo, mir_ptr + m->off, m->hi - m->lo);
-        m->active = false;
+// What the CPU changed in a slot's range since the last merge: into the slot, recorded on cb (mir_lock)
+static void mirror_cpu_changes(MirSlot *m, VkCommandBuffer cb) {
+    uint64_t n = (m->hi - m->lo) / 4;
+    const uint32_t *guest = (const uint32_t *)(uintptr_t)m->lo;
+    uint32_t *base = (uint32_t *)m->base;
+    int ncp = 0;
+    for (uint64_t w = 0; w < n;) {
+        if (guest[w] == base[w]) { w++; continue; }
+        uint64_t e = w;
+        while (e < n && (guest[e] != base[e] || (e + 16 < n && memcmp(guest + e, base + e, 64)))) e++;  // (small gaps join)
+        VkSpan sp = vk_transient_copy(guest + w, (e - w) * 4, 16);
+        VkBufferCopy one = {sp.off, m->off + w * 4, (e - w) * 4};
+        vkCmdCopyBuffer(cb, sp.buf, mir_buf, 1, &one);
+        memcpy(base + w, guest + w, (e - w) * 4);
+        stat_upload_bytes += (e - w) * 4;
+        ncp++;
+        w = e;
     }
-    pthread_mutex_unlock(&mir_lock);
+    if (ncp) vk_full_barrier(cb);
 }
 
-// The address table of a stage's storage buffers (gmap_tab layout), store: the dispatch writes them.
-static void mirror_table(int stage, bool store, uint32_t *tab) {
+// The address table of a stage's storage buffers (gmap_tab layout); store: a dispatch that writes them (its slots go to
+// mir_stored for mirror_after_dispatch). cb: where CPU changes to slots can be recorded now (outside a render pass), or
+// NULL (a draw: the submission's upload buffer, when no dispatch of this submission wrote the slot yet).
+static void mirror_table(int stage, bool store, VkCommandBuffer cb, uint32_t *tab) {
     mirror_init();
     memset(tab, 0, sizeof gmap_tab);
+    if (store) mir_nstored = 0;
     struct { uint64_t lo, hi; } r[16];
     int n = 0;
     for (int i = 0; i < 16; i++) {
         uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
         if (!a || !sz || a < HEAP_BASE || a + sz > HEAP_BASE + HEAP_MAX) continue;
-        // exact ranges (words): a slot is written back whole, and the bytes around a buffer are the CPU's
-        uint64_t lo = a & ~3ull, hi = (a + sz + 3) & ~3ull;
+        uint64_t lo = a & ~3ull, hi = (a + sz + 3) & ~3ull;  // (words: what's merged)
         int k = n++;
         while (k > 0 && r[k - 1].lo > lo) { r[k] = r[k - 1]; k--; }
         r[k].lo = lo; r[k].hi = hi;
@@ -2348,23 +2405,28 @@ static void mirror_table(int stage, bool store, uint32_t *tab) {
         uint64_t lo = r[i].lo, hi = r[i].hi, off = ~0ull;
         MirSlot *slot = NULL;
         for (int k = 0; k < MIR_SLOTS && !slot; k++)
-            if (mir_slot[k].used && mir_slot[k].active && mir_slot[k].lo <= lo && hi <= mir_slot[k].hi) slot = &mir_slot[k];
+            if (mir_slot[k].used && mir_slot[k].lo <= lo && hi <= mir_slot[k].hi) slot = &mir_slot[k];
         if (!slot && store) {  // a new GPU copy, starting from the CPU's
             int k = 0;
             while (k < MIR_SLOTS && mir_slot[k].used) k++;
             uint64_t at = k < MIR_SLOTS ? mirror_slot_alloc(hi - lo) : ~0ull;
             if (at != ~0ull) {
                 slot = &mir_slot[k];
-                *slot = (MirSlot){.lo = lo, .hi = hi, .off = at, .used = true, .active = true};
-                memcpy(mir_ptr + at, (const void *)(uintptr_t)lo, hi - lo);
+                *slot = (MirSlot){.lo = lo, .hi = hi, .off = at, .used = true, .base = malloc(hi - lo)};
+                uint64_t stride = (hi - lo + 255) & ~255ull;
+                for (int j = 0; j < MIR_RB; j++) slot->rb_off[j] = at + (uint64_t)(j + 1) * stride, slot->rb_base[j] = malloc(hi - lo);
+                memcpy(slot->base, (const void *)(uintptr_t)lo, hi - lo);
+                memcpy(mir_ptr + at, slot->base, hi - lo);
                 vmaFlushAllocation(g_vk.vma, mir_mem, at, hi - lo);
                 stat_upload_bytes += hi - lo;
             }
         }
         if (slot) {
+            if (cb) mirror_cpu_changes(slot, cb);
+            else if (slot->gpu_seq < pending) mirror_cpu_changes(slot, vk_upload_cmd());
             off = slot->off + (lo - slot->lo);
             slot->last_use = pending;
-            if (store) slot->gpu_seq = pending;
+            if (store && mir_nstored < 16) mir_stored[mir_nstored++] = slot;
         } else {
             for (int k = 0; k < 64 && off == ~0ull; k++)  // (the same range again in this submission: its copy)
                 if (mir_snap_memo[k].seq == pending && mir_snap_memo[k].lo == lo && mir_snap_memo[k].hi == hi) off = mir_snap_memo[k].off;
@@ -2375,7 +2437,8 @@ static void mirror_table(int stage, bool store, uint32_t *tab) {
                 vmaFlushAllocation(g_vk.vma, mir_mem, off, hi - lo);
                 stat_upload_bytes += hi - lo;
                 static int memo_at;
-                mir_snap_memo[memo_at] = (typeof(mir_snap_memo[0])){lo, hi, pending, off};
+                mir_snap_memo[memo_at].lo = lo, mir_snap_memo[memo_at].hi = hi, mir_snap_memo[memo_at].seq = pending;
+                mir_snap_memo[memo_at].off = off;
                 memo_at = (memo_at + 1) % 64;
             }
         }
@@ -2388,6 +2451,43 @@ static void mirror_table(int stage, bool store, uint32_t *tab) {
     tab[GMAP_MAX * 4] = (uint32_t)out;
 }
 
+// After a storing dispatch: its slots copied to readback areas (merged into guest memory once done)
+static void mirror_after_dispatch(VkCommandBuffer cb) {
+    if (!mir_nstored) return;
+    uint64_t pending = vk_pending_seq();
+    vk_full_barrier(cb);
+    pthread_mutex_lock(&mir_lock);
+    for (int i = 0; i < mir_nstored; i++) {
+        MirSlot *m = mir_stored[i];
+        bool dup = false;
+        for (int j = 0; j < i; j++) dup |= mir_stored[j] == m;
+        if (dup) continue;
+        int k = -1;
+        for (int j = 0; j < MIR_RB; j++) if (m->rb_seq[j] == pending) k = j;  // (again this submission: the same area)
+        while (k < 0) {
+            for (int j = 0; j < MIR_RB && k < 0; j++) if (!m->rb_seq[j]) k = j;
+            if (k >= 0) break;
+            uint64_t oldest = ~0ull;  // (all in flight: the oldest must be done and merged first)
+            for (int j = 0; j < MIR_RB; j++) if (m->rb_seq[j] < oldest) oldest = m->rb_seq[j];
+            if (oldest >= pending) break;
+            pthread_mutex_unlock(&mir_lock);
+            wait_why = "gmem mirror readback";
+            vk_wait_seq(oldest);
+            pthread_mutex_lock(&mir_lock);
+            mirror_merge_locked();
+        }
+        if (k < 0) continue;
+        if (m->rb_seq[k] != pending) memcpy(m->rb_base[k], m->base, m->hi - m->lo);
+        VkBufferCopy c = {m->off, m->rb_off[k], m->hi - m->lo};
+        vkCmdCopyBuffer(cb, mir_buf, mir_buf, 1, &c);
+        m->rb_seq[k] = pending;
+        m->gpu_seq = pending;
+    }
+    mir_nstored = 0;
+    pthread_mutex_unlock(&mir_lock);
+    vk_full_barrier(cb);
+}
+
 // (guest_direct) a range the GPU holds the current copy of: that copy
 static bool mirror_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     if (!mir_buf) return false;
@@ -2395,7 +2495,7 @@ static bool mirror_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
     pthread_mutex_lock(&mir_lock);
     for (int k = 0; k < MIR_SLOTS && !hit; k++) {
         MirSlot *m = &mir_slot[k];
-        if (m->used && m->active && m->lo <= addr && addr + size <= m->hi) {
+        if (m->used && m->lo <= addr && addr + size <= m->hi) {
             *buf = mir_buf, *off = m->off + (addr - m->lo);
             m->last_use = vk_pending_seq();
             hit = true;
@@ -2761,7 +2861,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->binding == GMAP_BUFFER_INDEX) {  // (compute) this dispatch's fast-copy table: gfast_prepare
             uint32_t mt[(GMAP_MAX + 1) * 4];
-            if (vk_gmem_mirror()) mirror_table(stage, si->uses_gmem_store, mt);  // (no heap import: every stage)
+            if (vk_gmem_mirror()) mirror_table(stage, si->uses_gmem_store, stage == 5 ? vk_cmd() : NULL, mt);  // (every stage)
             bi[n] = ubo_span(vk_transient_copy(vk_gmem_mirror() ? mt : gmap_tab, sizeof gmap_tab, 256), sizeof gmap_tab);
         } else if (b->binding == 18) {
             for (int t = 0; t < si->ntex && t < 64; t++) { rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; }
@@ -2838,6 +2938,14 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     snap_reason = "compute"; snapshots_invalidate(NULL);
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
+    // A dispatch isn't skipped while its pipeline builds (draws are): what it writes, later shaders read - skipped,
+    // the game's light lists stayed unwritten and the shaders walking them ran until the GPU's hang detection
+    // (device lost while shaders compiled, ~1 run in 10 on an S20 FE)
+    if (cp && atomic_load(&cp->p.state) == 0) {
+        uint64_t t0 = SDL_GetTicksNS();
+        while (atomic_load(&cp->p.state) == 0) SDL_Delay(1);
+        stat_wait_ns += SDL_GetTicksNS() - t0;
+    }
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
     {   // LARECOMP_SKIP_CS=<code address hex> (debug): skip that compute shader's dispatches, to see what it does
         static uint64_t skip = ~0ull;
@@ -2878,7 +2986,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     vkCmdDispatch(cb, gx, gy, gz);
     if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) {
-        if (vk_gmem_mirror()) vk_full_barrier(cb);  // (its slots: read by what follows)
+        if (vk_gmem_mirror()) mirror_after_dispatch(cb);  // (its slots: readbacks; read by what follows)
         else gfast_finish(cb);
     }
     if (cp->si->uses_gmem_store) vc_mark_sbufs(5);
