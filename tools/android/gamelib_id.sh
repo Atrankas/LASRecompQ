@@ -9,7 +9,7 @@ cd "$(dirname "$0")/../.."
 # the systems the code is tested on (unsigned in the arm64 Linux / Android ABI)
 GENFLAGS="-O2 -fno-strict-aliasing -fsigned-char -Wno-return-type -Wno-unused-label -fvisibility=hidden -fPIC -Iruntime"
 if [ "${1:-}" = --flags ]; then echo "$GENFLAGS"; exit 0; fi
-SRCS="tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/simd_c.py
+SRCS="tools/game_addresses.py runtime/game_addresses/patches_v1_0_0.h tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/simd_c.py
       tools/rando/patch_variants.json tools/gamelib_entry.c runtime/hle/hle_symbols.txt runtime/cpu.h runtime/simd.h
       runtime/simd_fp.h runtime/gamelib.h"
 # (+ the shift: the same sources make another library on Android, runtime/cpu.h GUEST_SHIFT)
