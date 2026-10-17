@@ -951,6 +951,14 @@ static void present_game(void) {
     reboot_test_frame(n);
     extern void save_editor_frame(uint64_t frame);
     save_editor_frame(n);
+    static long pgo_every = -1;  // LARECOMP_PGO_DUMP_EVERY=<frames>: an instrumented game library's profile (build/pgo/)
+    if (pgo_every < 0) pgo_every = getenv("LARECOMP_PGO_DUMP_EVERY") ? atol(getenv("LARECOMP_PGO_DUMP_EVERY")) : 0;
+    if (pgo_every > 0 && n % (uint64_t)pgo_every == 0) {
+        extern bool gamelib_pgo_dump(const char *path);
+        mkdir("build", 0755);
+        mkdir("build/pgo", 0755);
+        if (gamelib_pgo_dump("build/pgo/lasgame.profraw")) LOG("[pgo] profile written (frame %llu)\n", (unsigned long long)n);
+    }
 }
 
 void backend_present_gpu(NvnTexture *t);

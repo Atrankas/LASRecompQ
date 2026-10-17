@@ -76,6 +76,19 @@ bool gamelib_present(const char *game_dir) {
     return false;
 }
 
+#ifndef _WIN32
+static void (*g_pgo_dump)(const char *path);  // (an instrumented library's: lasgame_pgo_dump, tools/gamelib_entry.c)
+#endif
+// Profile-guided builds (tools/android/build_game.sh --pgo-gen): the counters so far into path; false if the library
+// isn't instrumented
+bool gamelib_pgo_dump(const char *path) {
+#ifndef _WIN32
+    if (g_pgo_dump) { g_pgo_dump(path); return true; }
+#endif
+    (void)path;
+    return false;
+}
+
 static const GameLibTables *open_lib(const char *path) {
 #ifdef _WIN32
     HMODULE h = LoadLibraryA(path);
@@ -85,6 +98,7 @@ static const GameLibTables *open_lib(const char *path) {
     void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!h) { snprintf(g_error, sizeof g_error, "%s", dlerror()); return NULL; }
     GameLibEntry entry = (GameLibEntry)dlsym(h, GAMELIB_ENTRY);
+    g_pgo_dump = (void (*)(const char *))dlsym(h, "lasgame_pgo_dump");
 #endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
     const GameLibTables *t = entry();

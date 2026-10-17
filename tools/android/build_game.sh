@@ -6,14 +6,18 @@
 # cd android && ./gradlew assembleDebug).
 #   --apk   also build a personal APK with it inside (android/app/build/outputs/apk/debug/app-debug.apk)
 #   --push  copy it into the app on the phone connected over adb (debug builds: run-as)
+#   --pgo-gen        an instrumented build (profile-guided optimisation, step 1): play with LARECOMP_PGO_DUMP_EVERY=600
+#                    in env.txt, then pull build/pgo/lasgame.profraw from the app's data folder
+#   --pgo-use=<file> the optimised build from that profile (llvm-profdata merge -o <file> lasgame.profraw)
 # The result holds code made from the game: keep it to yourself, never share it.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$PWD
 GAME=${1:?usage: tools/android/build_game.sh <game folder> [--apk] [--push]}
 shift
-APK=0 PUSH=0
-for a in "$@"; do case $a in --apk) APK=1 ;; --push) PUSH=1 ;; *) echo "unknown option $a"; exit 1 ;; esac; done
+APK=0 PUSH=0 PGO=
+for a in "$@"; do case $a in --apk) APK=1 ;; --push) PUSH=1 ;; --pgo-gen) PGO=gen ;; --pgo-use=*) PGO=${a#--pgo-use=} ;;
+                              *) echo "unknown option $a"; exit 1 ;; esac; done
 
 EXEFS=$GAME
 [ -f "$EXEFS/main" ] || EXEFS=$GAME/exefs
@@ -44,6 +48,14 @@ ID=$(tools/android/gamelib_id.sh)
 FLAGS=$(tools/android/gamelib_id.sh --flags)
 GEN=build/android/gen
 OBJ=build/android/gen-obj
+LINKPGO=
+if [ "$PGO" = gen ]; then
+    FLAGS="$FLAGS -fprofile-generate -DLASGAME_PGO" LINKPGO=-fprofile-generate OBJ=build/android/gen-obj-pgo-gen
+elif [ -n "$PGO" ]; then
+    PGO=$(cd "$(dirname "$PGO")" && pwd)/$(basename "$PGO")
+    FLAGS="$FLAGS -fprofile-use=$PGO -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled -Wno-backend-plugin"
+    OBJ=build/android/gen-obj-pgo-use
+fi
 OUT=build/android/gamelib/arm64-v8a
 mkdir -p "$GEN" "$OBJ" "$OUT"
 
@@ -55,18 +67,19 @@ echo "== generating C (game code id $ID)"
 
 echo "== compiling ($JOBS jobs)"
 compile() {  # <source> <object>
-    [ "$2" -nt "$1" ] && [ "$2" -nt runtime/cpu.h ] && [ "$2" -nt tools/android/gamelib_id.sh ] && return 0
+    [ "$2" -nt "$1" ] && [ "$2" -nt runtime/cpu.h ] && [ "$2" -nt tools/android/gamelib_id.sh ] && { [ -z "${PGOFILE:-}" ] || [ "$2" -nt "$PGOFILE" ]; } && return 0
     "$CC" $FLAGS -c "$1" -o "$2.tmp" && mv "$2.tmp" "$2"
 }
 export -f compile
-export CC FLAGS
+PGOFILE=$([ -n "$PGO" ] && [ "$PGO" != gen ] && echo "$PGO" || true)
+export CC FLAGS PGOFILE
 ls "$GEN"/sdk/*.c "$GEN"/main/*.c | while read -r c; do echo "$c $OBJ/$(basename "$(dirname "$c")")_$(basename "$c" .c).o"; done |
     xargs -P "$JOBS" -n 2 bash -c 'compile "$0" "$1" || exit 255'
 "$CC" $FLAGS -DGAMELIB_ID="\"$ID\"" -c tools/gamelib_entry.c -o "$OBJ/gamelib_entry.o"
 
 echo "== linking"
 # DT_NEEDED libmain.so: the runtime functions the game code calls are the app's own (it is loaded first)
-"$CC" -shared -fuse-ld=lld -Wl,-z,max-page-size=16384 -Wl,-Bsymbolic -Wl,-soname,liblasgame.so \
+"$CC" -shared -fuse-ld=lld $LINKPGO -Wl,-z,max-page-size=16384 -Wl,-Bsymbolic -Wl,-soname,liblasgame.so \
     -o "$OUT/liblasgame.so.tmp" "$OBJ"/*.o -L"$(dirname "$MAINLIB")" -lmain
 mv "$OUT/liblasgame.so.tmp" "$OUT/liblasgame.so"
 echo "$ID" > "$OUT/liblasgame.so.id"

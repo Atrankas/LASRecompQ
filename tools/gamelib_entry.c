@@ -10,3 +10,14 @@ GAMELIB_EXPORT const GameLibTables *lasgame_tables(void) {
                                     main_fn_ptrs, sdk_fn_ptrs,  &main_fn_count, &sdk_fn_count};
     return &t;
 }
+
+#ifdef LASGAME_PGO
+// (profile-guided builds, tools/android/build_game.sh --pgo-gen) the instrumented library's counters into path: called
+// by the app now and then (runtime/gamelib.c gamelib_pgo_dump), as phones end apps without exit()
+int __llvm_profile_write_file(void);
+void __llvm_profile_set_filename(const char *name);
+GAMELIB_EXPORT void lasgame_pgo_dump(const char *path) {
+    __llvm_profile_set_filename(path);
+    __llvm_profile_write_file();
+}
+#endif
