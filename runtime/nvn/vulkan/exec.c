@@ -324,7 +324,54 @@ static void dl_note(const char *fmt, ...) {
     va_end(ap);
 }
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv) { dl_note("  upload %p %ux%u lv%u", img, w, h, lv); }
+// GPU breadcrumbs (LARECOMP_VK_BREADCRUMBS=0: off): after the full barrier that starts each pass and each dispatch, the
+// GPU writes that operation's number into a host-visible word - so it has reached it, everything before is done. On a
+// device loss (a hang) the word says which operation the GPU was in; its label (pass size, first shader, draws) is
+// kept here. Costs one tiny fill per pass.
+static VkBuffer bc_buf;
+static VmaAllocation bc_mem;
+static volatile uint32_t *bc_ptr;
+static char bc_label[1024][128];
+static uint32_t bc_next, bc_draws;
+static int bc_on = -1;
+static void bc_mark(VkCommandBuffer cb, const char *fmt, ...) {
+    if (bc_on < 0) { const char *e = getenv("LARECOMP_VK_BREADCRUMBS"); bc_on = e ? atoi(e) : 1; }
+    if (!bc_on) return;
+    if (!bc_buf) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 256, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &bc_buf, &bc_mem, &info) != VK_SUCCESS) { bc_on = 0; return; }
+        bc_ptr = info.pMappedData;
+    }
+    uint32_t id = ++bc_next;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(bc_label[id & 1023], sizeof bc_label[0], fmt, ap);
+    va_end(ap);
+    bc_draws = 0;
+    vkCmdFillBuffer(cb, bc_buf, 0, 4, id);
+}
+void vk_bc_mark(VkCommandBuffer cb, const char *label) {  // (device.c: the window image's steps)
+    vk_full_barrier(cb);
+    bc_mark(cb, "%s", label);
+}
+static void bc_draw(uint64_t fs_hash) {  // (a draw in the current pass: its first shader and the count go in its label)
+    if (bc_on <= 0) return;
+    char *l = bc_label[bc_next & 1023];
+    size_t n = strlen(l);
+    if (!bc_draws++) snprintf(l + n, sizeof bc_label[0] - n, ", first fs %016llx", (unsigned long long)fs_hash);
+}
+
 void vk_devlost_dump(void) {
+    if (bc_ptr) {
+        vmaInvalidateAllocation(g_vk.vma, bc_mem, 0, 4);
+        uint32_t at = bc_ptr[0];
+        LOG("[vk] GPU breadcrumbs: reached operation %u of %u recorded\n", at, bc_next);
+        for (uint32_t i = at > 4 ? at - 4 : 1; i <= at + 3 && i <= bc_next; i++)
+            LOG("[vk]   %s%u: %s\n", i == at ? "=> " : "   ", i, bc_label[i & 1023]);
+    }
     if (!dl_on) return;
     LOG("[vk] last GPU operations before the device loss (oldest first):\n");
     for (unsigned i = dl_n > 64 ? dl_n - 64 : 0; i < dl_n; i++) LOG("[vk]   %s\n", dl_ring[i & 63]);
@@ -948,6 +995,11 @@ static void begin_pass(void) {
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
+    {
+        NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : NULL;
+        bc_mark(cb, "pass %d color %ux%u fmt %#x depth %s", st.rt.ncolor, t0 ? t0->width : 0, t0 ? t0->height : 0,
+                t0 ? t0->format : 0, st.rt.depth ? "yes" : "no");
+    }
     {
         NvnTexture *t0n = st.rt.ncolor ? st.rt.color[0] : NULL;
         dl_note("pass %d color %ux%u fmt %#x depth %p", st.rt.ncolor, t0n ? t0n->width : 0, t0n ? t0n->height : 0, t0n ? t0n->format : 0,
@@ -3005,15 +3057,22 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     if (cp->si->uses_gmem_map && !vk_gmem_mirror()) gfast_prepare(cb);
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL);
-    // (mirrored storage: what was recorded before - this submission's or an earlier one's - may still read the slots this
-    // dispatch rewrites; a list rewritten under a shader walking it hung the GPU)
-    if (vk_gmem_mirror() && cp->si->uses_gmem_map && cp->si->uses_gmem_store) vk_full_barrier(cb);
+    // after everything before it: a dispatch reads what passes, copies and dispatches wrote (the pass it follows ended
+    // just now) - and with mirrored storage, what was recorded before (an earlier submission's too) may still read
+    // the slots it rewrites (a list rewritten under a shader walking it hung the GPU)
+    vk_full_barrier(cb);
+    bc_mark(cb, "dispatch %ux%ux%u cs %llx%s", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr,
+            cp->si->uses_gmem_store ? " (stores)" : "");
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     vkCmdDispatch(cb, gx, gy, gz);
     if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) {
         if (vk_gmem_mirror()) mirror_after_dispatch(cb);  // (its slots: readbacks; read by what follows)
         else gfast_finish(cb);
+    }
+    if (bc_on > 0) {  // (breadcrumb: the dispatch done)
+        vk_full_barrier(cb);
+        bc_mark(cb, "after dispatch cs %llx", (unsigned long long)st.program->stages[5].code_addr);
     }
     if (cp->si->uses_gmem_store) vc_mark_sbufs(5);
     stat_dispatches++;
@@ -3508,6 +3567,7 @@ static void draw_(CmdRec *r, bool indexed) {
     stat_draws++;
     cum_draws++;
     work_since_submit++;
+    bc_draw(g_cur_fs_hash);
     if (g_gpuprof_frame && gp_n) {
         if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
             size_t l = strlen(gp_label[gp_n - 1]);
@@ -4024,6 +4084,7 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
                       bool clear) {
     VkPipeline pipe = post_pipeline(fs);  // (before the rendering begins: created inside it, the NVIDIA driver crashed)
     vk_full_barrier(cb);
+    bc_mark(cb, "post %s %ux%u", fs, dst->width, dst->height);
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = post_view(dst),
                                     .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
                                     .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
@@ -4099,6 +4160,7 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
         v = post_view(r);
     }
     vk_full_barrier(cb);
+    bc_mark(cb, "present (window image)");
     vk_frame_resume();
     {
         static uint32_t piw, pih, pow_, poh;

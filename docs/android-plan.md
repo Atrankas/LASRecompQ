@@ -85,6 +85,13 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
       Dispatches de compute pulados enquanto o pipeline compilava deixavam a lista de luzes sem escrever e o
       shader de fragmento percorria lixo até o guarda de 100000 iterações. Agora dispatches esperam o pipeline
       e laços de shaders gráficos têm guarda menor
+- [x] Cache de pipelines salvo durante o jogo (no Android o app é fechado sem `exit()`: o cache nunca era gravado)
+- [x] Snapdragon Game Super Resolution (BSD-3) como upscaler padrão no celular: ~1 ms contra 7.5 ms do FSR 1
+- [x] Resolução dinâmica padrão no celular (50-75%, segurando os 30 fps do jogo): o overworld vai de 20 para ~30 fps
+- [x] Envios antecipados entre passes (a GPU começa antes; o jogo espera menos pela fence do frame)
+- [x] Breadcrumbs de GPU (`LARECOMP_VK_BREADCRUMBS`): no device lost, qual operação a GPU estava fazendo
+- [ ] Travamentos raros de GPU: os breadcrumbs apontaram a espera pela imagem da janela (semáforo do compositor);
+      agora a imagem é esperada na CPU (fence). Validar com mais partidas
 - [ ] Limite do aparelho: `restricted_device_performance=1, 1` (configuração da Samsung) prende os núcleos
       grandes em 1.75 GHz; o núcleo principal (cpu7) fica isolado pelo core_ctl; sem ADPF, sem THP
 - [ ] SPIR-V otimizado (`LARECOMP_VK_OPT=1`) trava o Turnip (device lost): investigar

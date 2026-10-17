@@ -766,20 +766,45 @@ bool vk_frame_begin(const float clear[4]) {
     if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
     if (trace) LOG("[vk] frame begin %dx%d (swapchain %ux%u)\n", w, h, g_vk.sc_extent.width, g_vk.sc_extent.height);
     slot = (slot + 1) % FRAMES;
-    if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
+    // Phones: the window image is waited for on the CPU (a fence), not by the GPU (a semaphore). Turnip waits for the
+    // compositor's release inside the submission that clears the image, and now and then that wait didn't end: the
+    // kernel's hang detection, device lost (breadcrumbs: the GPU done with the game's frame, stuck before the window
+    // image's first pass). With MAILBOX the image is ready at once. LARECOMP_VK_ACQUIRE_FENCE=0/1.
+    static int by_fence = -1;
+    if (by_fence < 0) {
+        const char *e = getenv("LARECOMP_VK_ACQUIRE_FENCE");
+#ifdef __ANDROID__
+        by_fence = !e || atoi(e) != 0;
+#else
+        by_fence = e && atoi(e) != 0;
+#endif
+    }
+    static VkFence acquire_fence;
+    if (by_fence && !acquire_fence) {
+        VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VK_CHECK(vkCreateFence(g_vk.dev, &fi, NULL, &acquire_fence));
+    }
+    if (!by_fence && !acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
     WAITING(vk_wait_seq(slot_seq[slot]));
+    VkSemaphore asem = by_fence ? VK_NULL_HANDLE : acquire_sem[slot];
+    VkFence afence = by_fence ? acquire_fence : VK_NULL_HANDLE;
     VkResult r;
-    WAITING(r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image));
+    WAITING(r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, asem, afence, &cur_frame.image));
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
-        WAITING(r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE,
-                                          &cur_frame.image));
+        WAITING(r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, asem, afence, &cur_frame.image));
     }
     if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&g_surface_stale, true);
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
-    cur_frame.acquired = acquire_sem[slot];
+    if (by_fence) {
+        WAITING(vkWaitForFences(g_vk.dev, 1, &acquire_fence, VK_TRUE, UINT64_MAX));
+        vkResetFences(g_vk.dev, 1, &acquire_fence);
+    }
+    cur_frame.acquired = asem;
     slot_seq[slot] = vk_pending_seq();
     VkCommandBuffer cb = vk_cmd();
+    extern void vk_bc_mark(VkCommandBuffer cb, const char *label);
+    vk_bc_mark(cb, "window image: begin");
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
                                     .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -799,7 +824,10 @@ bool vk_frame_begin(const float clear[4]) {
 // Passes of their own between vk_frame_begin and vk_frame_end (exec.c post passes): end the window image's
 // rendering, and begin it again keeping what was drawn.
 void vk_frame_suspend(void) {
-    if (cur_frame.ok) vkCmdEndRendering(vk_cmd());
+    if (!cur_frame.ok) return;
+    vkCmdEndRendering(vk_cmd());
+    extern void vk_bc_mark(VkCommandBuffer cb, const char *label);
+    vk_bc_mark(vk_cmd(), "window image: cleared");
 }
 void vk_frame_resume(void) {
     if (!cur_frame.ok) return;
