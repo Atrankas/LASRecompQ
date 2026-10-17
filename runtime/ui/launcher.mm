@@ -22,6 +22,7 @@
 
 #include "imgui.h"
 #include "touch_ui.h"
+static TouchUi g_touch;  // (touch screens: the start screen's pages)
 #include "imgui_internal.h"  // (SetKeyOwner)
 #include "option_rows.h"
 #include "osk.h"
@@ -1146,12 +1147,10 @@ extern "C" void launcher_run(const char *root) {
                 e.type == SDL_EVENT_FINGER_CANCELED) {
                 // touch screens (touch_ui.h): taps click, drags scroll (SDL's touch-made mouse events carry no window:
                 // ImGui drops them)
-                static TouchUi touch;
                 ImGuiIO &tio = ImGui::GetIO();
                 tio.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
-                touch.event(&e, tio.DisplaySize.x, tio.DisplaySize.y, [&](float x, float y) { tio.AddMousePosEvent(x, y); },
-                            [&](bool down) { tio.AddMouseButtonEvent(0, down); },
-                            [&](float px) { tio.AddMouseWheelEvent(0, px / (5 * ImGui::GetFontSize())); });
+                g_touch.event(&e, tio.DisplaySize.x, tio.DisplaySize.y, [&](float x, float y) { tio.AddMousePosEvent(x, y); },
+                              [&](bool down) { tio.AddMouseButtonEvent(0, down); });
                 continue;
             }
 #endif
@@ -1204,6 +1203,10 @@ extern "C" void launcher_run(const char *root) {
             // controller presses launcher_pad_event fed in and turns gamepad navigation off: set it again while a
             // controller is connected
             if (SDL_HasGamepad()) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+            {   // a drag / flick (touch_ui.h): this frame's scroll as one wheel step (5 lines of the page's font)
+                float px = g_touch.frame(io.DeltaTime, [&](float x, float y) { io.AddMousePosEvent(x, y); });
+                if (px != 0) io.AddMouseWheelEvent(0, px / (5 * 52.5f * (io.FontGlobalScale > 0 ? io.FontGlobalScale : 1)));
+            }
             ImGui::NewFrame();
 
             ImVec2 ds = io.DisplaySize;

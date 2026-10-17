@@ -2104,7 +2104,11 @@ static void build_pipeline(void *arg) {
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = k->prog->layout};
     extern bool g_vk_shader_stats;
+    static uint64_t ir_fs = 1;  // LARECOMP_VK_SHADER_IR=<fs code addr hex>: that shader's compiled forms -> build/ir_<addr>.txt
+    if (ir_fs == 1) ir_fs = getenv("LARECOMP_VK_SHADER_IR") ? strtoull(getenv("LARECOMP_VK_SHADER_IR"), NULL, 16) : 0;
+    bool want_ir = g_vk_shader_stats && ir_fs && k->prog->code[1] == ir_fs;
     if (g_vk_shader_stats) pi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+    if (want_ir) pi.flags |= VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pp->pipe);
     atomic_fetch_add(&g_pipes_built, 1);
     if (g_vk_shader_stats && r == VK_SUCCESS) {  // (LARECOMP_VK_SHADER_STATS: the driver's view of each stage)
@@ -2129,6 +2133,24 @@ static void build_pipeline(void *arg) {
                     o += snprintf(line + o, sizeof line - o, " %s=%llu", stv[i].name, (unsigned long long)stv[i].value.u64);
             }
             LOG("%s\n", line);
+            if (want_ir && (props[e].stages & VK_SHADER_STAGE_FRAGMENT_BIT)) {
+                VkPipelineExecutableInternalRepresentationKHR irs[8];
+                uint32_t nir = 8;
+                for (int i = 0; i < 8; i++) irs[i] = (VkPipelineExecutableInternalRepresentationKHR){.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INTERNAL_REPRESENTATION_KHR};
+                vkGetPipelineExecutableInternalRepresentationsKHR(g_vk.dev, &ei, &nir, irs);
+                for (uint32_t i = 0; i < nir; i++) LOG("[stats] representation %s: %zu bytes\n", irs[i].name, irs[i].dataSize);
+                char path[700];
+                const char *dir = SDL_GetAndroidExternalStoragePath();
+                snprintf(path, sizeof path, "%s/build/ir_%llx.txt", dir ? dir : ".", (unsigned long long)ir_fs);
+                FILE *f = fopen(path, "w");
+                for (uint32_t i = 0; f && i < nir; i++) {
+                    irs[i].pData = malloc(irs[i].dataSize + 1);
+                }
+                if (f && vkGetPipelineExecutableInternalRepresentationsKHR(g_vk.dev, &ei, &nir, irs) >= 0)
+                    for (uint32_t i = 0; i < nir; i++) fprintf(f, "==== %s\n%.*s\n", irs[i].name, (int)irs[i].dataSize, (char *)irs[i].pData);
+                for (uint32_t i = 0; i < nir; i++) free(irs[i].pData);
+                if (f) fclose(f), LOG("[stats] internal representations -> %s\n", path);
+            }
         }
     }
     if (r != VK_SUCCESS) {

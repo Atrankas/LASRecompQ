@@ -53,7 +53,8 @@ static std::atomic<bool> g_text_busy{false};  // a text field / the on-screen ke
 static std::atomic<bool> g_want_fullscreen_apply{false};
 
 struct QEvent {
-    enum { KEY, ANALOG, MOUSE_POS, MOUSE_BUTTON, WHEEL, SCROLL_PX, TEXT } kind;
+    enum { KEY, ANALOG, MOUSE_POS, MOUSE_BUTTON, WHEEL, FINGER, TEXT } kind;
+    SDL_Event finger;  // (FINGER: the event itself - touch_ui.h runs on the render thread)
     ImGuiKey key;
     bool down;
     float value, x, y;
@@ -262,13 +263,10 @@ bool menu_handle_event(const SDL_Event *e) {
 #ifdef __ANDROID__
     case SDL_EVENT_FINGER_DOWN: case SDL_EVENT_FINGER_UP: case SDL_EVENT_FINGER_MOTION: case SDL_EVENT_FINGER_CANCELED:
         if (!capturing()) return false;
-        {   // touch screens (touch_ui.h): taps click, drags scroll (SDL's touch-made mouse events carry no window, which
-            // ImGui drops)
-            static TouchUi touch;
-            touch.event(e, (float)g_win_px_w, (float)g_win_px_h,
-                        [](float x, float y) { QEvent q = {}; q.kind = QEvent::MOUSE_POS, q.x = x, q.y = y; push(q); },
-                        [](bool down) { QEvent q = {}; q.kind = QEvent::MOUSE_BUTTON, q.button = 0, q.down = down; push(q); },
-                        [](float px) { QEvent q = {}; q.kind = QEvent::SCROLL_PX, q.y = px; push(q); });
+        {   // touch screens (touch_ui.h, on the render thread: drain_events)
+            QEvent q = {};
+            q.kind = QEvent::FINGER, q.finger = *e;
+            push(q);
         }
         return true;
 #endif
@@ -401,6 +399,7 @@ static void init(void) {
     g_inited = true;
 }
 
+static TouchUi g_touch;  // (render thread)
 static void drain_events(ImGuiIO &io) {
     pthread_mutex_lock(&q_lock);
     std::vector<QEvent> ev;
@@ -413,7 +412,10 @@ static void drain_events(ImGuiIO &io) {
         case QEvent::MOUSE_POS: io.AddMousePosEvent(q.x, q.y); break;
         case QEvent::MOUSE_BUTTON: io.AddMouseButtonEvent(q.button, q.down); break;
         case QEvent::WHEEL: io.AddMouseWheelEvent(q.x, q.y); break;
-        case QEvent::SCROLL_PX: io.AddMouseWheelEvent(0, q.y / (5 * ImGui::GetFontSize())); break;  // (ImGui: 5 lines a step)
+        case QEvent::FINGER:
+            g_touch.event(&q.finger, (float)g_win_px_w, (float)g_win_px_h, [&](float x, float y) { io.AddMousePosEvent(x, y); },
+                          [&](bool down) { io.AddMouseButtonEvent(0, down); });
+            break;
         case QEvent::TEXT: io.AddInputCharactersUTF8(q.text); break;
         }
     }
@@ -983,6 +985,10 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     float scale = (float)(th / 1080.0);
     if (scale < 0.45f) scale = 0.45f;
     io.FontGlobalScale = scale;
+    {   // a drag / flick: this frame's scroll as one wheel step (ImGui: 5 lines of the menu font a step)
+        float px = g_touch.frame(io.DeltaTime, [&](float x, float y) { io.AddMousePosEvent(x, y); });
+        if (px != 0) io.AddMouseWheelEvent(0, px / (5 * 39 * kUi * scale));
+    }
 
 #ifdef __APPLE__
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
