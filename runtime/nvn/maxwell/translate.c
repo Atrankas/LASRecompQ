@@ -2164,7 +2164,9 @@ static const char glsl_prelude_h2f_bits[] =
     " if (e == 31u) return uintBitsToFloat(s | 0x7F800000u | (m << 13));"
     " return uintBitsToFloat(s | ((e + 112u) << 23) | (m << 13)); }\n"
     "vec2 unpack_h2(uint v) { return vec2(h2f(v & 0xFFFFu), h2f(v >> 16)); }\n";
-// (other GPUs: the conversion instruction; the same values)
+// ... and in fragment / compute shaders (and on other GPUs) the conversion instruction: positions don't depend on them
+// there, and the by-bits version (~12 integer ops and two branches per half) was half of the main lighting pass's GPU
+// time on an Intel UHD 770 and a third on an RTX 3080 Ti. LARECOMP_VK_EXACT_H2F=1: by bits in every stage.
 static const char glsl_prelude_h2f_native[] =
     "float h2f(uint h) { return unpackHalf2x16(h).x; }\n"
     "vec2 unpack_h2(uint v) { return unpackHalf2x16(v); }\n";
@@ -2208,7 +2210,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         const char *rest = strchr(glsl_prelude, '\n') + 1;  // (after #version: the fp16 extension goes first)
         sp(&s, "%.*s", (int)(rest - glsl_prelude), glsl_prelude);
         if (maxwell_half_native) sp(&s, "#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require\n");
-        sp(&s, "%s%s", rest, maxwell_h2f_bits ? glsl_prelude_h2f_bits : glsl_prelude_h2f_native);
+        static int exact = -1;
+        if (exact < 0) exact = getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0;
+        bool bits = exact || (maxwell_h2f_bits && stage != STAGE_FRAGMENT && stage != STAGE_COMPUTE);
+        sp(&s, "%s%s", rest, bits ? glsl_prelude_h2f_bits : glsl_prelude_h2f_native);
         if (maxwell_half_native) {
             const char *hp = strstr(glsl_prelude2, "uint prmt(");  // (the fp32 hx / hpack replaced)
             sp(&s, "%s%s", glsl_prelude_half_native, hp);
