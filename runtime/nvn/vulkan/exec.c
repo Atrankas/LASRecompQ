@@ -1575,10 +1575,33 @@ static void compile_program(void *arg) {
     atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
 }
 
+// The guest heap's chunking for shaders (shader.h maxwell_gmem_chunk_shift): a GPU whose storage buffers can't span
+// HEAP_MAX gets it as power-of-two chunks under its maxStorageBufferRange (Intel: 1 GB -> 512 MB chunks). Binding it as
+// one range past that limit is out of spec, and the UHD 630's driver then read garbage beyond 1 GB: dark lighting,
+// black objects (issue #8). LARECOMP_VK_GMEM_CHUNK_MB=<n> forces chunks of n MB (a power of two; tests on any GPU),
+// =0 one buffer.
+static uint32_t gmem_chunk_shift(void) {
+    static int shift = -1;
+    if (shift >= 0) return (uint32_t)shift;
+    const char *e = getenv("LARECOMP_VK_GMEM_CHUNK_MB");
+    uint64_t lim = g_vk.props.limits.maxStorageBufferRange;
+    shift = 0;
+    if (e) { uint64_t b = strtoull(e, NULL, 10) << 20; if (b) shift = 63 - __builtin_clzll(b); }
+    else if (HEAP_MAX > lim && lim) shift = 63 - __builtin_clzll(lim);
+    if (shift && ((HEAP_MAX + (1ull << shift) - 1) >> shift) > GMEM_CHUNKS_MAX) {
+        LOG("[vk] guest heap chunks of %llu MB would need too many buffers: one buffer\n", (unsigned long long)(1ull << shift) >> 20);
+        shift = 0;
+    }
+    if (shift) LOG("[vk] guest heap bound to shaders in %llu MB chunks (storage buffers up to %llu MB here)\n",
+                   (unsigned long long)(1ull << shift) >> 20, (unsigned long long)lim >> 20);
+    return (uint32_t)shift;
+}
+
 static void translate_program(void *arg) {
     Prog *p = arg;
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
+    maxwell_gmem_chunk_shift = gmem_chunk_shift();
     pthread_mutex_lock(&translate_lock);
     p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
     if (p->vi->msl) {
@@ -2432,6 +2455,24 @@ void backend_guest_heap_prepare(void) {
 
 static uint64_t gmem_tried;  // heap size the import was last attempted for (gmem_info imports / re-imports)
 
+static VkDescriptorBufferInfo gmem_info(void);
+// The buffer for storage binding b: the whole heap, or with chunks (gmem_chunk_shift) the chunk that binding holds -
+// a chunk past the imported heap gets the zero-filled buffer, as the heap does before its import.
+static VkDescriptorBufferInfo gmem_chunk_info(uint32_t binding) {
+    VkDescriptorBufferInfo all = gmem_info();
+    uint32_t shift = gmem_chunk_shift();
+    if (!shift || !gmem_buf || all.buffer != gmem_buf) return all;
+    int k = binding == GMEM_BUFFER_INDEX ? 0 : (int)binding - GMEM_CHUNK_BINDING + 1;
+    uint64_t off = (uint64_t)k << shift;
+    if (k < 0 || off >= gmem_size) {
+        static uint32_t zero[1024];
+        VkSpan z = vk_transient_copy(zero, sizeof zero, 256);
+        return (VkDescriptorBufferInfo){z.buf, z.off, sizeof zero};
+    }
+    uint64_t n = gmem_size - off;
+    return (VkDescriptorBufferInfo){gmem_buf, off, n < (1ull << shift) ? n : (1ull << shift)};
+}
+
 static VkDescriptorBufferInfo gmem_info(void) {
     static int off = -1;
     if (off < 0) off = getenv("LARECOMP_VK_NO_GMEM") != NULL || !g_vk.host_import;
@@ -2712,7 +2753,13 @@ static void mirror_table(int stage, bool store, VkCommandBuffer cb, uint32_t *ta
     int n = 0;
     for (int i = 0; i < 16; i++) {
         uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
-        if (!a || !sz || a < HEAP_BASE || a + sz > HEAP_BASE + HEAP_MAX) continue;
+        if (!a || !sz) continue;
+        if (a < HEAP_BASE || a + sz > HEAP_BASE + HEAP_MAX) {
+            static int nlog;
+            if (nlog++ < 20) LOG("[vk] gmem mirror: stage %d buffer %d %llx+%llx outside the heap: reads zero\n", stage, i,
+                                 (unsigned long long)a, (unsigned long long)sz);
+            continue;
+        }
         uint64_t lo = a & ~3ull, hi = (a + sz + 3) & ~3ull;  // (words: what's merged)
         int k = n++;
         while (k > 0 && r[k - 1].lo > lo) { r[k] = r[k - 1]; k--; }
@@ -2757,7 +2804,12 @@ static void mirror_table(int stage, bool store, VkCommandBuffer cb, uint32_t *ta
                 if (mir_snap_memo[k].seq == pending && mir_snap_memo[k].lo == lo && mir_snap_memo[k].hi == hi) off = mir_snap_memo[k].off;
             if (off == ~0ull) {
                 off = mirror_snap_alloc(hi - lo);
-                if (off == ~0ull) continue;  // (too big: reads outside the table return zero, as before)
+                if (off == ~0ull) {  // (too big: reads outside the table return zero, as before)
+                    static int nlog;
+                    if (nlog++ < 20) LOG("[vk] gmem mirror: stage %d range %llx+%llx doesn't fit the snapshot ring: reads zero\n",
+                                         stage, (unsigned long long)lo, (unsigned long long)(hi - lo));
+                    continue;
+                }
                 memcpy(mir_ptr + off, (const void *)(uintptr_t)lo, hi - lo);
                 vmaFlushAllocation(g_vk.vma, mir_mem, off, hi - lo);
                 stat_upload_bytes += hi - lo;
@@ -3201,7 +3253,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
             w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-            bi[n] = b->binding != GFAST_BUFFER_INDEX ? gmem_info()
+            bi[n] = b->binding != GFAST_BUFFER_INDEX ? gmem_chunk_info(b->binding)
                     : vk_gmem_mirror() ? (mirror_init(), (VkDescriptorBufferInfo){mir_buf, 0, MIR_SIZE}) : gfast_info();
             w[n].pBufferInfo = &bi[n];
         } else {
@@ -3294,6 +3346,7 @@ static CsProg *compute_program(NvnProgram *np) {
     if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
+    maxwell_gmem_chunk_shift = gmem_chunk_shift();
     ShaderKey k = {0};
     k.glsl = 1;
     pthread_mutex_lock(&translate_lock);
