@@ -1,4 +1,5 @@
 // nn::vi (display/layer) and nv:: (graphics driver init), implemented on the host.
+#include <pthread.h>
 #include <stdlib.h>
 #include <time.h>
 
@@ -10,6 +11,17 @@ static KEvent *vsync_event;
 uint32_t vi_vsync_handle(void) { return vsync_r; }
 volatile uint64_t g_vsync_count;  // vsyncs signalled so far (runtime/hle/framepace.c)
 uint64_t g_native_window;
+static pthread_mutex_t vs_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t vs_cv = PTHREAD_COND_INITIALIZER;
+
+// Until vsync number `count` has been signalled (a present's swap interval: runtime/nvn/objects.c). Returns at once
+// when the vsync thread isn't running.
+void vi_wait_vsync(uint64_t count) {
+    if (!vsync_event) return;
+    pthread_mutex_lock(&vs_mu);
+    while (__atomic_load_n(&g_vsync_count, __ATOMIC_RELAXED) < count) pthread_cond_wait(&vs_cv, &vs_mu);
+    pthread_mutex_unlock(&vs_mu);
+}
 
 static void *vsync_thread(void *arg) {
     plat_thread_name("vsync");
@@ -26,7 +38,10 @@ static void *vsync_thread(void *arg) {
             if (warned++ < 20) LOG("[vi] vsync timer late by %llums (host throttling?)\n", (unsigned long long)((now - next) / 1000000));
             next = now;  // don't burst-signal to catch up
         }
+        pthread_mutex_lock(&vs_mu);
         __atomic_add_fetch(&g_vsync_count, 1, __ATOMIC_RELAXED);
+        pthread_cond_broadcast(&vs_cv);
+        pthread_mutex_unlock(&vs_mu);
         pthread_mutex_lock(&g_klock);
         kernel_signal(vsync_event);
         pthread_mutex_unlock(&g_klock);

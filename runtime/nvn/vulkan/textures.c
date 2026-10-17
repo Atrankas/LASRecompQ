@@ -665,7 +665,15 @@ static void upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h,
 // Decoded video as NV12 (runtime/hle/movie.c): the planes (half the bytes of RGBA) go to the GPU, which converts them
 // into the texture (exec.c vk_convert_nv12) - swscale plus the RGBA upload cost mid-range CPUs most of a frame at the
 // movies' 60 fps. false: a texture format this doesn't handle (the caller converts on the CPU).
+static bool upload_nv12(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off);
+typedef struct { NvnTexture *t; const void *nv12; uint32_t w, h, stride, uv_off; bool ok; } Nv12Args;
+static void upload_nv12_call(void *a) { Nv12Args *u = a; u->ok = upload_nv12(u->t, u->nv12, u->w, u->h, u->stride, u->uv_off); }
 bool renderer_upload_nv12(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off) {
+    Nv12Args u = {t, nv12, w, h, stride, uv_off, true};
+    gt_call(upload_nv12_call, &u);  // (as renderer_upload_rgba: in order with the queued lists)
+    return u.ok;
+}
+static bool upload_nv12(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off) {
     TexBackend *b = t->backend;
     if (!b) return true;  // (as renderer_upload_rgba: a frame before the texture is first bound is dropped)
     if (b->format != VK_FORMAT_R8G8B8A8_UNORM && b->format != VK_FORMAT_R8G8B8A8_SRGB && b->format != VK_FORMAT_B8G8R8A8_UNORM &&
@@ -695,8 +703,15 @@ void vk_views_forget(TexBackend *b) { views_forget(b); }
 uint32_t vk_view_gen;  // bumped whenever a cached view may be destroyed (exec.c's per-frame texture memo)
 static void views_forget(TexBackend *b) {
     vk_view_gen++;
-    for (int i = 0; i < VIEW_TAB; i++)
+    // (the slots the texture's views went into - a slot since taken by another texture's view is left alone - or the
+    // whole table after more than eight: per-frame image swaps searched 16384 entries twice each)
+    int n = b->vslot_overflow ? VIEW_TAB : b->nvslots;
+    for (int k = 0; k < n; k++) {
+        int i = b->vslot_overflow ? k : b->vslots[k];
         if (view_tab[i].b == b) { defer((Dead){.view = view_tab[i].view}); view_tab[i].b = NULL; view_tab[i].view = VK_NULL_HANDLE; }
+    }
+    b->nvslots = 0;
+    b->vslot_overflow = false;
 }
 
 VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
@@ -723,6 +738,8 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
     ViewEnt *e = &view_tab[slot];
     if (e->b) { defer((Dead){.view = e->view}); vk_view_gen++; }  // evict (16 probes taken)
     *e = (ViewEnt){b, k1, k2, v};
+    if (b->nvslots < 8) b->vslots[b->nvslots++] = (uint16_t)slot;
+    else b->vslot_overflow = true;
     return v;
 }
 

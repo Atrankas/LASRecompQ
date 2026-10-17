@@ -140,8 +140,12 @@ NVN(nvnQueueFenceSync) {
     }
 }
 void nvn_sync_ticket(uint64_t guest, uint64_t ticket) { sync_of(guest)->ticket = ticket; }
-void nvn_sync_set_seq(uint64_t guest, uint64_t seq) {
-    NvnSync *s = sync_of(guest);
+void nvn_sync_set_seq(uint64_t guest, uint64_t seq) {  // (the render thread, a fence reached)
+    // never a new one on the render thread (the submit made it: mark_fences): a sync the game finalized meanwhile (its
+    // host object freed after this, in queue order) must not get one written back into memory the game may have
+    // reused - nobody waits on it any more
+    NvnSync *s = gt_on() ? HOST(NvnSync, guest) : sync_of(guest);
+    if (!s) return;
     s->signaled = 1;
     s->seq = seq;
     if (getenv("LARECOMP_LOG_SYNCWAIT")) LOG("[sync] fence %llx -> seq %llu\n", (unsigned long long)guest, (unsigned long long)seq);
@@ -666,7 +670,11 @@ NVN(nvnWindowGetNumTextures) { RET(WIN->num); }
 NVN(nvnWindowGetNumActiveTextures) { RET(WIN->active); }
 NVN(nvnWindowSetNumActiveTextures) { WIN->active = (int)A(1); }
 NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
-NVN(nvnWindowSetPresentInterval) { WIN->interval = (int)A(1); }
+NVN(nvnWindowSetPresentInterval) {
+    // LARECOMP_LOG_INTERVAL=1: the game's 60 / 30 fps mode changes (1: 60, 2: 30)
+    if (WIN->interval != (int)A(1) && getenv("LARECOMP_LOG_INTERVAL")) LOG("[nvn] present interval %d -> %d (lr %llx)\n", WIN->interval, (int)A(1), (unsigned long long)c->x[30]);
+    WIN->interval = (int)A(1);
+}
 NVN(nvnWindowSetCrop) { int *cr = WIN->crop; cr[0] = (int)A(1); cr[1] = (int)A(2); cr[2] = (int)A(3); cr[3] = (int)A(4); }
 NVN(nvnWindowGetCrop) { memcpy(AP(1), WIN->crop, 16); }
 NVN(nvnWindowAcquireTexture) {
@@ -682,9 +690,28 @@ NVN(nvnQueueAcquireTexture) {
     w->next = (w->next + 1) % (w->active ? w->active : 1);
     RET(0);
 }
+// The window's swap interval, as NVN keeps it: a frame goes out no sooner than `interval` vsyncs after the one before
+// (on the Switch the next AcquireTexture waits for that). The game itself only waits for the next vsync, so without
+// this a frame of its 30 fps mode (two world steps) that took one vsync went out at once - double speed. Interval 1
+// as before (the game's own vsync wait). LARECOMP_PRESENT_INTERVAL=0: not kept.
+extern __thread uint64_t g_blocked_ns;  // kernel.c (idle for the frame pacer)
+static void keep_interval(int interval) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_PRESENT_INTERVAL") || atoi(getenv("LARECOMP_PRESENT_INTERVAL")) != 0;
+    extern volatile uint64_t g_vsync_count;
+    extern void vi_wait_vsync(uint64_t count);
+    static uint64_t last;
+    if (on && last && interval > 1 && g_vsync_count < last + (uint64_t)interval) {
+        uint64_t t0 = plat_now_ns();
+        vi_wait_vsync(last + (uint64_t)interval);
+        g_blocked_ns += plat_now_ns() - t0;
+    }
+    last = g_vsync_count;
+}
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
+    keep_interval(w->interval);
     if (i >= 0 && i < w->num) backend_present(HOST(NvnTexture, w->textures[i]));
 }
 

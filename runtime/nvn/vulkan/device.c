@@ -554,7 +554,7 @@ void vk_pipeline_cache_save(void) {
     if (!g_vk.pcache) return;
     pthread_mutex_lock(&lock);
     size_t sz = 0;
-    if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return;
+    if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) { pthread_mutex_unlock(&lock); return; }
     void *data = malloc(sz);
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, data) == VK_SUCCESS) {
         mkdir("cache", 0755);
@@ -791,7 +791,7 @@ bool vk_frame_begin(const float clear[4]) {
         VK_CHECK(vkCreateFence(g_vk.dev, &fi, NULL, &acquire_fence));
     }
     if (!by_fence && !acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
-    WAITING(vk_wait_seq(slot_seq[slot]));
+    vk_wait_seq(slot_seq[slot]);  // (its time counts as blocked by itself)
     VkSemaphore asem = by_fence ? VK_NULL_HANDLE : acquire_sem[slot];
     VkFence afence = by_fence ? acquire_fence : VK_NULL_HANDLE;
     VkResult r;
@@ -1085,8 +1085,13 @@ void backend_present_gpu(NvnTexture *t) {
     if (now - last_fps_time >= fps_iv) {
         extern const char *game_level_name(void);
         if (last_fps_time > 0)
-            LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s)\n", now, (unsigned long long)total_frames,
-                frames / (now - last_fps_time), max_gap * 1000.0, game_level_name(), renderer_stats());
+        {
+            extern double g_game_speed;  // (runtime/hle/framepace.c: the game's speed, its 30 / 60 fps mode)
+            extern uint32_t g_game_interval;
+            LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms speed %.0f%% (mode %d) level %s (%s)\n", now,
+                (unsigned long long)total_frames, frames / (now - last_fps_time), max_gap * 1000.0, g_game_speed * 100,
+                g_game_interval ? 60 / (int)g_game_interval : 60, game_level_name(), renderer_stats());
+        }
         max_gap = 0;
         frames = 0;
         last_fps_time = now;

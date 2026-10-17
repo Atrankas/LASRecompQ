@@ -12,17 +12,21 @@ import java.nio.charset.StandardCharsets;
 // render thread's commands, then the GPU - so no part looks fully busy, and the phone's governors keep the clocks low
 // (an S20 FE: GPU at 441 of 587 MHz, big cores capped at 1.75 GHz by Samsung's power policy): the overworld ran at 20
 // fps with room to spare everywhere. With root, a small shell script keeps the CPU caps lifted, the fastest core on
-// and the GPU at its top clock (also past the skin-temperature cap while the battery is under 45 C), re-applying every second (the system resets them), and puts everything back when the
-// game leaves the front (a marker file it watches). Needs root granted to the app (Magisk asks once). Off when the
+// and the GPU at its top clock (also past the skin-temperature cap while the battery is under 45 C), re-applying every
+// second (the system resets them), and puts everything back when the game leaves the front (a marker file it watches)
+// or its process ends (a crash, a kill). Needs root granted to the app (Magisk asks once). Off when the
 // phone has no su, or in the settings ("root_boost" in the "perf" preferences).
 final class RootBoost {
     private static final String TAG = "LASRecomp";
     private static final String SCRIPT =
-        "M=\"$1\"\n" +
+        "M=\"$1\"; PID=\"$2\"\n" +
         "g=/sys/class/kgsl/kgsl-3d0\n" +
         "c7=/sys/devices/system/cpu/cpu7/core_ctl/min_cpus\n" +
         "gmin=$(cat $g/devfreq/min_freq 2>/dev/null); gpl=$(cat $g/min_pwrlevel 2>/dev/null); cmin=$(cat $c7 2>/dev/null)\n" +
-        "while [ -f \"$M\" ]; do\n" +
+        "tpl=$(cat $g/thermal_pwrlevel 2>/dev/null); lim=$(cat /sys/power/cpufreq_max_limit 2>/dev/null)\n" +
+        "smax=\"\"; for p in /sys/devices/system/cpu/cpufreq/policy*; do smax=\"$smax $p:$(cat $p/scaling_max_freq 2>/dev/null)\"; done\n" +
+        // on while the game is in front (the marker) and alive (a crash or a kill skips onPause)
+        "while [ -f \"$M\" ] && kill -0 \"$PID\" 2>/dev/null; do\n" +
         "  echo -1 > /sys/power/cpufreq_max_limit 2>/dev/null\n" +
         "  for p in /sys/devices/system/cpu/cpufreq/policy*; do cat $p/cpuinfo_max_freq > $p/scaling_max_freq 2>/dev/null; done\n" +
         "  echo 1 > $c7 2>/dev/null\n" +
@@ -34,9 +38,13 @@ final class RootBoost {
         "  [ \"${bt:-999}\" -lt 450 ] && echo 0 > $g/thermal_pwrlevel 2>/dev/null\n" +
         "  sleep 1\n" +
         "done\n" +
+        // everything back as it was (the system adjusts the caps again from there)
         "[ -n \"$gmin\" ] && echo $gmin > $g/devfreq/min_freq 2>/dev/null\n" +
         "[ -n \"$gpl\" ] && echo $gpl > $g/min_pwrlevel 2>/dev/null\n" +
-        "[ -n \"$cmin\" ] && echo $cmin > $c7 2>/dev/null\n";
+        "[ -n \"$tpl\" ] && echo $tpl > $g/thermal_pwrlevel 2>/dev/null\n" +
+        "[ -n \"$cmin\" ] && echo $cmin > $c7 2>/dev/null\n" +
+        "for e in $smax; do echo ${e#*:} > ${e%%:*}/scaling_max_freq 2>/dev/null; done\n" +
+        "[ -n \"$lim\" ] && echo $lim > /sys/power/cpufreq_max_limit 2>/dev/null\n";
 
     private static Process sProc;
 
@@ -63,7 +71,8 @@ final class RootBoost {
             if (sProc != null && sProc.isAlive()) return;
             File script = new File(c.getFilesDir(), "root_boost.sh");
             try (FileOutputStream o = new FileOutputStream(script)) { o.write(SCRIPT.getBytes(StandardCharsets.UTF_8)); }
-            sProc = new ProcessBuilder("su", "-c", "sh " + script.getAbsolutePath() + " " + m.getAbsolutePath())
+            sProc = new ProcessBuilder("su", "-c", "sh " + script.getAbsolutePath() + " " + m.getAbsolutePath() + " "
+                                        + android.os.Process.myPid())
                         .redirectErrorStream(true).redirectOutput(new File(c.getFilesDir(), "root_boost.log")).start();
             Log.i(TAG, "[perf] root performance mode on");
         } catch (Exception e) {

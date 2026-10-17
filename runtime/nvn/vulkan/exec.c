@@ -70,6 +70,8 @@ static bool in_pass;
 static int g_fences = -1;
 static VkFence fence_ring[FENCE_N];
 static uint64_t fence_seq[FENCE_N];        // the submission each fence was last used for
+static _Atomic uint64_t fence_sent[FENCE_N];  // ... and when it went out (the watcher's GPU busy time)
+_Atomic uint64_t g_gpu_busy_ns;            // GPU busy time so far (fences: summed by the watcher; vk_gpu_frame_busy)
 static _Atomic uint64_t g_done_seq;        // fences: the last completed submission (the watcher's)
 static _Atomic bool g_fence_lost;
 static pthread_mutex_t done_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -92,6 +94,15 @@ static void *done_watcher(void *arg) {
         pthread_mutex_unlock(&done_lock);
         VkResult r = vkWaitForFences(g_vk.dev, 1, &fence_ring[next % FENCE_N], VK_TRUE, 1000000000ull);
         if (r == VK_TIMEOUT) continue;
+        if (r == VK_SUCCESS) {
+            // GPU busy: the queue runs submissions in order, so each one ran from when it went out or the one before
+            // it was done, whichever came later, until now (seen done: the watcher wakes late by a little)
+            static uint64_t last_done;
+            uint64_t now = SDL_GetTicksNS(), from = atomic_load(&fence_sent[next % FENCE_N]);
+            if (from < last_done) from = last_done;
+            if (from && now > from) atomic_fetch_add(&g_gpu_busy_ns, now - from);
+            last_done = now;
+        }
         pthread_mutex_lock(&done_lock);
         if (r == VK_SUCCESS) atomic_store(&g_done_seq, next);
         else atomic_store(&g_fence_lost, true);
@@ -141,9 +152,14 @@ static bool fence_wait_done(uint64_t seq, uint64_t timeout_ns) {
 // fences: the fence submission seq (about to go out) signals, free of older work
 static VkFence fence_for(uint64_t seq) {
     int i = (int)(seq % FENCE_N);
-    if (fence_seq[i]) fence_wait_done(fence_seq[i], 10ull * 1000000000ull);  // (the watcher is past it: safe to reset)
+    // (the watcher is past it: safe to reset - never while it may still be pending: a GPU 10 s late is a lost one)
+    if (fence_seq[i] && !fence_wait_done(fence_seq[i], 10ull * 1000000000ull)) {
+        vk_device_fault_report();
+        FATAL("submission %llu not done after 10 s (device lost)\n", (unsigned long long)fence_seq[i]);
+    }
     vkResetFences(g_vk.dev, 1, &fence_ring[i]);
     fence_seq[i] = seq;
+    atomic_store(&fence_sent[i], SDL_GetTicksNS());  // (just before the submission: close enough)
     return fence_ring[i];
 }
 
@@ -175,6 +191,7 @@ static void wait_account(uint64_t ns) {
 }
 
 static void cq_resolve_done(uint64_t done);
+extern __thread uint64_t g_blocked_ns;  // kernel.c: this thread's time blocked in waits / sleeps
 
 void vk_wait_seq(uint64_t seq) {
     if (!seq) { wait_why = NULL; return; }
@@ -187,6 +204,7 @@ void vk_wait_seq(uint64_t seq) {
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
     wait_account(SDL_GetTicksNS() - t0);
+    g_blocked_ns += SDL_GetTicksNS() - t0;  // (waiting for the GPU: idle for the frame pacer, as the game's own waits)
     if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
     else if (r == VK_SUCCESS) cq_resolve_done(seq);  // (the game reads its timing counters after waiting)
     else {
@@ -239,7 +257,8 @@ static int vk_counter_mode(void) {
 // kernel waits and sleeps: idle - the game waits for vsync through its own threads); when
 // frames don't fit 60 (12 of the last 60 over 16.2 ms), the counters report a frame of at least PACE_SLOW_NS: the game
 // takes its 30 fps mode, at full speed. Back to the real times after 2 s with headroom (busy under 13 ms on average,
-// at most 2 of the last 60 frames over). The game itself also tries 60 again now and then.
+// at most 2 of the last 60 frames over; twice as long after each try that didn't hold). The game itself also tries
+// 60 again now and then.
 // LARECOMP_PACE=0: off.
 #define PACE_SLOW_NS 20000000ull
 extern __thread uint64_t g_blocked_ns;  // kernel.c: this thread's time blocked in waits / sleeps
@@ -249,39 +268,60 @@ static uint64_t stat_pace_over;
 void vk_pace_frame(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_PACE"); on = !e || atoi(e) != 0; }
-    static uint64_t last, last_wait;
+    static uint64_t last, last_wait, last_gpu;
     static uint8_t over[60];
-    static int idx, nover, calm;
+    static int idx, nover, calm, backoff = 120;
     static double avg;  // busy ms, moving average (~20 frames)
-    uint64_t now = plat_now_ns(), w = g_blocked_ns;
-    uint64_t p = now - last, wt = w - last_wait;
+    uint64_t now = plat_now_ns(), w = g_blocked_ns, gb = atomic_load(&g_gpu_busy_ns);
+    uint64_t p = now - last, wt = w - last_wait, gpu = gb - last_gpu;
     bool first = !last;
-    last = now, last_wait = w;
+    last = now, last_wait = w, last_gpu = gb;
     if (first || p > 100000000ull) return;  // (loading, a hitch: not a pace)
     double busy = (p > wt ? p - wt : 0) / 1e6;
+    // with a render thread, the game's thread waits for it in its present (blocked time): its busy time counts too -
+    // otherwise a frame the render thread can't keep up with looks like headroom, the game takes its 60 fps mode and
+    // plays in slow motion until we're back in 30 (the mode flapping every few seconds). And the GPU's (fences: the
+    // watcher's sum), whose waits are blocked time for both threads
+    extern _Atomic uint64_t g_render_frame_busy_ns;
+    if (gt_on()) {
+        double rb = atomic_load(&g_render_frame_busy_ns) / 1e6;
+        if (rb > busy) busy = rb;
+    }
+    if (gpu && gpu / 1e6 > busy) busy = gpu / 1e6;
     avg = avg ? avg + (busy - avg) * 0.05 : busy;
-    plat_frame_work(p > wt ? p - wt : 0, pace_slow ? 33333333u : 16666667u);  // (phones: performance hints)
+    plat_frame_work((uint64_t)(busy * 1e6), pace_slow ? 33333333u : 16666667u);  // (phones: performance hints)
     static int log = -1;  // LARECOMP_LOG_PACE=1: each frame's period, vsync wait and busy time
     if (log < 0) log = getenv("LARECOMP_LOG_PACE") != NULL;
-    if (log) LOG("[pace] period %.2f blocked %.2f busy %.2f ms\n", p / 1e6, wt / 1e6, busy);
-    int o = busy > 16.2;
+    extern uint32_t g_game_interval;  // (runtime/hle/framepace.c)
+    if (log) LOG("[pace] period %.2f blocked %.2f gpu %.2f busy %.2f ms, interval %u\n", p / 1e6, wt / 1e6, gpu / 1e6, busy, g_game_interval);
+    // over: busy past a 60 fps frame - or, in the game's 60 fps mode, a frame that came late whatever held it up
+    int o = busy > 16.2 || (g_game_interval == 1 && p > 20000000ull);
     stat_pace_over += o;
     nover += o - over[idx];
     over[idx] = (uint8_t)o;
     idx = (idx + 1) % 60;
     if (!on) return;  // (measured and counted all the same: LARECOMP_LOG_PACE, the stats)
+    static uint64_t left_slow;  // (frames since we last left the 30 fps mode: a try at 60)
+    left_slow++;
     if (!pace_slow && nover >= 12) {
         pace_slow = true, calm = 0;
-        LOG("[pace] frames don't fit 60 fps (%d of the last 60 over 16.2 ms busy): the game's 30 fps mode\n", nover);
+        // back in 30 soon after a try at 60: it didn't fit - the next try waits twice as long (up to ~60 s), so the
+        // slow-motion frames of failed tries stay rare; a try that held for 10 s resets that
+        if (left_slow < 600) backoff = backoff * 2 > 3600 ? 3600 : backoff * 2;
+        else backoff = 120;
+        LOG("[pace] frames don't fit 60 fps (%d of the last 60 over): the game's 30 fps mode (next try at 60 after %d s)\n",
+            nover, backoff / 60);
     } else if (pace_slow) {
         // headroom: busy well under a 60 fps frame on average, hardly a frame over (single spikes are normal play)
         calm = avg < 13.0 && nover <= 2 ? calm + 1 : 0;
-        if (calm >= 120) {
-            pace_slow = false, nover = 0;
+        if (calm >= backoff) {
+            pace_slow = false, nover = 0, left_slow = 0;
             memset(over, 0, sizeof over);
-            LOG("[pace] 2 s with headroom: back to the game's own choice\n");
+            LOG("[pace] %d s with headroom: back to the game's own choice\n", backoff / 60);
         }
     }
+    extern volatile bool g_pace_slow;  // (runtime/hle/framepace.c: the game's tries at 60 declined meanwhile)
+    g_pace_slow = pace_slow;
 }
 
 // a pair's end counter (the 16 bytes after its start) is at least PACE_SLOW_NS after it while pace_slow
@@ -570,6 +610,7 @@ void renderer_flush(void) {
     renderer_submit();
     if (!wait_why) wait_why = "flush";
     vk_wait_seq(submit_seq);
+    vk_mirror_writeback();  // (what the GPU wrote, in guest memory: a buffer copy reads it next)
 }
 
 void renderer_sync(void) {
@@ -588,11 +629,26 @@ uint64_t renderer_fence_seq(void) {
     return q;
 }
 
+static void submit_upto(void *a) {  // (render thread) the work up to submission *a goes out, if it hasn't
+    pthread_mutex_lock(&seq_lock);
+    uint64_t s = submit_seq;
+    pthread_mutex_unlock(&seq_lock);
+    if (*(uint64_t *)a > s) renderer_submit();
+}
+
 void renderer_wait_seq(uint64_t seq) {
     if (!seq) return;
     pthread_mutex_lock(&seq_lock);
     uint64_t s = submit_seq;
     pthread_mutex_unlock(&seq_lock);
+    // With the render thread, a fence still in the submission being recorded: it goes out now, and the wait is the
+    // real one - the game rewrites what it thinks the GPU is done with (dynamic vertex data, copied at submit time)
+    if (seq > s && gt_on()) {
+        gt_call(submit_upto, &seq);
+        pthread_mutex_lock(&seq_lock);
+        s = submit_seq;
+        pthread_mutex_unlock(&seq_lock);
+    }
     wait_why = seq > s ? "SyncWait (fence not submitted yet)" : "SyncWait";
     vk_wait_seq(seq > s ? s : seq);  // not submitted yet (other thread): everything submitted so far
     vk_mirror_writeback();  // (what the GPU wrote, in guest memory before the game reads it)
@@ -1422,6 +1478,8 @@ typedef struct {
     VkDescriptorSetLayout set_layout[2];
     VkPipelineLayout layout;
     bool vs_uses_vid;
+    bool fs_hashed;     // fs_hash computed (draw_: the hash of its fragment code, fixed as the code is - see prog_tab)
+    uint64_t fs_hash;
     _Atomic int state;  // 0 building, 1 ready, 2 failed
 } Prog;
 
@@ -2117,9 +2175,28 @@ static VkDescriptorBufferInfo ubo_span(VkSpan s, uint64_t size) {
     return (VkDescriptorBufferInfo){s.buf, s.off, size > max ? max : size};
 }
 
+// Zeros for what isn't bound (constant buffers, vertex streams) and the
+// (0, 0, 0, 1) of unbound attributes: one buffer, never written again - fresh zero copies each draw cost a memcpy and,
+// at a new offset every time, a vertex buffer bind each.
+#define ZBUF_SIZE 0x10000ull  // [0, ZBUF_SIZE): zeros; then (0, 0, 0, 1) as floats
+static VkBuffer zbuf;
+static VmaAllocation zbuf_mem;
+static VkBuffer zero_buffer(void) {
+    if (zbuf) return zbuf;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = ZBUF_SIZE + 256,
+                             .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                  .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    VmaAllocationInfo info;
+    VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &zbuf, &zbuf_mem, &info));
+    memset(info.pMappedData, 0, ZBUF_SIZE + 256);
+    ((float *)((uint8_t *)info.pMappedData + ZBUF_SIZE))[3] = 1.0f;
+    vmaFlushAllocation(g_vk.vma, zbuf_mem, 0, VK_WHOLE_SIZE);
+    return zbuf;
+}
+
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
-    static const uint8_t zeros[0x10000];
     if (k == 0) {
         uint32_t drv[0x800 / 4] = {0};
         if (stage == 5) {
@@ -2152,7 +2229,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     int idx = k - 3;  // cbuf_base
     Range r = (idx >= 0 && idx < 18) ? st.ubuf[stage][idx] : (Range){0, 0};
     uint64_t size = si->cbuf_size[k] ? si->cbuf_size[k] : 256;
-    if (!r.addr) return ubo_span(vk_transient_copy(zeros, size, 256), size);
+    if (!r.addr) return ubo_span((VkSpan){zero_buffer(), 0, NULL}, size > ZBUF_SIZE ? ZBUF_SIZE : size);
     if ((si->cbuf_dynamic & (1u << k)) && r.size) size = r.size > 0x10000 ? 0x10000 : r.size;
     if (size > r.size && r.size) size = r.size;
     if (size < 16) size = 16;
@@ -2310,7 +2387,7 @@ static VkDescriptorBufferInfo gmem_info(void) {
         off = 1;
     }
     if (gmem_buf) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size};
-    static uint32_t zero[1024];
+    static uint32_t zero[1024];  // (fresh each time, not zero_buffer: a shader may store to it)
     VkSpan s = vk_transient_copy(zero, sizeof zero, 256);
     return (VkDescriptorBufferInfo){s.buf, s.off, sizeof zero};
 }
@@ -2494,8 +2571,18 @@ static void mirror_merge_locked(void) {
             vmaInvalidateAllocation(g_vk.vma, mir_mem, m->rb_off[k], n * 4);
             const uint32_t *gpu = (const uint32_t *)(mir_ptr + m->rb_off[k]), *was = (const uint32_t *)m->rb_base[k];
             uint32_t *guest = (uint32_t *)(uintptr_t)m->lo, *base = (uint32_t *)m->base;
+            // the newer readbacks of this slot started from an older base: what this one brings in is theirs too -
+            // otherwise they'd see these words as GPU changes again, undoing what the CPU wrote in between (the game
+            // resetting a list the GPU fills)
+            uint32_t *newer[MIR_RB];
+            int nn = 0;
+            for (int j = 0; j < MIR_RB; j++)
+                if (j != k && m->rb_seq[j] > m->rb_seq[k]) newer[nn++] = (uint32_t *)m->rb_base[j];
             for (uint64_t w = 0; w < n; w++)
-                if (gpu[w] != was[w]) guest[w] = base[w] = gpu[w];  // (a word the GPU changed)
+                if (gpu[w] != was[w]) {  // (a word the GPU changed)
+                    guest[w] = base[w] = gpu[w];
+                    for (int j = 0; j < nn; j++) newer[j][w] = gpu[w];
+                }
             m->rb_seq[k] = 0;
         }
     }
@@ -2675,7 +2762,8 @@ static void mirror_after_dispatch(VkCommandBuffer cb) {
 static bool mirror_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     if (!mir_buf) return false;
     bool hit = false;
-    pthread_mutex_lock(&mir_lock);
+    // (no lock: a slot's range and use change only on this thread - the one recording - and the merges elsewhere
+    // touch its readbacks and base alone)
     for (int k = 0; k < MIR_SLOTS && !hit; k++) {
         MirSlot *m = &mir_slot[k];
         if (m->used && m->lo <= addr && addr + size <= m->hi) {
@@ -2684,7 +2772,6 @@ static bool mirror_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
             hit = true;
         }
     }
-    pthread_mutex_unlock(&mir_lock);
     return hit;
 }
 
@@ -2912,7 +2999,7 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     static int copy = -1;
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < HEAP_BASE) return false;
-    if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
+    if (g_vk.host_import && addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
     if (!gmem_buf) return mirror_direct(addr, size, buf, off) || vcache_lookup(addr, size, buf, off);
     if (addr + size > HEAP_BASE + gmem_size) return false;
     if (vcache_lookup(addr, size, buf, off)) return true;
@@ -2946,6 +3033,17 @@ void vk_exec_reset(void) {
     vc_bytes = 0;
     if (vc_page_gpu) memset(vc_page_gpu, 0, HEAP_MAX / VC_PAGE);
     vc_epoch++;
+    if (mir_buf) {  // (the mirror: the old boot's slots and readbacks, not merged into the fresh heap; the GPU is idle)
+        pthread_mutex_lock(&mir_lock);
+        for (int i = 0; i < MIR_SLOTS; i++) {
+            free(mir_slot[i].base);
+            for (int j = 0; j < MIR_RB; j++) free(mir_slot[i].rb_base[j]);
+        }
+        memset(mir_slot, 0, sizeof mir_slot);
+        memset(mir_snap_memo, 0, sizeof mir_snap_memo);
+        mir_fh = mir_ft = 0, mir_head = 0, mir_nstored = 0;
+        pthread_mutex_unlock(&mir_lock);
+    }
     st_defaults();
 }
 
@@ -3138,6 +3236,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         uint64_t t0 = SDL_GetTicksNS();
         while (atomic_load(&cp->p.state) == 0) SDL_Delay(1);
         stat_wait_ns += SDL_GetTicksNS() - t0;
+        g_blocked_ns += SDL_GetTicksNS() - t0;  // (a first-time build: not the frame's own cost, for the pacer)
     }
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
     {   // LARECOMP_SKIP_CS=<code address hex> (debug): skip that compute shader's dispatches, to see what it does
@@ -3267,12 +3366,13 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
-        static uint64_t last_fs, last_hash;
+        // (once per program: 512 dependent steps, redone at every fragment shader change, were ~1 us a draw on phones)
         uint64_t fs = st.program->stages[1].code_addr;
-        if (fs != last_fs) {
-            last_fs = fs;
-            last_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0;
+        if (!pr->fs_hashed || pr->code[1] != fs) {
+            pr->fs_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0;
+            pr->fs_hashed = pr->code[1] == fs;
         }
+        uint64_t last_hash = pr->fs_hash;
         static uint64_t skip[16];
         static int nskip = -1;
         if (nskip < 0) {
@@ -3610,8 +3710,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (!(k.used_streams & (1u << s))) continue;
         VkSpan sp;
         if (s == ZERO_BINDING) {
-            static const float zero[4] = {0, 0, 0, 1};
-            sp = vk_transient_copy(zero, 16, 16);
+            sp = (VkSpan){zero_buffer(), ZBUF_SIZE, NULL};  // (0, 0, 0, 1)
         } else {
             Range v = st.vbuf[s];
             VkBuffer dbuf;
@@ -3634,7 +3733,7 @@ static void draw_(CmdRec *r, bool indexed) {
             else if (k.divisor[s]) need = ((uint64_t)base_inst + inst + k.divisor[s] - 1) / k.divisor[s] * stride + 256;
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
-            if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }
+            if (!v.addr) sp = (VkSpan){zero_buffer(), 0, NULL};
             else sp = guest_copy(v.addr, need ? need : 16);
         }
         VkDeviceSize off = sp.off;

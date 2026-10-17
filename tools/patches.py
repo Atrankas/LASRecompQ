@@ -346,6 +346,26 @@ def _frame_steps(gen, a):
 PATCHES[FRAME_STEPS_SITE] = _frame_steps
 
 
+# The game's frame-rate governor (same function): the next frame's swap interval, less one, is how many vsyncs the
+# last frame took (+0x81ac's count since the last), one fewer when its CPU time (x19 - x21) and GPU time (x24: its
+# counters) were both short - its try at 60 - clamped to [+0x4e2, +0x4e3]; stored here (+0x4e1, then +0x4e0). The
+# runtime sees each choice (runtime/hle/framepace.c rt_interval_choice): when our frames don't fit 60 whatever its
+# GPU counters say, its tries at 60 are frames in slow motion.
+INTERVAL_CHOICE_SITE = 0x700000cb24
+
+
+def _interval_choice(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
+    assert w == 0x391386e9, hex(w)  # strb w9, [x23, #0x4e1]
+    return ('{ extern uint32_t rt_interval_choice(uint32_t v, uint64_t obj, uint64_t gpu, uint64_t cpu); '
+            'c->x[9] = rt_interval_choice((uint32_t)c->x[9], c->x[23], c->x[24], c->x[19] - c->x[21]); '
+            'ST8(c->x[23] + 0x4e1ull, (uint32_t)c->x[9]); }'
+            f'  /* {a:#x}: strb w9, [x23, #0x4e1] (the next swap interval - 1: runtime/hle/framepace.c) */')
+
+
+PATCHES[INTERVAL_CHOICE_SITE] = _interval_choice
+
+
 # Digsanity (runtime/hle/digs.c): the shovel's dig commit (f_7000ddc530) spawns the hole actor (ObjHolesDug 0x1cd)
 # through f_7000d228d0(&out, transform x21, zone, &room, ...); right after it the hole (out at [sp+0x10]) and its
 # snapped tile-centre position (x21) tell the runtime which tile was dug - the first dig of a tile gives its item.

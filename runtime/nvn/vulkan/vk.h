@@ -95,6 +95,9 @@ typedef struct TexBackend {
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
+    uint16_t vslots[8];  // its views' slots in textures.c's view table (views_forget visits these, not the whole table)
+    uint8_t nvslots;
+    bool vslot_overflow;  // (more than 8 since the last forget: the whole table is searched)
 } TexBackend;
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)

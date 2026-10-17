@@ -55,10 +55,27 @@ static uint64_t base_size(void) {
     return g_base.size;
 }
 
+// pread into guest memory the OS writes: plat_commit first (runtime/platform.h). A write-tracking query on another
+// thread can protect a page again before or during the read (Android): the read stops there (EFAULT, or short) and
+// goes on from where it stopped, committed again.
+static ssize_t guest_pread(int fd, void *dst, size_t n, off_t off) {
+    size_t done = 0;
+    for (int faults = 0; done < n;) {
+        plat_commit((uint64_t)(uintptr_t)dst + done, n - done);
+        ssize_t r = pread(fd, (uint8_t *)dst + done, n - done, off + (off_t)done);
+        if (r < 0) {
+            if (errno != EFAULT || ++faults > 16) return done ? (ssize_t)done : -1;
+            continue;
+        }
+        if (r == 0) break;  // (end of file)
+        done += (size_t)r;
+    }
+    return (ssize_t)done;
+}
+
 // n bytes of the base image at off (past its end: zeros)
 static ssize_t base_pread(void *dst_, uint64_t n, uint64_t off) {
-    plat_commit((uint64_t)(uintptr_t)dst_, n);  // (guest memory the OS writes: runtime/platform.h)
-    if (g_base_fd >= 0) return pread(g_base_fd, dst_, n, (off_t)off);
+    if (g_base_fd >= 0) return guest_pread(g_base_fd, dst_, n, (off_t)off);
     uint8_t *dst = dst_;
     memset(dst, 0, n);
     uint64_t end = off + n;
@@ -81,8 +98,7 @@ static ssize_t base_pread(void *dst_, uint64_t n, uint64_t off) {
         uint64_t a = off > f->start ? off : f->start, b = end < f->start + f->size ? end : f->start + f->size;
         if (a >= b) continue;
         int fd = base_file_fd(i);
-        plat_commit((uint64_t)(uintptr_t)(dst + (a - off)), b - a);
-        if (fd <= 0 || pread(fd, dst + (a - off), b - a, (off_t)(a - f->start)) != (ssize_t)(b - a)) {
+        if (fd <= 0 || guest_pread(fd, dst + (a - off), b - a, (off_t)(a - f->start)) != (ssize_t)(b - a)) {
             pthread_mutex_unlock(&g_base_lock);
             LOG("[fs] can't read %s\n", f->path);
             return -1;
@@ -396,8 +412,7 @@ static ssize_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
                 memcpy(dst + done, ov[i].mem + in, (size_t)r);
             } else {
                 if (ov[i].fd < 0) ov[i].fd = open(ov[i].path, O_RDONLY);
-                plat_commit((uint64_t)(uintptr_t)(dst + done), n);
-                r = in < ov[i].size ? pread(ov[i].fd, dst + done, n < ov[i].size - in ? n : ov[i].size - in, (off_t)in) : 0;
+                r = in < ov[i].size ? guest_pread(ov[i].fd, dst + done, n < ov[i].size - in ? n : ov[i].size - in, (off_t)in) : 0;
             }
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
@@ -504,8 +519,7 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
         int64_t off = IN(int64_t, 8), size = IN(int64_t, 16);
         IpcBuf *b = out_buf(req, 0);
         if ((uint64_t)size > b->size) size = (int64_t)b->size;
-        plat_commit(b->addr, (uint64_t)size);
-        ssize_t n = pread(f->fd, (void *)(uintptr_t)b->addr, (size_t)size, off);
+        ssize_t n = guest_pread(f->fd, (void *)(uintptr_t)b->addr, (size_t)size, off);
         if (strstr(f->path, "savedata")) {
             LOG("[save] read %s off %lld size %lld -> guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)b->addr);
             extern void save_editor_file_read(const char *path, uint64_t addr, int64_t off, int64_t size);

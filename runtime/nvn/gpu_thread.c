@@ -39,6 +39,7 @@ static _Atomic int g_on = -1;
 static pthread_t g_thread;
 static _Atomic(pthread_t *) g_self;
 static uint64_t last_present;  // ticket of the last queued present (game side)
+_Atomic uint64_t g_render_frame_busy_ns;  // the render thread's busy time in its last frame (exec.c vk_pace_frame)
 
 extern __thread uint64_t g_blocked_ns;  // kernel.c: this thread's time blocked in waits (the pacing's busy time)
 void renderer_sync(void);
@@ -75,6 +76,7 @@ static void *gt_main(void *arg) {
     plat_thread_name("render");
     plat_thread_core(PLAT_CORE_RENDER);
     plat_crash_handler_install();
+    uint64_t busy = 0;
     pthread_mutex_lock(&mu);
     for (;;) {
         while (tail == head) {
@@ -84,7 +86,11 @@ static void *gt_main(void *arg) {
         idle = false;
         GtOp o = ring[tail % GT_N];
         pthread_mutex_unlock(&mu);
+        // busy: the op's time less this thread's waits (GPU fences, window images, the display), per frame
+        uint64_t t0 = plat_now_ns(), w0 = g_blocked_ns;
         run(&o);
+        busy += plat_now_ns() - t0 - (g_blocked_ns - w0);
+        if (o.op == OP_PRESENT) atomic_store(&g_render_frame_busy_ns, busy), busy = 0;
         pthread_mutex_lock(&mu);
         tail++;
         pthread_cond_broadcast(&cv_done);

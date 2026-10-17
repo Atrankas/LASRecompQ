@@ -42,9 +42,12 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     return true;
 }
 
+static void wt_forget(uint64_t lo, uint64_t hi);
 bool plat_reset_guest(uint64_t lo, uint64_t hi) {
-    return mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED,
-                -1, 0) == (void *)(uintptr_t)lo;
+    bool ok = mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED,
+                   -1, 0) == (void *)(uintptr_t)lo;
+    wt_forget(lo, hi);  // (fresh writable pages: none of them clean)
+    return ok;
 }
 
 
@@ -71,6 +74,13 @@ static bool wt_init(void) {
     return atomic_load(&wt_on) > 0;
 }
 
+static void wt_forget(uint64_t lo, uint64_t hi) {
+    if (atomic_load(&wt_on) <= 0 || hi <= HEAP_BASE || lo >= HEAP_BASE + HEAP_MAX) return;
+    uint64_t a = lo > HEAP_BASE ? (lo - HEAP_BASE) / WT_PAGE : 0, b = (hi - HEAP_BASE + WT_PAGE - 1) / WT_PAGE;
+    if (b > HEAP_MAX / WT_PAGE) b = HEAP_MAX / WT_PAGE;
+    for (uint64_t p = a; p < b; p++) atomic_store_explicit(&wt_state[p], WT_UNTRACKED, memory_order_relaxed);
+}
+
 static bool wt_range(uint64_t addr, uint64_t size, uint64_t *p0, uint64_t *p1) {
     if (!size || addr < HEAP_BASE || addr - HEAP_BASE >= HEAP_MAX) return false;
     uint64_t end = addr + size - HEAP_BASE;
@@ -83,32 +93,44 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
     *page = WT_PAGE;
     uint64_t p0, p1;
     if (!wt_init() || !wt_range(addr, size, &p0, &p1)) return -1;
+    // Clean pages are protected already: only the runs of written (or never asked about) pages are marked clean and
+    // protected again - clean first, then protected: a write in between lands before the copy. (The whole range each
+    // time cost an mprotect per texture check and vertex buffer, and a TLB flush with it.)
     int n = 0;
-    for (uint64_t p = p0; p < p1; p++) {  // (clean first, then protected: a write in between lands before the copy)
-        if (atomic_exchange(&wt_state[p], WT_CLEAN) == WT_CLEAN) continue;
-        if (n < max) pages[n] = HEAP_BASE + p * WT_PAGE;
-        n++;
+    uint64_t run = p1;  // (start of the current run of pages to protect)
+    for (uint64_t p = p0; p <= p1; p++) {
+        if (p < p1 && atomic_load_explicit(&wt_state[p], memory_order_relaxed) != WT_CLEAN &&
+            atomic_exchange(&wt_state[p], WT_CLEAN) != WT_CLEAN) {
+            if (n < max) pages[n] = HEAP_BASE + p * WT_PAGE;
+            n++;
+            if (run == p1) run = p;
+            continue;
+        }
+        if (run != p1) mprotect((void *)(uintptr_t)(HEAP_BASE + run * WT_PAGE), (p - run) * WT_PAGE, PROT_READ), run = p1;
     }
-    mprotect((void *)(uintptr_t)(HEAP_BASE + p0 * WT_PAGE), (p1 - p0) * WT_PAGE, PROT_READ);
     return n > max ? max : n;
 }
 
-// A write fault in the heap (the only faults there are ours): page written, writable again. Signal handler.
+// A write fault in the heap (the only faults there are ours): page writable again, then marked written - in that
+// order: marked first, a query in between could mark it clean and protect it before our mprotect opened it again,
+// leaving a writable page that counts as clean (its writes never seen). This way such a query either reports the page
+// (and the write faults once more after its protect) or finds it clean with our mark still to come. Signal handler.
 static bool wt_fault(uint64_t fa) {
     if (atomic_load(&wt_on) <= 0 || fa < HEAP_BASE || fa - HEAP_BASE >= HEAP_MAX) return false;
     uint64_t p = (fa - HEAP_BASE) / WT_PAGE;
+    if (mprotect((void *)(uintptr_t)(HEAP_BASE + p * WT_PAGE), WT_PAGE, PROT_READ | PROT_WRITE) != 0) return false;
     atomic_store(&wt_state[p], WT_WRITTEN);
-    return mprotect((void *)(uintptr_t)(HEAP_BASE + p * WT_PAGE), WT_PAGE, PROT_READ | PROT_WRITE) == 0;
+    return true;
 }
 
 // (the OS is about to write [addr, addr + size): a read-only page would make the call fail rather than fault)
 void plat_commit(uint64_t addr, uint64_t size) {
     uint64_t p0, p1;
     if (atomic_load(&wt_on) <= 0 || !wt_range(addr, size, &p0, &p1)) return;
-    bool any = false;
-    for (uint64_t p = p0; p < p1; p++)
-        if (atomic_exchange(&wt_state[p], WT_WRITTEN) == WT_CLEAN) any = true;
-    if (any) mprotect((void *)(uintptr_t)(HEAP_BASE + p0 * WT_PAGE), (p1 - p0) * WT_PAGE, PROT_READ | PROT_WRITE);
+    // writable first, then marked (as wt_fault); always (file reads: rare) - a page seen written here could be
+    // marked clean and protected by a query in between
+    mprotect((void *)(uintptr_t)(HEAP_BASE + p0 * WT_PAGE), (p1 - p0) * WT_PAGE, PROT_READ | PROT_WRITE);
+    for (uint64_t p = p0; p < p1; p++) atomic_store(&wt_state[p], WT_WRITTEN);
 }
 
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
@@ -298,8 +320,8 @@ void plat_terminate(void) { _exit(0); }
 void plat_thread_name(const char *name) { pthread_setname_np(pthread_self(), name); }
 
 // Phones have one or two fast cores (the S20 FE's Snapdragon 865: cpu7 at 2.84 GHz, cpu4-6 at 2.42, cpu0-3 small) and
-// the game runs on one thread: that one gets the fastest core to itself, the render thread the other big ones, the
-// game's other threads anything but the fastest. Cores by their top frequency. LARECOMP_AFFINITY=0: leave it to Android.
+// the game runs on one thread plus the render thread: those two get the big cores (see core_scan), the game's other
+// threads anything but the fastest. Cores by their top frequency. LARECOMP_AFFINITY=0: leave it to Android.
 static cpu_set_t g_core_sets[3];
 static bool g_core_on;
 
@@ -320,9 +342,10 @@ static void core_scan(void) {
     const char *e = getenv("LARECOMP_AFFINITY");
     if ((e && !strcmp(e, "0")) || ntop != 1 || !nsecond) return;  // (no single fastest core: nothing to do)
     for (int r = 0; r < 3; r++) CPU_ZERO(&g_core_sets[r]);
-    // LARECOMP_AFFINITY=render: the render thread gets the fastest core (when it is the busier one); =big: both on
-    // every big core, the scheduler choosing
-    int mode = e && !strcmp(e, "render") ? 1 : e && !strcmp(e, "big") ? 2 : 0;
+    // The render thread gets the fastest core (it's the busier one: the driver's work as well as ours - an S20 FE's
+    // dungeons got nearer 60 that way), the game's main thread the other big ones. LARECOMP_AFFINITY=main: the other
+    // way round; =big: both on every big core, the scheduler choosing
+    int mode = e && !strcmp(e, "main") ? 0 : e && !strcmp(e, "big") ? 2 : 1;
     for (int i = 0; i < n; i++) {
         bool fast = i == top, big = freq[i] == second;
         if (mode == 2 ? fast || big : mode == 1 ? big : fast) CPU_SET(i, &g_core_sets[PLAT_CORE_MAIN]);
@@ -330,8 +353,9 @@ static void core_scan(void) {
         if (i != top) CPU_SET(i, &g_core_sets[PLAT_CORE_OTHER]);
     }
     g_core_on = true;
-    fprintf(stderr, "[cpu] game thread on cpu%d (%ld MHz), render thread on the %d cores at %ld MHz\n", top, best / 1000,
-            nsecond, second / 1000);
+    fprintf(stderr, "[cpu] fastest core cpu%d (%ld MHz) for the %s thread, %d big cores (%ld MHz) for the %s\n", top,
+            best / 1000, mode == 0 ? "game's" : mode == 1 ? "render" : "game's and render", nsecond, second / 1000,
+            mode == 0 ? "render thread" : mode == 1 ? "game's" : "same");
 }
 
 // Performance hints (APerformanceHint, Android 13+, looked up at run time: the app starts on Android 11): one session
@@ -376,7 +400,7 @@ void plat_thread_core(int role) {
     if (sched_setaffinity(0, sizeof g_core_sets[role], &g_core_sets[role]) == 0) return;
     cpu_set_t big = g_core_sets[PLAT_CORE_RENDER];
     CPU_OR(&big, &big, &g_core_sets[PLAT_CORE_MAIN]);
-    if (role != PLAT_CORE_MAIN || sched_setaffinity(0, sizeof big, &big) != 0)
+    if (role == PLAT_CORE_OTHER || sched_setaffinity(0, sizeof big, &big) != 0)
         fprintf(stderr, "[cpu] affinity: %s\n", strerror(errno));
 }
 
