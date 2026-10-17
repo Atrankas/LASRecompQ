@@ -173,6 +173,19 @@ static bool format_supports(VkFormat f, VkFormatFeatureFlags want) {
 static float g_rs_x = 1, g_rs_y = 1;
 void renderer_get_scale(float *sx, float *sy) { *sx = g_rs_x; *sy = g_rs_y; }
 void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
+// The window's height (device.c): the game's full-HD pictures (its 1080-line UI and composite targets, 1.5x its 720p
+// 3D) aren't made taller than it - above it they cost GPU time and are only scaled back down. At 1080p on a 1080-line
+// screen they were 3600x1620 (eight passes, ~10 ms of the Field's GPU time); the 3D still gets the whole scale.
+static float g_display_h = 0;
+void renderer_set_display_height(float h) { g_display_h = h; }
+static void tex_scale(const NvnTexture *t, const TexBackend *b, float *sx, float *sy) {
+    *sx = b->scalable ? g_rs_x : 1, *sy = b->scalable ? g_rs_y : 1;
+    if (b->scalable && g_display_h > 0 && t->height >= 1000 && t->height * *sy > g_display_h * 1.01f) {
+        float f = g_display_h / (t->height * *sy);
+        if (f * *sy < 1) f = 1 / *sy;  // (never below the game's own size)
+        *sx *= f, *sy *= f;
+    }
+}
 uint64_t renderer_present_count(void);
 
 static bool tex_scalable(const NvnTexture *t) {
@@ -271,8 +284,7 @@ void vk_collect_dead(void) {
 
 static void create_image(NvnTexture *t, TexBackend *b) {
     VkFmt mf = fmt_of(t->format);
-    b->sx = b->scalable ? g_rs_x : 1;
-    b->sy = b->scalable ? g_rs_y : 1;
+    tex_scale(t, b, &b->sx, &b->sy);
     uint32_t tw = t->width ? t->width : 1, th = t->height ? t->height : 1;
     if (b->scalable) {
         tw = (uint32_t)lroundf(tw * b->sx); th = (uint32_t)lroundf(th * b->sy);
@@ -422,7 +434,9 @@ static void live_remove(TexBackend *b) {
 static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
-        if (b->scalable && (b->sx != g_rs_x || b->sy != g_rs_y)) {  // output resolution changed: reallocate
+        float wsx, wsy;
+        tex_scale(t, b, &wsx, &wsy);
+        if (b->scalable && (b->sx != wsx || b->sy != wsy)) {  // output resolution changed: reallocate
             destroy_image(b);
             create_image(t, b);
         }

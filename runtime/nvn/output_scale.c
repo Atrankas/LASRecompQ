@@ -22,19 +22,25 @@
 // overworld at native resolution takes 24 ms of GPU time a frame cool, 35 once its thermal limits set in) and judge
 // by the GPU's own time when the backend measures it (Vulkan with fences: the done watcher), raising again only with
 // clear room.
-#define DYN_MAX 1.0
 #ifdef __ANDROID__
+// Phones go up to the 3D at the window's own lines (1.5: the game's 720p 3D at 1080p) where the GPU has room - houses,
+// dungeons - and down to half of 1 where it hasn't. With frame generation on, the in-between frames' ~3 ms come out
+// of the budget so that it keeps running (vulkan/framegen.c pauses it over 36.5 ms a frame).
+#define DYN_MAX 1.5
 #define DYN_SLOW_MS 34.5   // (a 30 fps frame is 33.3 ms; one late frame is 50)
 #define DYN_SLOWER_MS 40.0
-#define DYN_GPU_SLOW 30.0
-#define DYN_GPU_ROOM 23.0  // (+0.05 near 1: ~10% more pixels)
+#define DYN_GPU_SLOW (fg_on() ? 27.0 : 30.0)
+#define DYN_GPU_ROOM (fg_on() ? 21.0 : 23.0)  // (+0.05 near 1: ~10% more pixels)
+extern bool fg_enabled(void);
+static bool fg_on(void) { return fg_enabled(); }
 #else
+#define DYN_MAX 1.0
 #define DYN_SLOW_MS 17.4
 #define DYN_SLOWER_MS 22.0
 #define DYN_GPU_SLOW 14.5
 #define DYN_GPU_ROOM 10.5
 #endif
-static double g_dyn = DYN_MAX;
+static double g_dyn = 1.0;  // (from the game's own size: up or down from there)
 static double g_dyn_gpu_sum, g_dyn_dt_sum, g_last_t;
 static int g_dyn_n, g_dyn_gpu_n, g_dyn_good;
 static double g_dyn_cool_until, g_dyn_probe_wait = 5.0, g_dyn_probe_at;
@@ -62,7 +68,11 @@ static void dyn_update(double now, double gpu_ms) {
         g_dyn_good++;
         // with GPU timing: raise when there is clear headroom; without (Vulkan): probe upwards now and then
         bool room = avg_gpu >= 0 ? avg_gpu < DYN_GPU_ROOM && g_dyn_good >= 4 : now >= g_dyn_probe_at && g_dyn_good >= 2 * (int)g_dyn_probe_wait;
-        if (room) { g_dyn = fmin(DYN_MAX, g_dyn + 0.05); g_dyn_good = 0; g_dyn_last_raise = now; g_dyn_probe_at = now + g_dyn_probe_wait; }
+        // the step by the room (GPU time grows with the pixels, the square of the factor): far under the budget, up
+        // to 0.2 at once - a house after the Field went from half to full in a minute 0.05 at a time
+        double step = 0.05;
+        if (avg_gpu > 0) step = fmax(0.05, fmin(0.2, g_dyn * (sqrt(DYN_GPU_ROOM / avg_gpu) - 1)));
+        if (room) { g_dyn = fmin(DYN_MAX, g_dyn + step); g_dyn_good = 0; g_dyn_last_raise = now; g_dyn_probe_at = now + g_dyn_probe_wait; }
     }
     g_dyn = round(g_dyn * 20) / 20;
     if (g_dyn != prev) {

@@ -282,7 +282,13 @@ void menu_apply_window_requests(void *win) {
     g_pixel_density = SDL_GetWindowPixelDensity(w);
     SDL_GetWindowSizeInPixels(w, &g_win_px_w, &g_win_px_h);
     static bool text_input;
+#ifdef __ANDROID__
+    // phones: text input shows the on-screen keyboard - only while a text field has the focus, not the whole time
+    // the menu is open (opening Settings brought the keyboard up)
+    bool want_text = capturing() && g_text_busy.load();
+#else
     bool want_text = capturing();
+#endif
     if (want_text != text_input) {
         if (want_text) SDL_StartTextInput(w);
         else SDL_StopTextInput(w);
@@ -308,6 +314,14 @@ static int g_focus_frames;
 // later on the tab that's selected
 void menu_tabs_focus(bool first_tab) { g_focus_tab = first_tab ? -1 : -100, g_focus_frames = 0; }
 int g_tab_request_ext = -1;
+
+// Phones: the menu a third larger than on a 1080-line monitor (a 6.5" screen held at arm's length: rows to touch, text
+// to read), its fonts built at that size (sharp, not scaled up)
+#ifdef __ANDROID__
+static const float kUi = 1.35f;
+#else
+static const float kUi = 1.0f;
+#endif
 
 static void style_init(void) {
     ImGuiStyle &s = ImGui::GetStyle();
@@ -372,8 +386,8 @@ static void init(void) {
     char baloo[1024];
     if (const char *f = getenv("LARECOMP_MENU_FONT")) strlcpy(baloo, f, sizeof baloo);  // (test) another weight / face
     if (getenv("LARECOMP_MENU_FONT") || rt_resource("Baloo2-SemiBold.ttf", "third_party/fonts/Baloo2/Baloo2-SemiBold.ttf", baloo, sizeof baloo)) {
-        g_menu_font = io.Fonts->AddFontFromFileTTF(baloo, 39, &cfg);
-        g_menu_font_big = io.Fonts->AddFontFromFileTTF(baloo, 72, &cfg);
+        g_menu_font = io.Fonts->AddFontFromFileTTF(baloo, 39 * kUi, &cfg);
+        g_menu_font_big = io.Fonts->AddFontFromFileTTF(baloo, 72 * kUi, &cfg);
     }
     if (!g_font) g_font = io.Fonts->AddFontDefault();
     if (!g_font_big) g_font_big = g_font;
@@ -982,7 +996,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     if (style_scale < 0) base = ImGui::GetStyle();
     if (fabsf(style_scale - scale) > 0.01f) {
         ImGui::GetStyle() = base;
-        ImGui::GetStyle().ScaleAllSizes(scale);
+        ImGui::GetStyle().ScaleAllSizes(scale * kUi);
         style_scale = scale;
     }
 #ifdef __APPLE__
@@ -1012,6 +1026,9 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         // dim the game behind the menu
         ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 110));
         float w = fminf(io.DisplaySize.x * 0.9f, 1500 * scale), h = io.DisplaySize.y - 2 * 18 * scale;  // (all the height: a slim margin)
+#ifdef __ANDROID__
+        w = io.DisplaySize.x - 2 * 24 * scale;  // (phones: the whole screen, as the WWHD port's settings)
+#endif
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
         ImGui::Begin("##menu", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);

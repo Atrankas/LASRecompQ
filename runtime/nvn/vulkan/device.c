@@ -44,7 +44,8 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
 // that instance: the window surface is then made here (create_surface). Anything failing: the system driver, logged.
 static bool custom_driver_on;
 static char driver_probe[512];  // GpuDrivers' marker: removed once the driver has presented a few frames
-static char driver_failed[256];  // the installed driver that didn't start (this time or last time), for the settings
+static char driver_failed[256];
+bool g_vk_shader_stats;  // (exec.c build_pipeline)  // the installed driver that didn't start (this time or last time), for the settings
 
 // The settings' GPU driver rows (runtime/ui/menu.mm): whether the installed driver runs; failed: one that didn't start
 bool vk_gpu_driver_custom(const char **failed) {
@@ -421,6 +422,9 @@ static void create_device(void) {
     g_fault_ext = fault;
     g_budget_ext = has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);  // (real per-heap budgets: vk_log_memory)
     if (g_budget_ext) ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+    // LARECOMP_VK_SHADER_STATS=1: the driver's statistics of each pipeline's shaders (registers, instructions, spills)
+    g_vk_shader_stats = getenv("LARECOMP_VK_SHADER_STATS") && has_ext(ep, ne, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+    if (g_vk_shader_stats) ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
 #ifdef __linux__
     // the guest heap as driver memory mapped at HEAP_BASE (exec.c backend_guest_heap_prepare)
     g_vk.dmabuf = has_ext(ep, ne, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
@@ -464,6 +468,10 @@ static void create_device(void) {
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pef = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, .pipelineExecutableInfo = VK_TRUE,
+        .pNext = f.pNext};
+    if (g_vk_shader_stats) f.pNext = &pef;
     core_features(&f.features, &have.features);
 #ifdef VK_NO_PROTOTYPES
     {   // phones: one feature the driver lacks fails the whole device - enable what it has, log what it lacks
@@ -489,6 +497,8 @@ static void create_device(void) {
             const char *e = getenv("LARECOMP_HALF_NATIVE");
             if (h12.shaderFloat16 && (!e || atoi(e))) f12.shaderFloat16 = VK_TRUE, maxwell_half_native = 1;
             maxwell_precise_pos = 0;  // (translate.c: the Adreno compiler without precise)
+            const char *sc = getenv("LARECOMP_VK_SCALAR_CBUF");  // run-time indexed cbufs as words (translate.c)
+            maxwell_scalar_cbuf = h12.scalarBlockLayout && (!sc || atoi(sc));
         }
 #endif
         if (!h13.robustImageAccess) LOG("[vk] driver lacks robustImageAccess\n");
@@ -1000,6 +1010,9 @@ void backend_present_gpu(NvnTexture *t) {
     vk_end_pass();
     static const float black[4] = {0, 0, 0, 1};
     wait_foreground();
+    // the frame's own work goes out first: the presentation's submission waits for a window image (FIFO: up to a
+    // refresh), and work in it would wait with it
+    renderer_submit();
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
     uint64_t nd = SDL_GetTicksNS() - t0;
@@ -1029,6 +1042,8 @@ void backend_present_gpu(NvnTexture *t) {
         widescreen_present_crop(total_frames, shape, crop, &vx, &vy, &vw, &vh);
         widescreen_set_factor((float)shape);
         renderer_set_scale((float)sx, (float)sy);
+        extern void renderer_set_display_height(float h);
+        renderer_set_display_height((float)vh);  // (the game picture's height in the window)
         VkCommandBuffer cb = vk_cmd();
         float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
         memcpy(g_shot_crop, crop, sizeof crop);

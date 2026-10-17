@@ -1494,6 +1494,15 @@ static id<MTLBuffer> expand_indices(uint32_t mode, uint32_t count, const void *i
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     static uint64_t dump_fs = 1;
     if (dump_fs == 1) { const char *e = getenv("LARECOMP_DUMP_UBO"); dump_fs = e ? strtoull(e, NULL, 16) : 0; }
+    if (dump_fs && st.program && st.program->stages[1].code_addr == dump_fs && st.sbuf[1][0].addr && st.sbuf[1][1].addr) {
+        // (the light lists: tiles' entries in use, a test of the culling)
+        const uint32_t *l = (const uint32_t *)(uintptr_t)st.sbuf[1][0].addr, *t = (const uint32_t *)(uintptr_t)st.sbuf[1][1].addr;
+        uint64_t used = 0, nt = st.sbuf[1][1].size / 4, mx = 0;
+        for (uint64_t k = 0; k < st.sbuf[1][0].size / 4; k++) used += l[k] != 0xffffffffu;
+        for (uint64_t k = 0; k < nt; k++) if (t[k] > mx) mx = t[k];
+        LOG("[lights] list words in use %llu of %llu, tile table %llu entries, max %llu\n", (unsigned long long)used,
+            (unsigned long long)(st.sbuf[1][0].size / 4), (unsigned long long)nt, (unsigned long long)mx);
+    }
     if (dump_fs && st.program && st.program->stages[1].code_addr == dump_fs) {
         for (int i = 0; i < 18; i++) {
             if (!st.ubuf[1][i].addr) continue;

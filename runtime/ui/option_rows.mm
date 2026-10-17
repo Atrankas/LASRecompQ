@@ -16,6 +16,13 @@ static std::string g_desc_hover, g_desc_focus, g_desc_shown;  // this frame's ho
 static std::string g_desc_first;  // the page's first row (shown until a row is selected or hovered)
 
 static const ImU32 kGold = IM_COL32(236, 194, 84, 255);
+// Phones: one column of cards, as the WWHD port's settings - the name, its description under it, the value with its
+// arrows on the right - instead of rows with the description in a pane beside them (small to read and to touch)
+#ifdef __ANDROID__
+static const bool g_cards = true;
+#else
+static const bool g_cards = false;
+#endif
 static bool g_next_disabled;
 void opt_disable_next(void) { g_next_disabled = true; }
 static int g_indent;
@@ -33,8 +40,8 @@ void opt_begin(const char *id, float scale) {
     g_desc_hover.clear(), g_desc_focus.clear();
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImGui::PushID(id);
-    ImGui::BeginChild("##rows", ImVec2(avail.x * 0.48f, avail.y), ImGuiChildFlags_None, ImGuiWindowFlags_NavFlattened);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 4 * scale));  // (rows close)
+    ImGui::BeginChild("##rows", ImVec2(g_cards ? avail.x : avail.x * 0.48f, avail.y), ImGuiChildFlags_None, ImGuiWindowFlags_NavFlattened);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, (g_cards ? 10 : 4) * scale));  // (rows close)
     g_desc_first.clear();
 }
 
@@ -53,6 +60,12 @@ static int row(const char *label, const std::string &value, bool changed, const 
     if (g_indent) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + g_indent * 28 * g_scale);  // (an option of the row above)
     ImVec2 p = ImGui::GetCursorScreenPos();
     float w = ImGui::GetContentRegionAvail().x, h = ImGui::GetFontSize() * 1.9f;
+    // cards: the description under the name, wrapped beside the value (its width: up to 40% of the card)
+    float dscale = 0.86f, vwmax = w * 0.38f, desc_w = w - vwmax - 40 * g_scale, desc_h = 0;
+    if (g_cards) {
+        if (desc && *desc) desc_h = ImGui::CalcTextSize(desc, NULL, false, desc_w / dscale).y * dscale;
+        h = ImGui::GetFontSize() * 1.25f + desc_h + 28 * g_scale;
+    }
     ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));  // (the row's own border shows the selection)
     bool clicked = ImGui::InvisibleButton("##row", ImVec2(w, h), ImGuiButtonFlags_EnableNav);
     ImGui::PopStyleColor();
@@ -92,14 +105,22 @@ static int row(const char *label, const std::string &value, bool changed, const 
                                                         : IM_COL32(255, 255, 255, off ? 18 : 38), r, 0,
                 hov || foc ? 2.0f : 1.0f);
     std::string t = label;
-    if (upper)
+    if (upper && !g_cards)
         for (char &c : t) c = (char)toupper((unsigned char)c);
     float ty = p.y + (h - fs) * 0.5f;
     ImU32 label_col = off ? IM_COL32(110, 110, 102, 255) : IM_COL32(240, 236, 224, 255);  // (greyed out: clearly dim)
-    dl->AddText(ImVec2(p.x + pad, ty), label_col, t.c_str());
+    if (g_cards) {
+        float top = p.y + 14 * g_scale;
+        dl->AddText(ImVec2(p.x + pad, top), label_col, t.c_str());
+        if (desc_h > 0)
+            dl->AddText(ImGui::GetFont(), fs * dscale, ImVec2(p.x + pad, top + fs * 1.15f), off ? IM_COL32(100, 100, 94, 255)
+                        : IM_COL32(178, 180, 168, 255), desc, NULL, desc_w);
+    } else {
+        dl->AddText(ImVec2(p.x + pad, ty), label_col, t.c_str());
+    }
     float right = p.x + w - pad;  // (the value's right edge)
     if (arrows && !value.empty()) {  // ◀ value ▶, drawn (the fonts have no arrow glyphs); a click on one steps
-        float aw = fs * 0.42f, gap = fs * 0.55f, cy = ty + fs * 0.52f;
+        float aw = fs * (g_cards ? 0.6f : 0.42f), gap = fs * 0.55f, cy = ty + fs * 0.52f;
         float rx = right - aw, lx = rx - gap - ImGui::CalcTextSize(value.c_str()).x - gap - aw;
         ImU32 ac = off ? IM_COL32(110, 110, 100, 255) : hov || foc ? kGold : IM_COL32(170, 170, 160, 255);
         dl->AddTriangleFilled(ImVec2(lx, cy), ImVec2(lx + aw, cy - aw * 0.75f), ImVec2(lx + aw, cy + aw * 0.75f), ac);
@@ -207,6 +228,7 @@ void opt_end(void) {
     ImGui::PopStyleVar();
     if (const char *t = getenv("LARECOMP_OPT_SCROLL")) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(t));  // (test)
     ImGui::EndChild();
+    if (g_cards) { ImGui::PopID(); return; }  // (descriptions in the cards: no pane)
     // the description: the hovered row (mouse) wins, else the selected one (controller), else the last shown
     if (!g_desc_hover.empty()) g_desc_shown = g_desc_hover;
     else if (!g_desc_focus.empty()) g_desc_shown = g_desc_focus;

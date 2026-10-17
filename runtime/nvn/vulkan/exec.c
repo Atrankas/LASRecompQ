@@ -72,6 +72,7 @@ static int g_fences = -1;
 static VkFence fence_ring[FENCE_N];
 static uint64_t fence_seq[FENCE_N];        // the submission each fence was last used for
 static _Atomic uint64_t fence_sent[FENCE_N];  // ... and when it went out (the watcher's GPU busy time)
+static _Atomic bool fence_present[FENCE_N];   // ... a presentation's (waits for a window image: not the game's GPU time)
 _Atomic uint64_t g_gpu_busy_ns;            // GPU busy time so far (fences: summed by the watcher; vk_gpu_frame_busy)
 static _Atomic uint64_t g_done_seq;        // fences: the last completed submission (the watcher's)
 static _Atomic bool g_fence_lost;
@@ -101,7 +102,7 @@ static void *done_watcher(void *arg) {
             static uint64_t last_done;
             uint64_t now = SDL_GetTicksNS(), from = atomic_load(&fence_sent[next % FENCE_N]);
             if (from < last_done) from = last_done;
-            if (from && now > from) atomic_fetch_add(&g_gpu_busy_ns, now - from);
+            if (from && now > from && !atomic_load(&fence_present[next % FENCE_N])) atomic_fetch_add(&g_gpu_busy_ns, now - from);
             last_done = now;
         }
         pthread_mutex_lock(&done_lock);
@@ -581,6 +582,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
                                      .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT}};
     bool fenced = fences_on();
     VkFence fence = fenced ? fence_for(submit_seq + 1) : VK_NULL_HANDLE;
+    if (fenced) atomic_store(&fence_present[(submit_seq + 1) % FENCE_N], wait != VK_NULL_HANDLE);
     VkSemaphoreSubmitInfo wt = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = wait,
                                 .stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT};
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = (uint32_t)n, .pCommandBufferInfos = cbs,
@@ -2101,8 +2103,34 @@ static void build_pipeline(void *arg) {
                                        .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = k->prog->layout};
+    extern bool g_vk_shader_stats;
+    if (g_vk_shader_stats) pi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pp->pipe);
     atomic_fetch_add(&g_pipes_built, 1);
+    if (g_vk_shader_stats && r == VK_SUCCESS) {  // (LARECOMP_VK_SHADER_STATS: the driver's view of each stage)
+        VkPipelineInfoKHR pinfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR, .pipeline = pp->pipe};
+        uint32_t ne = 0;
+        VkPipelineExecutablePropertiesKHR props[4];
+        for (int i = 0; i < 4; i++) props[i] = (VkPipelineExecutablePropertiesKHR){.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR};
+        vkGetPipelineExecutablePropertiesKHR(g_vk.dev, &pinfo, &ne, NULL);
+        if (ne > 4) ne = 4;
+        vkGetPipelineExecutablePropertiesKHR(g_vk.dev, &pinfo, &ne, props);
+        for (uint32_t e = 0; e < ne; e++) {
+            VkPipelineExecutableInfoKHR ei = {.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR, .pipeline = pp->pipe, .executableIndex = e};
+            VkPipelineExecutableStatisticKHR stv[32];
+            uint32_t ns = 32;
+            for (int i = 0; i < 32; i++) stv[i] = (VkPipelineExecutableStatisticKHR){.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR};
+            if (vkGetPipelineExecutableStatisticsKHR(g_vk.dev, &ei, &ns, stv) < 0) continue;
+            char line[1024];
+            int o = snprintf(line, sizeof line, "[stats] %s %llx:", props[e].name,
+                             (unsigned long long)(props[e].stages & VK_SHADER_STAGE_FRAGMENT_BIT ? k->prog->code[1] : k->prog->code[0]));
+            for (uint32_t i = 0; i < ns && o < (int)sizeof line - 64; i++) {
+                if (stv[i].format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR)
+                    o += snprintf(line + o, sizeof line - o, " %s=%llu", stv[i].name, (unsigned long long)stv[i].value.u64);
+            }
+            LOG("%s\n", line);
+        }
+    }
     if (r != VK_SUCCESS) {
         static int n;
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
@@ -3878,6 +3906,15 @@ static void draw_(CmdRec *r, bool indexed) {
         {   // LARECOMP_DUMP_UBO=<fs code addr hex> (as renderer.m): that shader's uniform buffers in the debug frame
             static uint64_t dump_fs = 1;
             if (dump_fs == 1) { const char *e = getenv("LARECOMP_DUMP_UBO"); dump_fs = e ? strtoull(e, NULL, 16) : 0; }
+    if (g_debug_frame && dump_fs && fs == dump_fs && st.sbuf[1][0].addr && st.sbuf[1][1].addr) {
+        // (the light lists: tiles' entries in use, a test of the culling)
+        const uint32_t *l = (const uint32_t *)(uintptr_t)st.sbuf[1][0].addr, *t = (const uint32_t *)(uintptr_t)st.sbuf[1][1].addr;
+        uint64_t used = 0, nt = st.sbuf[1][1].size / 4, mx = 0;
+        for (uint64_t k = 0; k < st.sbuf[1][0].size / 4; k++) used += l[k] != 0xffffffffu;
+        for (uint64_t k = 0; k < nt; k++) if (t[k] > mx) mx = t[k];
+        LOG("[lights] list words in use %llu of %llu, tile table %llu entries, max %llu\n", (unsigned long long)used,
+            (unsigned long long)(st.sbuf[1][0].size / 4), (unsigned long long)nt, (unsigned long long)mx);
+    }
             if (g_debug_frame && dump_fs && fs == dump_fs)
                 for (int i = 0; i < 18; i++) {
                     if (!st.ubuf[1][i].addr) continue;

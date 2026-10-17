@@ -17,6 +17,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,6 +29,7 @@ int maxwell_h2f_bits = 1;
 int maxwell_gmem_mirror;
 int maxwell_half_native;
 int maxwell_precise_pos = 1;
+int maxwell_scalar_cbuf;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -2193,6 +2195,42 @@ static const char *glsl_sampler_type(const ShaderTexture *t) {
     return names[ty][t->shadow ? 1 : 0];
 }
 
+// A cbuf indexed at run time, as words (maxwell_scalar_cbuf): cbN[a][b] -> cbN_s[(a) * 4u + (b)], cbr(cbN, o) -> cbrs(cbN_s, o).
+// Each load is then one word: as uvec4 rows a light loop's dozen loads per light took four registers each (the
+// driver hoists loads), and the lit shaders ran at two waves per core - latency-bound on a phone GPU.
+static char *scalar_cbuf_rewrite(const char *src, int idx) {
+    char name[8], cbrn[16];
+    snprintf(name, sizeof name, "cb%d", idx);
+    snprintf(cbrn, sizeof cbrn, "cbr(cb%d,", idx);
+    size_t nl = strlen(name), cl = strlen(cbrn);
+    Str o = {0};
+    for (const char *p = src; *p;) {
+        bool word = p == src || !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
+        if (word && !strncmp(p, cbrn, cl)) { sp(&o, "cbrs(cb%d_s,", idx); p += cl; continue; }
+        if (word && !strncmp(p, name, nl) && p[nl] == '[') {
+            // two bracketed indices (each balanced)
+            const char *q = p + nl, *a0, *a1, *b0, *b1;
+            int d = 0;
+            a0 = q + 1;
+            for (; *q; q++) { if (*q == '[') d++; else if (*q == ']' && --d == 0) break; }
+            if (!*q || q[1] != '[') { sp(&o, "%c", *p++); continue; }
+            a1 = q, b0 = q + 2, q++;
+            d = 0;
+            for (; *q; q++) { if (*q == '[') d++; else if (*q == ']' && --d == 0) break; }
+            if (!*q) { sp(&o, "%c", *p++); continue; }
+            b1 = q;
+            sp(&o, "cb%d_s[(%.*s) * 4u + (%.*s)]", idx, (int)(a1 - a0), a0, (int)(b1 - b0), b0);
+            p = q + 1;
+            continue;
+        }
+        const char *n = p + 1;
+        while (*n && *n != 'c') n++;  // (copy up to the next possible 'cb')
+        sp(&o, "%.*s", (int)(n - p), p);
+        p = n;
+    }
+    return o.buf ? o.buf : strdup("");
+}
+
 // Declarations + entry point around the (rewritten) body; mirrors the MSL assembly in maxwell_translate.
 static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     ShaderInfo *info = c->info;
@@ -2211,6 +2249,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         const char *rest = strchr(glsl_prelude, '\n') + 1;  // (after #version: the fp16 extension goes first)
         sp(&s, "%.*s", (int)(rest - glsl_prelude), glsl_prelude);
         if (maxwell_half_native) sp(&s, "#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require\n");
+        if (maxwell_scalar_cbuf && info->cbuf_dynamic) sp(&s, "#extension GL_EXT_scalar_block_layout : require\n");
         static int exact = -1;
         if (exact < 0) exact = getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0;
         bool bits = exact || (maxwell_h2f_bits && stage != STAGE_FRAGMENT && stage != STAGE_COMPUTE);
@@ -2234,8 +2273,16 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (c->cbuf_need[i] > n) n = c->cbuf_need[i];
         if ((info->cbuf_dynamic & (1u << i)) && n < 4096) n = 4096;
         if (!n) n = 1;
+        if (maxwell_scalar_cbuf && (info->cbuf_dynamic & (1u << i))) {
+            sp(&s, "layout(scalar, set = %d, binding = %d) uniform CB%d { uint cb%d_s[%u]; };\n", set, i, i, i, n * 4);
+            char *nb = scalar_cbuf_rewrite(body.buf ? body.buf : "", i);
+            free(body.buf);
+            body.buf = nb, body.len = strlen(nb), body.cap = body.len + 1;
+            continue;
+        }
         sp(&s, "layout(std140, set = %d, binding = %d) uniform CB%d { uvec4 cb%d[%u]; };\n", set, i, i, i, n);
     }
+    if (maxwell_scalar_cbuf && info->cbuf_dynamic) sp(&s, "#define cbrs(cb, off) cb[min((off) >> 2, uint(cb.length() - 1))]\n");
     if (info->uses_gmem && !maxwell_gmem_chunk_shift) {
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");

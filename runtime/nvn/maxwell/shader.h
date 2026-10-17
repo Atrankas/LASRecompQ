@@ -100,6 +100,8 @@ extern int maxwell_gmem_mirror;
 extern int maxwell_half_native;
 // 1: GLSL vertex positions precise as well as invariant (0 on phones: invariant alone; translate.c)
 extern int maxwell_precise_pos;
+// 1: run-time indexed cbufs as word arrays (scalar block layout; translate.c scalar_cbuf_rewrite)
+extern int maxwell_scalar_cbuf;
 // (GLSL / Vulkan) A GPU whose storage buffers can't span the heap (maxStorageBufferRange: 1 GB on Intel, issue #8)
 // gets it as chunks of 1 << maxwell_gmem_chunk_shift bytes, one buffer each - chunk 0 at GMEM_BUFFER_INDEX, chunk k
 // at GMEM_CHUNK_BINDING + k - 1 - and shaders pick the chunk from the address. 0: one buffer, as before.

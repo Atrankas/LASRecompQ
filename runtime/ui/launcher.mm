@@ -1359,6 +1359,11 @@ extern "C" void launcher_run(const char *root) {
                 // the in-game menu's tabs (runtime/ui/menu.mm), in a window like the in-game one; tabs that need a
                 // loaded game say so
                 float sc = ds.y / 1080.0f, w = fminf(ds.x * 0.9f, 1500 * sc), h = ds.y - 2 * 18 * sc;  // (all the height: a slim margin)
+#ifdef __ANDROID__
+                // phones: the whole screen and a third larger (as the in-game menu there: runtime/ui/menu.mm kUi)
+                w = ds.x - 2 * 24 * sc, sc *= 1.35f;
+                ImGui::GetIO().FontGlobalScale *= 1.35f;
+#endif
                 ImGui::GetWindowDrawList()->AddRectFilled(ImGui::GetWindowPos(), ImVec2(ImGui::GetWindowPos().x + ds.x,
                                                           ImGui::GetWindowPos().y + ds.y), IM_COL32(0, 0, 0, 110));
                 ImVec2 wp = ImGui::GetWindowPos();
