@@ -2647,7 +2647,7 @@ static void gfast_finish(VkCommandBuffer cb) {
 //    area whose words the GPU changed go to guest memory once that submission is done (mirror_merge).
 #define MIR_SIZE (64ull << 20)
 #define MIR_SNAP (48ull << 20)  // [0, MIR_SNAP): snapshot ring; the rest: slots
-#define MIR_SLOTS 64
+#define MIR_SLOTS 128
 #define MIR_FIFO 4096
 static VkBuffer mir_buf;
 static VmaAllocation mir_mem;
@@ -2750,20 +2750,34 @@ void vk_mirror_writeback(void) {
     pthread_mutex_unlock(&mir_lock);
 }
 
-// A slot region (its copy + MIR_RB readback areas): first fit among slots; ones unused for a while are dropped
-static uint64_t mirror_slot_alloc(uint64_t size) {
-    size = (uint64_t)(MIR_RB + 1) * ((size + 255) & ~255ull);
-    uint64_t done = vk_completed_seq(), pending = vk_pending_seq();
+// Slots unused since before submission `before` (or the least recently used idle one, lru) are dropped
+static bool mirror_slot_idle(const MirSlot *m, uint64_t done) {
+    bool busy = m->last_use > done;
+    for (int j = 0; j < MIR_RB; j++) busy |= m->rb_seq[j] != 0;
+    return m->used && !busy;
+}
+static void mirror_slot_drop(MirSlot *m) {
+    free(m->base);
+    for (int j = 0; j < MIR_RB; j++) free(m->rb_base[j]);
+    memset(m, 0, sizeof *m);
+}
+static bool mirror_slot_reclaim(uint64_t before, bool lru) {
+    uint64_t done = vk_completed_seq();
+    MirSlot *oldest = NULL;
+    bool any = false;
     for (int i = 0; i < MIR_SLOTS; i++) {
         MirSlot *m = &mir_slot[i];
-        bool busy = m->last_use > done;
-        for (int j = 0; j < MIR_RB; j++) busy |= m->rb_seq[j] != 0;
-        if (m->used && !busy && m->last_use + 600 < pending) {  // (~10 s unused: a level's buffers, gone)
-            free(m->base);
-            for (int j = 0; j < MIR_RB; j++) free(m->rb_base[j]);
-            memset(m, 0, sizeof *m);
-        }
+        if (!mirror_slot_idle(m, done)) continue;
+        if (m->last_use < before) mirror_slot_drop(m), any = true;
+        else if (!oldest || m->last_use < oldest->last_use) oldest = m;
     }
+    if (!any && lru && oldest) mirror_slot_drop(oldest), any = true;
+    return any;
+}
+
+// A slot region (its copy + MIR_RB readback areas): first fit among slots
+static uint64_t mirror_slot_alloc(uint64_t size) {
+    size = (uint64_t)(MIR_RB + 1) * ((size + 255) & ~255ull);
     for (uint64_t at = MIR_SNAP; at + size <= MIR_SIZE;) {
         bool clash = false;
         for (int i = 0; i < MIR_SLOTS && !clash; i++) {
@@ -2843,9 +2857,17 @@ static void mirror_table(int stage, bool store, VkCommandBuffer cb, uint32_t *ta
         for (int k = 0; k < MIR_SLOTS && !slot; k++)
             if (mir_slot[k].used && mir_slot[k].lo <= lo && hi <= mir_slot[k].hi) slot = &mir_slot[k];
         if (!slot && store && !r[i].ro) {  // a new GPU copy, starting from the CPU's
+            // (slots unused for ~600 submissions - a level's buffers, gone - make room first; full, the least recently
+            // used idle one goes: some dispatches store to small buffers at a new address each frame, which filled
+            // every slot within seconds and lost the light culling's results - the world went dark again)
+            if (pending > 600) mirror_slot_reclaim(pending - 600, false);
             int k = 0;
-            while (k < MIR_SLOTS && mir_slot[k].used) k++;
-            uint64_t at = k < MIR_SLOTS ? mirror_slot_alloc(hi - lo) : ~0ull;
+            uint64_t at = ~0ull;
+            for (int tries = 0; tries < 8; tries++) {
+                for (k = 0; k < MIR_SLOTS && mir_slot[k].used; k++) {}
+                if (k < MIR_SLOTS && (at = mirror_slot_alloc(hi - lo)) != ~0ull) break;
+                if (!mirror_slot_reclaim(0, true)) break;
+            }
             if (at != ~0ull) {
                 slot = &mir_slot[k];
                 *slot = (MirSlot){.lo = lo, .hi = hi, .off = at, .used = true, .base = malloc(hi - lo)};
@@ -2855,6 +2877,12 @@ static void mirror_table(int stage, bool store, VkCommandBuffer cb, uint32_t *ta
                 memcpy(mir_ptr + at, slot->base, hi - lo);
                 vmaFlushAllocation(g_vk.vma, mir_mem, at, hi - lo);
                 stat_upload_bytes += hi - lo;
+            } else {
+                static int nlog;
+                int used = 0;
+                for (int j = 0; j < MIR_SLOTS; j++) used += mir_slot[j].used;
+                if (nlog++ < 20) LOG("[vk] gmem mirror: no slot for %llx+%llx (%d of %d slots in use): its stores are lost\n",
+                                     (unsigned long long)lo, (unsigned long long)(hi - lo), used, MIR_SLOTS);
             }
         }
         if (slot) {
