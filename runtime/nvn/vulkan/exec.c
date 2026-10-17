@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <pthread.h>
+#include <time.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,7 +61,101 @@ static uint32_t work_since_submit;  // draws (+ dispatches x4) recorded since (e
 static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
 
+// Completed submissions. Phones: Turnip on Android's kernel driver (KGSL) has no timeline semaphores - it emulates them
+// in software behind one lock, which submissions and waits all go through (the S20 FE's render thread spent half its
+// time blocked on it, ~25 ms a frame with the stable 24.1 driver). There each submission signals a fence of its own
+// instead (a ring, by submission number), one watcher thread waits for them in turn and publishes how far the GPU got;
+// everything else waits for that number. LARECOMP_VK_FENCES=0/1 (default on Android; elsewhere the timeline).
+#define FENCE_N 64
+static int g_fences = -1;
+static VkFence fence_ring[FENCE_N];
+static uint64_t fence_seq[FENCE_N];        // the submission each fence was last used for
+static _Atomic uint64_t g_done_seq;        // fences: the last completed submission (the watcher's)
+static _Atomic bool g_fence_lost;
+static pthread_mutex_t done_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t done_cv = PTHREAD_COND_INITIALIZER;   // a submission went out (the watcher waits for one)
+static pthread_cond_t done_adv = PTHREAD_COND_INITIALIZER;  // g_done_seq moved (vk_wait_seq waits for it)
+
+static void *done_watcher(void *arg) {
+    (void)arg;
+    plat_thread_name("vk-done");
+    for (;;) {
+        uint64_t next = atomic_load(&g_done_seq) + 1;
+        pthread_mutex_lock(&done_lock);
+        for (;;) {
+            pthread_mutex_lock(&seq_lock);
+            uint64_t sub_ = submit_seq;
+            pthread_mutex_unlock(&seq_lock);
+            if (sub_ >= next) break;
+            pthread_cond_wait(&done_cv, &done_lock);  // (nothing in flight: until the next submission)
+        }
+        pthread_mutex_unlock(&done_lock);
+        VkResult r = vkWaitForFences(g_vk.dev, 1, &fence_ring[next % FENCE_N], VK_TRUE, 1000000000ull);
+        if (r == VK_TIMEOUT) continue;
+        pthread_mutex_lock(&done_lock);
+        if (r == VK_SUCCESS) atomic_store(&g_done_seq, next);
+        else atomic_store(&g_fence_lost, true);
+        pthread_cond_broadcast(&done_adv);
+        pthread_mutex_unlock(&done_lock);
+        if (r != VK_SUCCESS) return NULL;  // (device lost: vk_wait_seq reports it)
+    }
+}
+
+static bool fences_on(void) {
+    if (g_fences < 0) {
+        const char *e = getenv("LARECOMP_VK_FENCES");
+#ifdef __ANDROID__
+        g_fences = !e || atoi(e) != 0;
+#else
+        g_fences = e && atoi(e) != 0;
+#endif
+        if (g_fences) {
+            VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            for (int i = 0; i < FENCE_N; i++) VK_CHECK(vkCreateFence(g_vk.dev, &fi, NULL, &fence_ring[i]));
+            pthread_t t;
+            pthread_create(&t, NULL, done_watcher, NULL);
+            LOG("[vk] submissions signal fences (no timeline semaphore waits)\n");
+        }
+    }
+    return g_fences;
+}
+
+// fences: until submission seq is done (false: device lost)
+static bool fence_wait_done(uint64_t seq, uint64_t timeout_ns) {
+    uint64_t end = SDL_GetTicksNS() + timeout_ns;
+    pthread_mutex_lock(&done_lock);
+    while (atomic_load(&g_done_seq) < seq && !atomic_load(&g_fence_lost)) {
+        uint64_t now = SDL_GetTicksNS();
+        if (now >= end) break;
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        uint64_t left = end - now > 100000000ull ? 100000000ull : end - now, ns = (uint64_t)ts.tv_nsec + left;
+        ts.tv_sec += (time_t)(ns / 1000000000ull), ts.tv_nsec = (long)(ns % 1000000000ull);
+        pthread_cond_timedwait(&done_adv, &done_lock, &ts);
+    }
+    bool ok = atomic_load(&g_done_seq) >= seq;
+    pthread_mutex_unlock(&done_lock);
+    return ok;
+}
+
+// fences: the fence submission seq (about to go out) signals, free of older work
+static VkFence fence_for(uint64_t seq) {
+    int i = (int)(seq % FENCE_N);
+    if (fence_seq[i]) fence_wait_done(fence_seq[i], 10ull * 1000000000ull);  // (the watcher is past it: safe to reset)
+    vkResetFences(g_vk.dev, 1, &fence_ring[i]);
+    fence_seq[i] = seq;
+    return fence_ring[i];
+}
+
+static void done_submitted(void) {  // (vk_submit_extra: a submission went out)
+    if (g_fences <= 0) return;
+    pthread_mutex_lock(&done_lock);
+    pthread_cond_signal(&done_cv);
+    pthread_mutex_unlock(&done_lock);
+}
+
 uint64_t vk_completed_seq(void) {
+    if (fences_on()) return atomic_load(&g_done_seq);
     uint64_t v = 0;
     vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v);
     return v;
@@ -86,7 +181,9 @@ void vk_wait_seq(uint64_t seq) {
     VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
                               .pValues = &seq};
     uint64_t t0 = SDL_GetTicksNS();
-    VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
+    VkResult r;
+    if (fences_on()) r = fence_wait_done(seq, 10ull * 1000000000ull) ? VK_SUCCESS : atomic_load(&g_fence_lost) ? VK_ERROR_DEVICE_LOST : VK_TIMEOUT;
+    else r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
     wait_account(SDL_GetTicksNS() - t0);
@@ -430,15 +527,18 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
                                      .value = submit_seq + 1, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT},
                                     {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = signal,
                                      .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT}};
+    bool fenced = fences_on();
+    VkFence fence = fenced ? fence_for(submit_seq + 1) : VK_NULL_HANDLE;
     VkSemaphoreSubmitInfo wt = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = wait,
                                 .stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT};
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = (uint32_t)n, .pCommandBufferInfos = cbs,
-                        .signalSemaphoreInfoCount = signal ? 2 : 1, .pSignalSemaphoreInfos = sig,
+                        .signalSemaphoreInfoCount = fenced ? (signal ? 1 : 0) : (signal ? 2 : 1),
+                        .pSignalSemaphoreInfos = fenced ? &sig[1] : sig,
                         .waitSemaphoreInfoCount = wait ? 1 : 0, .pWaitSemaphoreInfos = &wt};
     {
         PROF_T0();
         dl_note("submit %llu", (unsigned long long)submit_seq + 1);
-        VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
+        VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, fence);
         if (sr == VK_ERROR_DEVICE_LOST) vk_devlost_dump();
         VK_CHECK(sr);
         PROF_ADD(prof_submit);
@@ -449,6 +549,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     cur_sub = (cur_sub + 1) % SUBS;
     stat_flushes++;
     work_since_submit = 0;
+    done_submitted();
     vk_mirror_writeback();
     cum_submits++;
     ring_retire();
