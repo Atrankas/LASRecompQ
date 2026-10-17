@@ -22,7 +22,10 @@ final class RootBoost {
         "M=\"$1\"; PID=\"$2\"\n" +
         "g=/sys/class/kgsl/kgsl-3d0\n" +
         "c7=/sys/devices/system/cpu/cpu7/core_ctl/min_cpus\n" +
-        "gmin=$(cat $g/devfreq/min_freq 2>/dev/null); gpl=$(cat $g/min_pwrlevel 2>/dev/null); cmin=$(cat $c7 2>/dev/null)\n" +
+        // the GPU's floor back to its lowest clock afterwards (not the value found: another run's script may still
+        // have held it up when this one started)
+        "gmin=; for f in $(cat $g/devfreq/available_frequencies 2>/dev/null); do [ -z \"$gmin\" ] || [ $f -lt $gmin ] && gmin=$f; done\n" +
+        "gpl=$(( $(cat $g/num_pwrlevels 2>/dev/null || echo 1) - 1 )); cmin=$(cat $c7 2>/dev/null)\n" +
         "tpl=$(cat $g/thermal_pwrlevel 2>/dev/null); lim=$(cat /sys/power/cpufreq_max_limit 2>/dev/null)\n" +
         "smax=\"\"; for p in /sys/devices/system/cpu/cpufreq/policy*; do smax=\"$smax $p:$(cat $p/scaling_max_freq 2>/dev/null)\"; done\n" +
         // on while the game is in front (the marker) and alive (a crash or a kill skips onPause)
