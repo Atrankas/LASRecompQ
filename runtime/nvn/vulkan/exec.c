@@ -159,6 +159,7 @@ void vk_pace_frame(void) {
     if (first || p > 100000000ull) return;  // (loading, a hitch: not a pace)
     double busy = (p > wt ? p - wt : 0) / 1e6;
     avg = avg ? avg + (busy - avg) * 0.05 : busy;
+    plat_frame_work(p > wt ? p - wt : 0, pace_slow ? 33333333u : 16666667u);  // (phones: performance hints)
     static int log = -1;  // LARECOMP_LOG_PACE=1: each frame's period, vsync wait and busy time
     if (log < 0) log = getenv("LARECOMP_LOG_PACE") != NULL;
     if (log) LOG("[pace] period %.2f blocked %.2f busy %.2f ms\n", p / 1e6, wt / 1e6, busy);

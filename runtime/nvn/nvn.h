@@ -83,6 +83,7 @@ typedef struct NvnWindow {
 typedef struct NvnSync {
     volatile int signaled;
     volatile uint64_t seq;  // GPU submission this fence belongs to (renderer_fence_seq), 0 = none
+    uint64_t ticket;        // render thread (gpu_thread.c): the queued op that signals it, 0 = none
 } NvnSync;
 
 // ---- command recording (stored in guest command memory)
@@ -131,3 +132,15 @@ void backend_execute(uint64_t handle);            // run a recorded command list
 void backend_present(NvnTexture *tex);            // show a texture in the window
 void backend_texture_destroyed(NvnTexture *tex);
 void backend_pool_written(uint64_t addr, uint64_t size);
+
+// the render thread (runtime/nvn/gpu_thread.c): the game's side of the backend goes through these
+bool gt_on(void);
+void gt_submit(uint64_t handle);
+uint64_t gt_fence(uint64_t sync_guest);
+void gt_sync_wait(uint64_t ticket);
+void gt_finish(void);
+void gt_drain(void);
+void gt_call(void (*fn)(void *), void *arg);
+void gt_present(NvnTexture *t);
+void gt_texture_destroyed(NvnTexture *t);
+void gt_free(void *p);

@@ -24,6 +24,7 @@
 
 uint64_t maxwell_gmem_base, maxwell_gmem_size;
 int maxwell_frag_subgroups = 1;
+int maxwell_h2f_bits = 1;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -2147,7 +2148,8 @@ static const char glsl_prelude[] =
     "uint bfe_s(uint v, uint ctl) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u) return 0u; if (pos >= 32u) return (int(v) < 0) ? 0xFFFFFFFFu : 0u; return uint(bitfieldExtract(int(v), int(pos), int(min(len, 32u - pos)))); }\n"
     "uint bfi(uint ins, uint ctl, uint base) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u || pos >= 32u) return base; return bitfieldInsert(base, ins, int(pos), int(min(len, 32u - pos))); }\n"
     "float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n"
-    "uvec2 rsc(uvec2 c, vec4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uvec2(floor((vec2(c) + 0.5f) * s.xy)); }\n"
+    "uvec2 rsc(uvec2 c, vec4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uvec2(floor((vec2(c) + 0.5f) * s.xy)); }\n";
+static const char glsl_prelude_h2f_bits[] =
     // half -> float by bits, not unpackHalf2x16: NVIDIA's driver recognises unpacked halves and runs some of the
     // fp32 math after them in native fp16, differently per shader, so a depth pre-pass and its colour pass (EQUAL
     // test) placed wind-animated foliage apart: black slashes / flicker (tools: notes/PLAN.md 2026-10-08)
@@ -2155,7 +2157,12 @@ static const char glsl_prelude[] =
     " if (e == 0u) { float d = float(m) * 5.9604644775390625e-8; return s != 0u ? -d : d; }"
     " if (e == 31u) return uintBitsToFloat(s | 0x7F800000u | (m << 13));"
     " return uintBitsToFloat(s | ((e + 112u) << 23) | (m << 13)); }\n"
-    "vec2 unpack_h2(uint v) { return vec2(h2f(v & 0xFFFFu), h2f(v >> 16)); }\n"
+    "vec2 unpack_h2(uint v) { return vec2(h2f(v & 0xFFFFu), h2f(v >> 16)); }\n";
+// (other GPUs: the conversion instruction; the same values)
+static const char glsl_prelude_h2f_native[] =
+    "float h2f(uint h) { return unpackHalf2x16(h).x; }\n"
+    "vec2 unpack_h2(uint v) { return unpackHalf2x16(v); }\n";
+static const char glsl_prelude2[] =
     "vec2 hx(uint v, uint swz) { if (swz == 1u) return vec2(uintBitsToFloat(v)); vec2 h = unpack_h2(v); return swz == 2u ? h.xx : (swz == 3u ? h.yy : h); }\n"
     "uint hpack(vec2 r, uint merge, uint old) { if (merge == 1u) return floatBitsToUint(r.x); uint lo = packHalf2x16(vec2(r.x, 0.0f)), hi = packHalf2x16(vec2(r.y, 0.0f)); if (merge == 2u) return (old & 0xFFFF0000u) | lo; if (merge == 3u) return (old & 0xFFFFu) | (hi << 16); return lo | (hi << 16); }\n"
     "uint prmt(uint a, uint b, uint sel) { uint r = 0u; for (uint i = 0u; i < 4u; i++) { uint s = (sel >> (i * 4u)) & 7u; uint bt = s < 4u ? (a >> (s * 8u)) & 0xFFu : (b >> ((s - 4u) * 8u)) & 0xFFu; r |= bt << (i * 8u); } return r; }\n";
@@ -2183,7 +2190,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->fail) { free(body.buf); free(c->body.buf); free(c); return info; }
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
-    sp(&s, "%s", glsl_prelude);
+    sp(&s, "%s%s%s", glsl_prelude, maxwell_h2f_bits ? glsl_prelude_h2f_bits : glsl_prelude_h2f_native, glsl_prelude2);
     if (stage == STAGE_FRAGMENT && !maxwell_frag_subgroups)  // the quad's lanes through fine derivatives (SHFL above)
         sp(&s, "uint quad_lane() { ivec2 p = ivec2(gl_FragCoord.xy); return uint(p.x & 1) | (uint(p.y & 1) << 1); }\n"
                "uint quad_xor(uint v, uint m) { vec2 h = vec2(float(v & 0xFFFFu), float(v >> 16)); ivec2 p = ivec2(gl_FragCoord.xy);"

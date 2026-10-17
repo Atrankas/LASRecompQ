@@ -90,6 +90,8 @@ typedef struct {
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // 0: no subgroup shuffles in fragment shaders (Adreno: compute only); quad shuffles emulated with derivatives
 extern int maxwell_frag_subgroups;
+// 1: halves converted to float by bits (NVIDIA's driver runs math after unpackHalf2x16 in fp16); 0: unpackHalf2x16
+extern int maxwell_h2f_bits;
 // Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
 // maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).
 extern const uint8_t *maxwell_dbg_code;

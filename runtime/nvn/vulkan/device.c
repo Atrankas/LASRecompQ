@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "../../paths.h"
+#include "../../platform.h"
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
@@ -231,6 +232,7 @@ static void pick_device(void) {
         vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
         maxwell_frag_subgroups = (sg.supportedStages & VK_SHADER_STAGE_FRAGMENT_BIT) &&
                                  (sg.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT);
+        maxwell_h2f_bits = g_vk.props.vendorID == 0x10DE;  // (NVIDIA)
         if (!maxwell_frag_subgroups) LOG("[vk] no subgroup shuffles in fragment shaders: quad shuffles emulated\n");
     }
     uint32_t nq = 0;
@@ -878,8 +880,41 @@ void backend_represent(void) {
     else SDL_Delay(16);
 }
 
+// The game's side of a frame: its pacing and the per-frame hooks that act on the game (input, warps, tests), on the
+// game's thread; the frame number counts the game's presents (the render thread's may be one behind).
+static void present_game(void) {
+    static uint64_t n;
+    n++;
+    if (n % 120 == 1) plat_thread_core(PLAT_CORE_MAIN);  // (again now and then: Android resets it when the app's
+                                                          // cpuset changes, e.g. on reaching the foreground)
+    extern void vk_pace_frame(void);
+    vk_pace_frame();  // (exec.c: the game's 30 fps mode when frames don't fit 60)
+    extern void input_frame(uint64_t frame);
+    input_frame(n);
+    static long slow_ms = -1;
+    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
+    static long slow_until = -1;  // LARECOMP_SLOW_FRAME_UNTIL=<frame>: the stall ends there (frame pacing recovery tests)
+    if (slow_until < 0) slow_until = getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
+    if (slow_ms > 0 && n > 2600 && (!slow_until || (long)n < slow_until)) SDL_Delay((Uint32)slow_ms);
+    extern void fnprof_frame(uint64_t frame);
+    fnprof_frame(n);
+    extern void warp_frame(uint64_t frame);
+    warp_frame(n);
+    extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
+    reboot_test_frame(n);
+    extern void save_editor_frame(uint64_t frame);
+    save_editor_frame(n);
+}
+
+void backend_present_gpu(NvnTexture *t);
 void backend_present(NvnTexture *t) {
     g_last_presented = t;
+    if (gt_on()) gt_present(t);  // (runtime/nvn/gpu_thread.c: backend_present_gpu there)
+    else backend_present_gpu(t);
+    present_game();
+}
+
+void backend_present_gpu(NvnTexture *t) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
@@ -930,23 +965,6 @@ void backend_present(NvnTexture *t) {
     frames++;
     total_frames++;
     g_frame_counter++;
-    extern void vk_pace_frame(void);
-    vk_pace_frame();  // (exec.c: the game's 30 fps mode when frames don't fit 60)
-    extern void input_frame(uint64_t frame);
-    input_frame(total_frames);
-    static long slow_ms = -1;
-    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
-    static long slow_until = -1;  // LARECOMP_SLOW_FRAME_UNTIL=<frame>: the stall ends there (frame pacing recovery tests)
-    if (slow_until < 0) slow_until = getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
-    if (slow_ms > 0 && total_frames > 2600 && (!slow_until || (long)total_frames < slow_until)) SDL_Delay((Uint32)slow_ms);
-    extern void fnprof_frame(uint64_t frame);
-    fnprof_frame(total_frames);
-    extern void warp_frame(uint64_t frame);
-    warp_frame(total_frames);
-    extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
-    reboot_test_frame(total_frames);
-    extern void save_editor_frame(uint64_t frame);
-    save_editor_frame(total_frames);
     extern void vk_level_change_check(void);
     vk_level_change_check();
     static long shot_every = -1;
@@ -1091,6 +1109,7 @@ void backend_init(void) {
 // ---- in-place reboot (runtime/main.c teardown; main thread, guest threads stopped)
 void backend_reset(void) {
     if (!g_vk.dev) return;
+    gt_drain();
     vkDeviceWaitIdle(g_vk.dev);
     extern void vk_textures_reset(void);
     extern void vk_exec_reset(void);
@@ -1099,10 +1118,12 @@ void backend_reset(void) {
     g_last_presented = NULL;
 }
 void backend_guest_memory_reset(void) {}  // (exec.c re-imports the heap on first use)
-void backend_clear_window(void) {
+static void clear_window(void *arg) {
+    (void)arg;
     static const float black[4] = {0, 0, 0, 1};
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
 }
+void backend_clear_window(void) { gt_call(clear_window, NULL); }
 
 int ui_run(void) {
     ui_window_init();

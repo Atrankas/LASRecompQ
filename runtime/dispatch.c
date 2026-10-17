@@ -128,8 +128,7 @@ GuestFn dispatch_lookup(uint64_t addr) {
 }
 
 // Small direct-mapped cache in front of the binary search
-#define DCACHE 4096
-static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
+#define DCACHE (sizeof ((Cpu *)0)->dcache / sizeof ((Cpu *)0)->dcache[0])  // (in Cpu: cpu.h)
 
 static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
@@ -151,16 +150,21 @@ static GuestFn dispatch_slow(Cpu *c) {
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
     }
     unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
-    dcache[h].addr = pc;
-    dcache[h].fn = f;
+    c->dcache[h].addr = pc;
+    c->dcache[h].fn = f;
     return f;
 }
 
-// Always tail-calls, so chains of indirect jumps don't grow the host stack.
-void rt_dispatch(Cpu *c) {
-    unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
-    GuestFn f = dcache[h].addr == c->pc ? dcache[h].fn : dispatch_slow(c);
+// Always tail-calls, so chains of indirect jumps don't grow the host stack. The hit path is a few instructions without a
+// frame (every virtual call of the game passes here); a miss goes through dispatch_miss.
+__attribute__((noinline)) static void dispatch_miss(Cpu *c) {
+    GuestFn f = dispatch_slow(c);
     __attribute__((musttail)) return f(c);
+}
+__attribute__((no_stack_protector)) void rt_dispatch(Cpu *c) {
+    unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
+    if (__builtin_expect(c->dcache[h].addr == c->pc, 1)) __attribute__((musttail)) return c->dcache[h].fn(c);
+    __attribute__((musttail)) return dispatch_miss(c);
 }
 
 void guest_call(Cpu *c, uint64_t addr) {

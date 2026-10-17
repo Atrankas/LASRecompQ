@@ -641,7 +641,14 @@ bool renderer_is_gpu_owned(NvnTexture *t) { return tex_backend(t)->gpu_owned; }
 void backend_pool_written(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
 // Host-produced texel data (decoded video, any thread): applied on the render thread at the texture's next use.
+static void upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride);
+typedef struct { NvnTexture *t; const void *rgba; uint32_t w, h, stride; } UploadArgs;
+static void upload_rgba_call(void *a) { UploadArgs *u = a; upload_rgba(u->t, u->rgba, u->w, u->h, u->stride); }
 void renderer_upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride) {
+    UploadArgs u = {t, rgba, w, h, stride};
+    gt_call(upload_rgba_call, &u);  // (in order with the queued lists: runtime/nvn/gpu_thread.c)
+}
+static void upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride) {
     TexBackend *b = t->backend;
     if (!b) return;  // the game binds the texture before decoding into it; first frames may arrive earlier
     void *copy = malloc((size_t)stride * h);

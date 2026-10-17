@@ -179,6 +179,7 @@ static uint64_t next_thread_id = 0x50;
 // thread the same way.
 volatile int g_rt_unwind;
 static KThread *g_threads;  // every thread of this boot (g_klock)
+static KThread *g_main_thread;
 
 void rt_unwind_point(void) {
     if (__builtin_expect(g_rt_unwind, 0) && t_cur) longjmp(t_cur->unwind, 1);
@@ -190,6 +191,7 @@ static void *thread_main(void *arg) {
     char name[16];
     snprintf(name, sizeof name, "guest %x p%d", t->handle, t->prio);
     plat_thread_name(name);
+    plat_thread_core(t == g_main_thread ? PLAT_CORE_MAIN : PLAT_CORE_OTHER);
     crash_handler_install();
     rt_set_fpcr(0);
     if (!setjmp(t->unwind)) guest_call(&t->cpu, t->entry);
@@ -237,6 +239,7 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
     region_add(stack, stack_size, 0xB, 3);
     KThread *t = thread_new(entry, 0, stack + stack_size, prio, 0);
     t->handle = kernel_new_handle(&t->obj);
+    g_main_thread = t;
     return t;
 }
 
@@ -570,6 +573,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         uint64_t size = x[1];
         if (size > HEAP_MAX) { x[0] = R_OUT_OF_RESOURCE; break; }
         heap_size = size;
+        if (getenv("LARECOMP_LOG_HEAP")) fprintf(stderr, "[kernel] SetHeapSize %llx\n", (unsigned long long)size);
         region_remove(HEAP_BASE);
         if (size) region_add(HEAP_BASE, size, 5, 3);
         x[0] = R_OK;

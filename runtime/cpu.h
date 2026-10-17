@@ -18,6 +18,9 @@ typedef struct __attribute__((aligned(16))) Cpu {
     uint64_t fpsr;           // 328
     uint8_t _pad[512 - 336];
     __uint128_t v[32];       // 512
+    // rt_dispatch's direct-mapped cache in front of the function lookup. Per guest thread like a __thread array, but
+    // reached through c: a dlopen'ed runtime (Android's libmain.so) pays a TLS resolver call on every __thread access.
+    struct { uint64_t addr; void (*fn)(struct Cpu *); } dcache[4096];
 } Cpu;
 
 _Static_assert(offsetof(Cpu, sp) == 256, "sp");

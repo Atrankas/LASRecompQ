@@ -55,8 +55,10 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
 - [x] Importação dos arquivos do jogo pelo app (SAF) direto para `extracted/`, ou cópia por USB + Set up
 - [x] Imagem romfs fina (`romfs_build_thin`): só as tabelas, dados lidos da pasta `romfs/` (testado byte a byte
       contra a imagem completa); ~6 GB a menos no celular
-- [ ] **Precisa dos arquivos do jogo**: gerar o código real, boot até o título, vídeo de abertura, áudio
-- [ ] **Precisa do celular**: gameplay em Mabe Village, primeira dungeon, saves
+- [x] Código real gerado, boot até o título, vídeo de abertura, áudio (S20 FE, Turnip)
+- [x] Gameplay em Mabe Village (Field): o "device lost" vinha de `subgroupShuffleXor` em fragment shader
+      (Turnip/Adreno 650: subgroups só em compute) - shuffles de quad emulados com derivadas
+- [ ] Primeira dungeon, saves, troca de áreas
 
 ### 3. Controles e interface
 - [x] Controles por toque (`runtime/ui/touch_controls.mm`): analógico flutuante, A/B/X/Y (deslizar entre eles),
@@ -66,7 +68,18 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
 - [ ] Editor de layout dos botões de toque; vibração
 
 ### 4. Leveza e desempenho
-- [ ] Medir no aparelho (fps, tempo de CPU/GPU, temperatura)
+- [x] Medir no aparelho: `LARECOMP_GPUPROF_AT`, simpleperf (`setprop security.perf_harden 0`, `--app`)
+- [x] Shaders estruturados (sem a máquina de estados `switch (pc)`): pilhas comparadas só nas entradas vivas,
+      BRX de compute com seções que terminam o programa. Field: GPU 40 -> 28 ms
+- [x] Meia precisão: `unpackHalf2x16` fora da NVIDIA (o caminho por bits era só para o driver da NVIDIA).
+      Passo principal do Field 15.8 -> 8.5 ms, GPU 21 ms/frame
+- [x] Cache de despacho por thread dentro do `Cpu` (sem `__thread`: no Android cada acesso passava pelo
+      resolvedor de TLS dinâmico)
+- [ ] Thread de render (`runtime/nvn/gpu_thread.c`): o executor + driver eram ~1/3 da thread do jogo
+- [ ] O heap do jogo (3.15 GB) não é compartilhado com a GPU no Turnip (sem `VK_EXT_external_memory_host`):
+      vértices/índices copiados a cada draw e leituras de memória global em shader voltam zero. Ideia: mapear
+      só os memory pools da NVN (~300 MB acessíveis pela CPU) como dma-buf
+- [ ] SPIR-V otimizado (`LARECOMP_VK_OPT=1`) trava o Turnip (device lost): investigar
 - [ ] Ajustes de resolução / FSR para GPUs de celular (padrão no Android: 75% da tela + FSR 1)
 - [ ] Afinidade de threads nos núcleos grandes, dicas de desempenho (ADPF), escala por temperatura
 - [ ] Drivers customizados (Turnip via libadrenotools) para Adreno com driver antigo

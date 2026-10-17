@@ -115,10 +115,10 @@ NVN(nvnQueueResetMemoryUsageCounts) { (void)c; }
 NVN(nvnQueueSubmitCommands) {
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
-    for (int i = 0; i < n; i++) backend_execute(handles[i]);
+    for (int i = 0; i < n; i++) gt_submit(handles[i]);
 }
 NVN(nvnQueueFlush) { (void)c; }
-NVN(nvnQueueFinish) { (void)c; renderer_sync(); }
+NVN(nvnQueueFinish) { (void)c; gt_finish(); }
 
 static NvnSync *sync_of(uint64_t guest) {
     NvnSync *s = HOST(NvnSync, guest);
@@ -127,13 +127,19 @@ static NvnSync *sync_of(uint64_t guest) {
 }
 uint64_t renderer_fence_seq(void);
 void renderer_wait_seq(uint64_t seq);
-NVN(nvnQueueFenceSync) { NvnSync *s = sync_of(A(1)); s->signaled = 1; s->seq = renderer_fence_seq(); }
+NVN(nvnQueueFenceSync) {
+    NvnSync *s = sync_of(A(1));
+    s->signaled = 1;
+    if (gt_on()) s->ticket = gt_fence(A(1));  // (its seq comes when the render thread gets there)
+    else s->seq = renderer_fence_seq();
+}
+void nvn_sync_ticket(uint64_t guest, uint64_t ticket) { sync_of(guest)->ticket = ticket; }
 void nvn_sync_set_seq(uint64_t guest, uint64_t seq) { NvnSync *s = sync_of(guest); s->signaled = 1; s->seq = seq; }
 NVN(nvnQueueWaitSync) { RET(1); }
 
 // ================================================================== sync / event
 NVN(nvnSyncInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnSync))); RET(1); }
-NVN(nvnSyncFinalize) { free(HOST(NvnSync, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnSyncFinalize) { gt_free(HOST(NvnSync, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnSyncSetDebugLabel) { (void)c; }
 void renderer_flush(void);
 NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
@@ -143,6 +149,8 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // LARECOMP_SYNC_ALL=1: old behaviour, wait for all submitted work
     if (whole < 0) whole = getenv("LARECOMP_SYNC_ALL") ? 1 : 0;
+    if (flush || whole) gt_drain();
+    else gt_sync_wait(sync_of(A(0))->ticket);  // (render thread: up to where it's signaled)
     if (flush) renderer_flush();
     else if (whole) renderer_sync();
     else renderer_wait_seq(sync_of(A(0))->seq);  // only the submission that holds this fence
@@ -187,10 +195,12 @@ NVN(nvnMemoryPoolInitialize) {
     p->storage = G(uint64_t, A(1), 0x10);
     p->size = G(uint64_t, A(1), 0x18);
     p->flags = G(uint32_t, A(1), 8);
+    if (getenv("LARECOMP_LOG_HEAP"))
+        fprintf(stderr, "[nvn] pool %llx size %llx flags %x\n", (unsigned long long)p->storage, (unsigned long long)p->size, p->flags);
     SET_HOST(A(0), p);
     RET(1);
 }
-NVN(nvnMemoryPoolFinalize) { free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnMemoryPoolFinalize) { gt_free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnMemoryPoolSetDebugLabel) { (void)c; }
 NVN(nvnMemoryPoolMap) { RET(HOST(NvnPool, A(0))->storage); }
 NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GPU address == CPU address
@@ -366,7 +376,7 @@ NVN(nvnTextureInitialize) {
 }
 NVN(nvnTextureFinalize) {
     NvnTexture *t = HOST(NvnTexture, A(0));
-    if (t) { backend_texture_destroyed(t); free(t); }
+    if (t) gt_texture_destroyed(t);  // (and freed; in order after the lists that may still use it)
     SET_HOST(A(0), 0);
 }
 NVN(nvnTextureSetDebugLabel) {
@@ -479,7 +489,7 @@ NVN(nvnSamplerInitialize) {
     SET_HOST(A(0), d);
     RET(1);
 }
-NVN(nvnSamplerFinalize) { free(HOST(NvnSamplerDesc, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnSamplerFinalize) { gt_free(HOST(NvnSamplerDesc, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnSamplerSetDebugLabel) { (void)c; }
 #define SMP HOST(NvnSamplerDesc, A(0))
 NVN(nvnSamplerGetMinMagFilter) { *(uint32_t *)AP(1) = SMP->min_filter; *(uint32_t *)AP(2) = SMP->mag_filter; }
@@ -559,7 +569,7 @@ NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {
 
 // ================================================================== programs
 NVN(nvnProgramInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnProgram))); RET(1); }
-NVN(nvnProgramFinalize) { free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnProgramFinalize) { gt_free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnProgramSetDebugLabel) { (void)c; }
 NVN(nvnProgramSetSampleShading) { (void)c; }
 NVN(nvnProgramSetSubroutineLinkage) { RET(1); }
