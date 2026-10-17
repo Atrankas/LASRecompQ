@@ -5,9 +5,12 @@
 enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
 enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12 };
 // (11 was 67% of the display: larecomp.ini "67%" now loads as RES_Q75)
-enum { UPSCALE_BILINEAR = 0, UPSCALE_METALFX = 1 /* macOS */, UPSCALE_FSR1 = 2 /* Windows: AMD FSR 1 */ };
+enum { UPSCALE_BILINEAR = 0, UPSCALE_METALFX = 1 /* macOS */, UPSCALE_FSR1 = 2 /* Windows: AMD FSR 1 */,
+       UPSCALE_SGSR = 3 /* Vulkan: Snapdragon Game Super Resolution 1 (phones' default) */ };
 #ifdef __APPLE__
 #define UPSCALE_SHARP UPSCALE_METALFX  // each OS's non-bilinear upscaler (the default)
+#elif defined(__ANDROID__)
+#define UPSCALE_SHARP UPSCALE_SGSR  // (one pass: FSR 1's two cost an Adreno 650 7.5 ms a frame at 2400x1080)
 #else
 #define UPSCALE_SHARP UPSCALE_FSR1
 #endif

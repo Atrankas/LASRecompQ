@@ -562,19 +562,33 @@ static void tab_display(void) {
         static const char *ups[] = {"Bilinear", "MetalFX"};
         const char *ud = "How the image is scaled up to the window when it renders at a lower resolution. MetalFX: Apple's "
                          "upscaler, sharper. Bilinear: plain and soft.";
+#elif defined(__ANDROID__)
+        static const char *ups[] = {"Bilinear", "Snapdragon GSR", "AMD FSR 1"};
+        const char *ud = "How the image is scaled up to the screen when it renders at a lower resolution. Snapdragon GSR: "
+                         "edge-aware upscaling and sharpening in one pass, made for phones. AMD FSR 1: similar, two passes "
+                         "(slower on phones). Bilinear: plain and soft.";
+        static const int upv[] = {UPSCALE_BILINEAR, UPSCALE_SGSR, UPSCALE_FSR1};
 #else
         static const char *ups[] = {"Bilinear", "AMD FSR 1"};
         const char *ud = "How the image is scaled up to the window when it renders at a lower resolution. AMD FSR 1: "
                          "edge-aware upscaling and sharpening, sharper. Bilinear: plain and soft.";
 #endif
+#ifdef __ANDROID__
+        int ui = g_settings.upscaler == UPSCALE_SGSR ? 1 : g_settings.upscaler == UPSCALE_FSR1 ? 2 : 0;
+#else
         int ui = g_settings.upscaler == UPSCALE_BILINEAR ? 0 : 1;
+#endif
         char udm[512];
         if (g_settings.res_mode == RES_MATCH) {  // (renders at the window's size: nothing to scale up)
             snprintf(udm, sizeof udm, "%s\n\nNot used at Match display: the game already renders at your display's resolution.", ud);
             ud = udm;
             opt_disable_next();
         }
+#ifdef __ANDROID__
+        if (opt_choice("Upscaler", &ui, ups, 3, 1, ud)) g_settings.upscaler = upv[ui];
+#else
         if (opt_choice("Upscaler", &ui, ups, 2, 1, ud)) g_settings.upscaler = ui ? UPSCALE_SHARP : UPSCALE_BILINEAR;
+#endif
     }
     static const char *aa[] = {"Off", "SMAA"};
     opt_choice("Anti-aliasing", &g_settings.antialias, aa, 2, AA_OFF,

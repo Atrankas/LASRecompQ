@@ -411,6 +411,64 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(min(mx, max(mn, ac / aw)), 1.0);\n"
                "}\n";
     }
+    // Snapdragon Game Super Resolution 1 (third_party/sgsr, BSD-3-Clause: Copyright (c) 2025, Qualcomm Innovation Center,
+    // Inc.), sgsr1_shader_mobile.frag in RGBA mode: one pass, 12-tap Lanczos-like upscale with edge-adaptive sharpening on
+    // green (luma) where neighbours differ, plain bilinear elsewhere. a = (1 / in size, in size), b.xy = out size.
+    if (!strcmp(name, "sgsr.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "mediump float fastLanczos2(mediump float x) { mediump float wA = x - 4.0; mediump float wB = x * wA - wA; wA *= wA; return wB * wA; }\n"
+               "mediump vec2 weightY(mediump float dx, mediump float dy, mediump float c, mediump float std) {\n"
+               "  mediump float x = ((dx * dx) + (dy * dy)) * 0.55 + clamp(abs(c) * std, 0.0, 1.0);\n"
+               "  mediump float w = fastLanczos2(x);\n"
+               "  return vec2(w, w * c);\n"
+               "}\n"
+               "void main() {\n"
+               "  vec2 uv = gl_FragCoord.xy / pc.b.xy;\n"
+               "  mediump vec4 color = vec4(textureLod(t, uv, 0.0).xyz, 0.0);\n"
+               "  vec2 imgCoord = uv * pc.a.zw + vec2(-0.5, 0.5);\n"
+               "  vec2 imgCoordPixel = floor(imgCoord);\n"
+               "  vec2 coord = imgCoordPixel * pc.a.xy;\n"
+               "  mediump vec2 pl = imgCoord - imgCoordPixel;\n"
+               "  mediump vec4 left = textureGather(t, coord, 1);\n"
+               "  mediump float edgeVote = abs(left.z - left.y) + abs(color.y - left.y) + abs(color.y - left.z);\n"
+               "  if (edgeVote > 8.0 / 255.0) {\n"
+               "    coord.x += pc.a.x;\n"
+               "    mediump vec4 right = textureGather(t, coord + vec2(pc.a.x, 0.0), 1);\n"
+               "    mediump vec4 upDown;\n"
+               "    upDown.xy = textureGather(t, coord + vec2(0.0, -pc.a.y), 1).wz;\n"
+               "    upDown.zw = textureGather(t, coord + vec2(0.0, pc.a.y), 1).yx;\n"
+               "    mediump float mean = (left.y + left.z + right.x + right.w) * 0.25;\n"
+               "    left -= mean; right -= mean; upDown -= mean;\n"
+               "    color.w = color.y - mean;\n"
+               "    mediump float sum = abs(left.x) + abs(left.y) + abs(left.z) + abs(left.w) + abs(right.x) + abs(right.y) + abs(right.z) +\n"
+               "                        abs(right.w) + abs(upDown.x) + abs(upDown.y) + abs(upDown.z) + abs(upDown.w);\n"
+               "    mediump float std = 2.181818 / sum;\n"
+               "    mediump vec2 aWY = weightY(pl.x, pl.y + 1.0, upDown.x, std);\n"
+               "    aWY += weightY(pl.x - 1.0, pl.y + 1.0, upDown.y, std);\n"
+               "    aWY += weightY(pl.x - 1.0, pl.y - 2.0, upDown.z, std);\n"
+               "    aWY += weightY(pl.x, pl.y - 2.0, upDown.w, std);\n"
+               "    aWY += weightY(pl.x + 1.0, pl.y - 1.0, left.x, std);\n"
+               "    aWY += weightY(pl.x, pl.y - 1.0, left.y, std);\n"
+               "    aWY += weightY(pl.x, pl.y, left.z, std);\n"
+               "    aWY += weightY(pl.x + 1.0, pl.y, left.w, std);\n"
+               "    aWY += weightY(pl.x - 1.0, pl.y - 1.0, right.x, std);\n"
+               "    aWY += weightY(pl.x - 2.0, pl.y - 1.0, right.y, std);\n"
+               "    aWY += weightY(pl.x - 2.0, pl.y, right.z, std);\n"
+               "    aWY += weightY(pl.x - 1.0, pl.y, right.w, std);\n"
+               "    mediump float finalY = aWY.y / aWY.x;\n"
+               "    mediump float maxY = max(max(left.y, left.z), max(right.x, right.w));\n"
+               "    mediump float minY = min(min(left.y, left.z), min(right.x, right.w));\n"
+               "    finalY = clamp(2.0 * finalY, minY, maxY);\n"
+               "    mediump float deltaY = clamp(finalY - color.w, -23.0 / 255.0, 23.0 / 255.0);\n"
+               "    color.xyz = clamp(color.xyz + deltaY, 0.0, 1.0);\n"
+               "  }\n"
+               "  o = vec4(color.xyz, 1.0);\n"
+               "}\n";
+    }
     // FSR 1 RCAS: contrast-adaptive sharpening of the EASU output (same size). a.x = sharpness (exp2(-stops)),
     // b.xy = image size. The lobe is limited so the result stays inside the neighbours' range; noise is damped.
     if (!strcmp(name, "rcas.frag")) {
