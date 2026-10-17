@@ -104,6 +104,19 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
 - [ ] Cache de pipelines/shaders, sem travadas ao entrar em áreas
 - [ ] Pré-rotação do swapchain (economiza a rotação feita pelo compositor)
 
+### Situação em 2026-10-17 (fim do dia)
+- [x] Atualizado com o projeto original (`beta_5` + branches Vulkan `vk-gmem-window`, `vk-native-h2f`, `ring-oom`,
+      `log-getenv`, `intel-fix`); endereços do jogo (`runtime/game_addresses`) passam por `GUEST()` no Android
+- [x] Gráfico escuro/sem cor: a culling de luzes lia seus parâmetros (uniform buffer) pela memória global, fora da
+      tabela do espelho - sem luzes. Os uniform buffers do compute entram na tabela; slots do espelho reaproveitados
+      (enchiam em ~1 min e a luz sumia de novo, personagens pretos)
+- [x] Menu de configurações por toque: arrastar rola, toque curto clica (`runtime/ui/touch_ui.h`)
+- [x] Capim alto do Campo 5 -> 1.8 ms de GPU: posição `invariant` sem `precise` nos celulares
+- [ ] Campo com a iluminação certa: ~30 ms de GPU em resolução cheia (gramado 5 ms, capim 5 ms, sombras 1-3 ms);
+      30 fps firmes com o aparelho frio e resolução dinâmica 0.5-0.75; quente (status 4) cai para ~20 fps
+- Ferramentas: `LARECOMP_DUMP_UBO`, `LARECOMP_DBG_FS` (reg + 3000 = inteiro), `LARECOMP_VK_PASS_GPU_DRAWS=1` (GPU por
+  shader), `LARECOMP_DISPLAY` (tela da janela no Mac)
+
 ### 5. Extras
 - [ ] Randomizer no Android (seeds geradas no PC funcionam; gerador no aparelho depois)
 - [ ] Tradução PT-BR do app
