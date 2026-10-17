@@ -978,6 +978,10 @@ void backend_present_gpu(NvnTexture *t) {
     frames++;
     total_frames++;
     g_frame_counter++;
+    if (getenv("LARECOMP_LOG_SYNCWAIT")) {
+        extern uint64_t vk_pending_seq(void);
+        LOG("[sync] present f%llu after seq %llu\n", (unsigned long long)total_frames, (unsigned long long)vk_pending_seq() - 1);
+    }
     extern void vk_level_change_check(void);
     vk_level_change_check();
     extern void vk_pipeline_cache_autosave(void);

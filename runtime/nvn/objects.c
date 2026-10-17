@@ -4,6 +4,7 @@
 
 #include "../kernel.h"
 #include "nvn.h"
+#include "../platform.h"
 
 void renderer_sync(void);
 
@@ -132,9 +133,19 @@ NVN(nvnQueueFenceSync) {
     s->signaled = 1;
     if (gt_on()) s->ticket = gt_fence(A(1));  // (its seq comes when the render thread gets there)
     else s->seq = renderer_fence_seq();
+    if (getenv("LARECOMP_LOG_SYNCWAIT")) {
+        extern uint64_t renderer_present_count(void);
+        LOG("[sync] f%llu fence %llx (lr %llx) ticket %llu\n", (unsigned long long)renderer_present_count(), (unsigned long long)A(1),
+            (unsigned long long)c->x[30], (unsigned long long)s->ticket);
+    }
 }
 void nvn_sync_ticket(uint64_t guest, uint64_t ticket) { sync_of(guest)->ticket = ticket; }
-void nvn_sync_set_seq(uint64_t guest, uint64_t seq) { NvnSync *s = sync_of(guest); s->signaled = 1; s->seq = seq; }
+void nvn_sync_set_seq(uint64_t guest, uint64_t seq) {
+    NvnSync *s = sync_of(guest);
+    s->signaled = 1;
+    s->seq = seq;
+    if (getenv("LARECOMP_LOG_SYNCWAIT")) LOG("[sync] fence %llx -> seq %llu\n", (unsigned long long)guest, (unsigned long long)seq);
+}
 NVN(nvnQueueWaitSync) { RET(1); }
 
 // ================================================================== sync / event
@@ -149,11 +160,21 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // LARECOMP_SYNC_ALL=1: old behaviour, wait for all submitted work
     if (whole < 0) whole = getenv("LARECOMP_SYNC_ALL") ? 1 : 0;
+    static int log = -1;  // LARECOMP_LOG_SYNCWAIT=1: each wait's sync, how long the queue and the GPU took
+    if (log < 0) log = getenv("LARECOMP_LOG_SYNCWAIT") != NULL;
+    uint64_t t0 = log ? plat_now_ns() : 0, t1 = 0;
     if (flush || whole) gt_drain();
     else gt_sync_wait(sync_of(A(0))->ticket);  // (render thread: up to where it's signaled)
+    if (log) t1 = plat_now_ns();
     if (flush) renderer_flush();
     else if (whole) renderer_sync();
     else renderer_wait_seq(sync_of(A(0))->seq);  // only the submission that holds this fence
+    if (log) {
+        extern uint64_t renderer_present_count(void);
+        LOG("[sync] f%llu wait %llx (lr %llx) seq %llu: queue %.2f ms, gpu %.2f ms\n", (unsigned long long)renderer_present_count(),
+            (unsigned long long)A(0), (unsigned long long)c->x[30], (unsigned long long)sync_of(A(0))->seq,
+            (t1 - t0) / 1e6, (plat_now_ns() - t1) / 1e6);
+    }
     RET(0);
 }
 NVN(nvnSyncCreateGLSync) { RET(0); }

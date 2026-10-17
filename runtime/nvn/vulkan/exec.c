@@ -44,7 +44,7 @@ bool vk_gmem_mirror(void);
 
 // ================================================================== submissions
 // A submission = optional upload command buffer + the main one, signalling the timeline with its number.
-#define SUBS 8
+#define SUBS 24  // (early submits: several a frame, a few frames in flight)
 typedef struct {
     VkCommandBuffer main, upload;
     bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (profiling)
@@ -56,6 +56,7 @@ static Sub subs[SUBS];
 static int cur_sub;
 static void ss_forget(void);
 static uint64_t submit_seq;  // last submitted
+static uint32_t work_since_submit;  // draws (+ dispatches x4) recorded since (early_submit_check)
 static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
 
@@ -400,6 +401,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     pthread_mutex_unlock(&seq_lock);
     cur_sub = (cur_sub + 1) % SUBS;
     stat_flushes++;
+    work_since_submit = 0;
     vk_mirror_writeback();
     cum_submits++;
     ring_retire();
@@ -3009,6 +3011,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     if (cp->si->uses_gmem_store) vc_mark_sbufs(5);
     stat_dispatches++;
+    work_since_submit += 4;
 }
 
 // ================================================================== draws
@@ -3498,6 +3501,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (dl_on == 3) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=3: each draw its own submission)
     stat_draws++;
     cum_draws++;
+    work_since_submit++;
     if (g_gpuprof_frame && gp_n) {
         if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
             size_t l = strlen(gp_label[gp_n - 1]);
@@ -4166,6 +4170,29 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
 }
 
 // ================================================================== executor (renderer.m exec_list)
+// Early submits: a game hands over a frame's lists at once, and a list went to the GPU only once fully translated - the
+// GPU idled while the shadow, depth and compute work at the list's start waited behind the rest (the S20 FE: ~10 ms a
+// frame, and the game then waits on that frame's fence). Between commands, outside a render pass, the work recorded
+// so far goes out once it holds enough draws. LARECOMP_VK_EARLY_SUBMIT=<draws> (0: off; default 48 on Android).
+static void early_submit_check(void) {
+    static int every = -1;
+    if (every < 0) {
+        const char *e = getenv("LARECOMP_VK_EARLY_SUBMIT");
+#ifdef __ANDROID__
+        every = e ? atoi(e) : 48;
+#else
+        every = e ? atoi(e) : 0;
+#endif
+    }
+    if (!every || work_since_submit < (uint32_t)every) return;
+    // LARECOMP_VK_EARLY_SUBMIT_PASS=1: inside a pass too, at twice that - it ends there and the next draw resumes it
+    // (attachments loaded). Measured on the S20 FE: more GPU time (tile load / store), no shorter waits: off
+    static int in_split = -1;
+    if (in_split < 0) in_split = getenv("LARECOMP_VK_EARLY_SUBMIT_PASS") ? atoi(getenv("LARECOMP_VK_EARLY_SUBMIT_PASS")) : 0;
+    if (in_pass && (!in_split || work_since_submit < 2u * (uint32_t)every)) return;
+    renderer_submit();  // (ends the pass)
+}
+
 static void exec_list(uint64_t handle, int depth) {
     uint64_t p = handle;
     for (int guard = 0; guard < 10000000; guard++) {
@@ -4389,6 +4416,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         default: break;
         }
+        early_submit_check();
         p += r->size;
     }
 }
