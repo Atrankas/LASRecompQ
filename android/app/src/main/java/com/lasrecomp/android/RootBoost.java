@@ -17,8 +17,9 @@ import java.nio.charset.StandardCharsets;
 // or its process ends (a crash, a kill). Needs root granted to the app (Magisk asks once). Off when the
 // phone has no su, or in the settings ("root_boost" in the "perf" preferences).
 // The game's Power setting (power_mode in larecomp.ini, read every second): 0 balanced - the GPU's floor at about
-// three quarters of its top clock and the system's temperature limits respected (the phone ran hot within the hour
-// with the GPU held at its top clock); 1 maximum performance - as described above.
+// three quarters of its top clock, the system's CPU limits and temperature limits respected (the phone ran hot within
+// the hour with the GPU held at its top clock, and restarted under peak load with the CPU caps lifted); 1 maximum
+// performance - as described above.
 final class RootBoost {
     private static final String TAG = "LASRecomp";
     private static final String SCRIPT =
@@ -36,11 +37,11 @@ final class RootBoost {
         "for f in $(cat $g/devfreq/available_frequencies 2>/dev/null); do [ $(( f / 1000 * 4 )) -ge $(( gtop / 1000 * 3 )) ] && [ $f -lt $gbal ] && gbal=$f; done\n" +
         // on while the game is in front (the marker) and alive (a crash or a kill skips onPause)
         "while [ -f \"$M\" ] && kill -0 \"$PID\" 2>/dev/null; do\n" +
-        "  echo -1 > /sys/power/cpufreq_max_limit 2>/dev/null\n" +
-        "  for p in /sys/devices/system/cpu/cpufreq/policy*; do cat $p/cpuinfo_max_freq > $p/scaling_max_freq 2>/dev/null; done\n" +
-        "  echo 1 > $c7 2>/dev/null\n" +
         "  mode=$(grep -m1 '^power_mode' \"$INI\" 2>/dev/null | tr -dc 0-9)\n" +
         "  if [ \"$mode\" = 1 ]; then\n" +
+        "    echo -1 > /sys/power/cpufreq_max_limit 2>/dev/null\n" +
+        "    for p in /sys/devices/system/cpu/cpufreq/policy*; do cat $p/cpuinfo_max_freq > $p/scaling_max_freq 2>/dev/null; done\n" +
+        "    echo 1 > $c7 2>/dev/null\n" +
         "    cat $g/devfreq/max_freq > $g/devfreq/min_freq 2>/dev/null\n" +
         "    echo 0 > $g/min_pwrlevel 2>/dev/null\n" +
         // the GPU's skin-temperature cap too (Samsung's thermal service lowers the top clock from ~42 C skin), while
@@ -48,6 +49,9 @@ final class RootBoost {
         "    bt=$(cat /sys/class/power_supply/battery/temp 2>/dev/null)\n" +
         "    [ \"${bt:-999}\" -lt 450 ] && echo 0 > $g/thermal_pwrlevel 2>/dev/null\n" +
         "  else\n" +
+        // (balanced: the CPU's limits as the system sets them - lifted, the phone restarted under peak load on its
+        // worn battery: a hard reset, nothing logged - and those changed by maximum performance put back)
+        "    [ -n \"$lim\" ] && [ \"$(cat /sys/power/cpufreq_max_limit 2>/dev/null)\" = -1 ] && echo $lim > /sys/power/cpufreq_max_limit 2>/dev/null\n" +
         "    echo $gbal > $g/devfreq/min_freq 2>/dev/null\n" +
         "    [ -n \"$tpl\" ] && [ \"$(cat $g/thermal_pwrlevel 2>/dev/null)\" = 0 ] && [ \"$tpl\" != 0 ] && echo $tpl > $g/thermal_pwrlevel 2>/dev/null\n" +
         "  fi\n" +
