@@ -114,7 +114,9 @@ static const char kDown[] =
     "  for (int i = 0; i < 4; i++) c += textureLod(scene, uv + t * vec2((i & 1) == 0 ? -1.0 : 1.0, (i & 2) == 0 ? -1.0 : 1.0), 0.0).rgb;\n"
     "  o = vec4(dot(c * 0.25, vec3(0.299, 0.587, 0.114)));\n"
     "}\n";
-// the scene's view distance (1 / (1 - depth): up to a factor) averaged over each 8x8 pixels: 16 depth samples
+// the scene's view distance (1 / (1 - depth): up to a factor) averaged over each 8x8 pixels: 4 depth samples. (No
+// textureGather on the depth buffer, here or in kFlow: with it the S20 FE froze solid - a hard reset, nothing logged -
+// within minutes of play; plain fetches ran a day without one.)
 static const char kDepthDown[] =
     "#version 450\n"
     "layout(set = 0, binding = 0) uniform sampler2D depthT;\n"
@@ -125,8 +127,8 @@ static const char kDepthDown[] =
     "  vec2 t = 1.0 / vec2(textureSize(depthT, 0)), h = 0.25 / p.b.xy;\n"  // (b.xy: this image's size)
     "  float z = 0.0;\n"
     "  for (int i = 0; i < 4; i++) {\n"
-    "    vec4 g = textureGather(depthT, (uv + h * vec2((i & 1) == 0 ? -1.0 : 1.0, (i & 2) == 0 ? -1.0 : 1.0)) * p.b.zw);\n"
-    "    z += dot(1.0 / max(vec4(1.0) - g, vec4(1e-6)), vec4(0.25));\n"
+    "    float d = textureLod(depthT, (uv + h * vec2((i & 1) == 0 ? -1.0 : 1.0, (i & 2) == 0 ? -1.0 : 1.0)) * p.b.zw, 0.0).r;\n"
+    "    z += 1.0 / max(1.0 - d, 1e-6);\n"
     "  }\n"
     "  o = vec4(min(z * 0.25, 60000.0));\n"
     "}\n";
@@ -155,9 +157,8 @@ static const char kFlow[] =
     "  vec4 m4 = (cur[0] + cur[1] + cur[2] + cur[3]) * 0.25; float mean = (m4.x + m4.y + m4.z + m4.w) * 0.25;\n"
     "  vec4 dv = abs(cur[0] - mean) + abs(cur[1] - mean) + abs(cur[2] - mean) + abs(cur[3] - mean);\n"
     "  vec2 dq = uv * p.b.zw, dt = 1.0 / vec2(textureSize(depthT, 0));\n"  // (the block's nearest depth)
-    "  vec4 g = min(min(textureGather(depthT, dq + vec2(-4.0, -4.0) * dt), textureGather(depthT, dq + vec2(4.0, -4.0) * dt)),\n"
-    "               min(textureGather(depthT, dq + vec2(-4.0, 4.0) * dt), textureGather(depthT, dq + vec2(4.0, 4.0) * dt)));\n"
-    "  float d = min(min(g.x, g.y), min(g.z, g.w));\n"
+    "  float d = min(min(textureLod(depthT, dq + vec2(-4.0, -4.0) * dt, 0.0).r, textureLod(depthT, dq + vec2(4.0, -4.0) * dt, 0.0).r),\n"
+    "                min(textureLod(depthT, dq + vec2(-4.0, 4.0) * dt, 0.0).r, textureLod(depthT, dq + vec2(4.0, 4.0) * dt, 0.0).r));\n"
     "  o.z = min(1.0 / max(1.0 - d, 1e-6), 60000.0);\n"
     "  if (dv.x + dv.y + dv.z + dv.w < 0.12) return;\n"  // (little detail: no reliable match)
     "  vec4 c = vec4(uv.x * 2.0 - 1.0, p.a.x > 0.5 ? 1.0 - 2.0 * uv.y : 2.0 * uv.y - 1.0, p.a.y > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
