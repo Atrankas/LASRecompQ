@@ -404,7 +404,7 @@ BOTTLE1_USE_SITE = A.BOTTLE1_USE_SITE
 
 
 def _bottle1_use(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
     assert w == 0x1a9f17e0, hex(w)  # cset w0, eq
     return ('{ extern int rt_bottle1_use(void); c->x[0] = COND_NE(c) ? 0 : 1; if (c->x[0] && rt_bottle1_use()) c->x[0] = 0; }'
             f'  /* {a:#x}: cset w0, eq (first bottle used: Hint Book) */')
@@ -425,8 +425,8 @@ BOSS_SPAWN_SITE = A.BOSS_SPAWN_SITE
 def _boss_spawn(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
     assert w == 0xf9400118, hex(w)  # ldr x24, [x8]
-    if a - 4 >= gen.base:  # (the address table test gives this one word only)
-        w = struct.unpack_from('<I', gen.nso.image, a - 4 - gen.base)[0]
+    if a - 4 >= gen.cbase:  # (the address table test gives this one word only)
+        w = struct.unpack_from('<I', gen.nso.image, a - 4 - gen.cbase)[0]
         assert w == 0x9b086ee8, hex(w)  # madd x8, x23, x8, x27
     return ('{ extern uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info); '
             'extern void rt_enemy_spawn(uint64_t info); rt_enemy_spawn(c->x[2]); '
@@ -662,7 +662,7 @@ FONT_BOX_GLYPH_SITE = A.FONT_BOX_GLYPH_SITE
 
 
 def _font_box_glyph(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
     assert w == 0x3940e008, hex(w)  # ldrb w8, [x0, #0x38]
     return (addr_text('if (c->x[0] == 0) goto L_@FONT_BOX_GLYPH_SKIP@; c->x[8] = LD8(c->x[0] + 0x38);') +
             f'  /* {a:#x}: ldrb w8, [x0, #0x38] (font box glyph: none skips the marking) */')
