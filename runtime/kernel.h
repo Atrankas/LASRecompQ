@@ -41,6 +41,10 @@ struct KThread {
     jmp_buf unwind;
     bool started, finished;
     KThread *anext;        // every thread of this boot (g_klock)
+    // (diagnostics: kernel_dump_threads) when the current kernel wait began; the handles of a WaitSynchronization
+    uint64_t wait_since;
+    uint64_t sync_handles;
+    int32_t sync_count;
 };
 
 typedef struct KSharedMem {

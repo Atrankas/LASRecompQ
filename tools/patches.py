@@ -762,6 +762,15 @@ FRAME_JOB_KICKOFF_SITES = [A.FRAME_JOB_KICKOFF_SITES_0, A.FRAME_JOB_KICKOFF_SITE
                            A.FRAME_JOB_KICKOFF_SITES_3]
 FRAME_JOB_FINISH_SITE = A.FRAME_JOB_FINISH_SITE
 
+# Startup hang (Windows, few cores): a call run on its object's owner thread. main+0x1048cf0 (slot +0x48 of the class
+# whose vtable is 0x7001c490b0; a loader thread calls it for an object O the main thread owns) locks O's mutex (O+0x18),
+# posts a task to the owner's queue ([O+8]) and waits on O's condition variable (O+0x38) once, with no predicate. The
+# task (main+0x1049ed0, on the main thread) stores the result at O+0x10 and calls notify_one without taking O's mutex.
+# If the loader thread is preempted between its post and its wait, the notify finds nobody and the loader waits forever,
+# while the main thread waits for that loader's load (key in its own task queue). The hook takes and drops O's mutex
+# before the notify: the loader holds it from before the post until its wait has begun, so the notify always lands.
+OWNER_CALL_NOTIFY_SITE = A.OWNER_CALL_NOTIFY_SITE
+
 
 # Shadow Link's Appear event (main+0xd157f0: requested once Link is within 3 units, ShadowLink.bfevfl) stops Link and
 # turns the camera to him; on the Field (seeds) the request is skipped and runtime/hle/miniboss.c plays his appearance
@@ -794,4 +803,5 @@ HOOKS = {
     FRAME_JOB_KICKOFF_SITES[2]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
     FRAME_JOB_KICKOFF_SITES[3]: (0x910782b3, (), 'add x19, x21, #0x1e0: frame job kick-off, previous finish first'),
     FRAME_JOB_FINISH_SITE: (0xf9400008, (), 'ldr x8, [x0]: frame job finish (debug delay)'),
+    OWNER_CALL_NOTIFY_SITE: (0x9100e2a0, (), 'add x0, x21, #0x38: owner-thread call done, the caller is waiting first'),
 }

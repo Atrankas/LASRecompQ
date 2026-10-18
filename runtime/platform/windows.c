@@ -114,6 +114,11 @@ void plat_sleep_until_ns(uint64_t t) {
     }
 }
 
+int plat_cpu_count(void) {
+    DWORD_PTR proc = 0, sys = 0;
+    return GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) ? __builtin_popcountll((unsigned long long)proc) : 0;
+}
+
 void plat_thread_guest(int prio) { (void)prio; }  // (the OS's default scheduling serves the game here)
 
 void plat_thread_realtime(uint64_t period_ns) {

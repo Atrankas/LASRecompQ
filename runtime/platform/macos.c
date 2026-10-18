@@ -100,6 +100,8 @@ void plat_thread_realtime(uint64_t period_ns) {
 // the game's frame-critical threads there - the main thread (priority 44) builds and submits every frame. Priorities
 // 44 and more urgent get user-interactive (performance cores first), the rest user-initiated. LARECOMP_THREAD_QOS=0:
 // the default class as before.
+int plat_cpu_count(void) { return 0; }  // (no affinity masks here: the caller uses the machine's count)
+
 void plat_thread_guest(int prio) {
     static int on = -1;
     if (on < 0) on = !getenv("LARECOMP_THREAD_QOS") || atoi(getenv("LARECOMP_THREAD_QOS")) != 0;

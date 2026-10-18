@@ -214,15 +214,15 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
     t->entry = entry;
     t->prio = prio;
     t->core = core < 0 ? 0 : core;
-    t->id = next_thread_id++;
     t->cpu.x[0] = arg;
     t->cpu.sp = stack_top & ~15ull;
     t->cpu.excl_addr = ~0ull;
+    t->cpu.thread = t;
+    pthread_mutex_lock(&g_klock);  // (two guest threads may create threads at once: one id and TLS slot each)
+    t->id = next_thread_id++;
     t->tlr = tls_next;
     tls_next += 0x200;
     t->cpu.tpidrro = t->tlr;
-    t->cpu.thread = t;
-    pthread_mutex_lock(&g_klock);
     t->anext = g_threads;
     g_threads = t;
     pthread_mutex_unlock(&g_klock);
@@ -253,9 +253,23 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
     return t;
 }
 
+static KThread *g_main_thread;  // (g_klock) for hang_watch
+static void *hang_watch(void *arg);
+
 void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3) {
     t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3;
     thread_start(t);  // the host main thread goes on to run the window event loop
+    pthread_mutex_lock(&g_klock);
+    g_main_thread = t;
+    pthread_mutex_unlock(&g_klock);
+    static bool watching;
+    const char *e = getenv("LARECOMP_HANG_DUMP");
+    uint64_t s = e ? strtoull(e, NULL, 10) : 30;
+    if (!watching && s) {
+        watching = true;
+        pthread_t w;
+        if (!pthread_create(&w, NULL, hang_watch, (void *)(uintptr_t)s)) pthread_detach(w);
+    }
 }
 
 uint32_t kernel_current_thread_handle(void) { return t_cur ? t_cur->handle : 0; }
@@ -304,7 +318,14 @@ static void mutex_release(uint64_t addr) {
 
 KThread *g_waitlist;
 
-static void waitlist_add(KThread *t) { t->wnext = g_waitlist; g_waitlist = t; }
+// At the end: the wakers take the most urgent waiter and, among equals, the first found - the longest waiting, as
+// Horizon (first in, first out within a priority). Added at the head, the latest waiter won every tie.
+static void waitlist_add(KThread *t) {
+    KThread **p = &g_waitlist;
+    while (*p) p = &(*p)->wnext;
+    t->wnext = NULL;
+    *p = t;
+}
 static void waitlist_remove(KThread *t) {
     for (KThread **p = &g_waitlist; *p; p = &(*p)->wnext)
         if (*p == t) { *p = t->wnext; return; }
@@ -319,6 +340,7 @@ static uint32_t block_current(int64_t timeout_ns) {
     KThread *t = t_cur;
     struct timespec ts;
     if (timeout_ns >= 0) deadline(&ts, timeout_ns);
+    t->wait_since = plat_now_ns();
     waitlist_add(t);
     while (t->wait_kind != WAIT_NONE) {
         if (g_rt_unwind) {  // reboot: give up the wait (the thread unwinds when its svc returns)
@@ -337,9 +359,36 @@ static uint32_t block_current(int64_t timeout_ns) {
     return t->wait_result;
 }
 
+// (diagnostics) the last KTRACE_N condition variable (untimed waits) / mutex kernel calls, lock-free, for the [hang] dump: what each
+// thread did with which key / mutex word, and the words before and after. LARECOMP_KTRACE=0 turns it off.
+enum { KT_WAIT, KT_WAIT_END, KT_SIGNAL, KT_LOCK, KT_LOCK_END, KT_UNLOCK };
+#define KTRACE_N 256
+typedef struct { uint64_t ns, tid, addr, addr2; uint32_t w0, w1, w2, arg, kind; } KTrace;
+static KTrace ktrace[KTRACE_N];
+static uint64_t ktrace_n;  // (__atomic builtins)
+static int ktrace_on = -1;
+static void kt(uint32_t kind, uint64_t addr, uint64_t addr2, uint32_t w0, uint32_t w1, uint32_t w2, uint32_t arg) {
+    if (ktrace_on < 0) ktrace_on = !getenv("LARECOMP_KTRACE") || atoi(getenv("LARECOMP_KTRACE")) != 0;
+    if (!ktrace_on) return;
+    KTrace *e = &ktrace[__atomic_fetch_add(&ktrace_n, 1, __ATOMIC_RELAXED) % KTRACE_N];
+    *e = (KTrace){plat_now_ns(), t_cur ? t_cur->id : 0, addr, addr2, w0, w1, w2, arg, kind};
+}
+static uint32_t rdw(uint64_t a) { return a ? __atomic_load_n(u32p(a), __ATOMIC_SEQ_CST) : 0; }
+// Keys used with timed waits (periodic pollers, e.g. a 1 ms timer thread) would fill the ring within a second: their
+// waits and signals are left out (g_klock).
+static uint64_t kt_timed[16];
+static bool kt_timed_key(uint64_t key, bool add) {
+    for (int i = 0; i < 16; i++) {
+        if (kt_timed[i] == key) return true;
+        if (!kt_timed[i] && add) { kt_timed[i] = key; return true; }
+    }
+    return false;
+}
+
 static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) {
     pthread_mutex_lock(&g_klock);
     uint32_t v = __atomic_load_n(u32p(addr), __ATOMIC_SEQ_CST);
+    kt(KT_LOCK, addr, 0, v, 0, owner, tag);
     if (v != (owner | WAITERS_BIT)) {
         pthread_mutex_unlock(&g_klock);
         return R_OK;
@@ -349,21 +398,30 @@ static uint32_t svc_arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) 
     t->wait_addr = addr;
     t->wait_tag = tag;
     uint32_t r = block_current(-1);
+    kt(KT_LOCK_END, addr, 0, rdw(addr), 0, 0, r);
     pthread_mutex_unlock(&g_klock);
     return r == R_CANCELLED ? R_OK : r;
 }
 
 static uint32_t svc_arbitrate_unlock(uint64_t addr) {
     pthread_mutex_lock(&g_klock);
+    uint32_t before = rdw(addr);
     mutex_release(addr);
+    kt(KT_UNLOCK, addr, 0, before, rdw(addr), 0, 0);
     pthread_mutex_unlock(&g_klock);
     return R_OK;
 }
 
 static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64_t timeout) {
+    static long late_us = -1;  // (test) LARECOMP_DEBUG_CV_LATE_WAIT=<us>: every condition variable wait starts that late
+    if (late_us < 0) late_us = getenv("LARECOMP_DEBUG_CV_LATE_WAIT") ? atol(getenv("LARECOMP_DEBUG_CV_LATE_WAIT")) : 0;
+    if (late_us > 0) usleep((useconds_t)late_us);  // (forces notify-before-wait races in the game's code: hle/delegate_null.c)
     pthread_mutex_lock(&g_klock);
     KThread *t = t_cur;
+    uint32_t mbefore = rdw(mutex), kbefore = rdw(key);
     mutex_release(mutex);
+    bool traced = !kt_timed_key(key, timeout >= 0);
+    if (traced) kt(KT_WAIT, key, mutex, kbefore, mbefore, rdw(mutex), 0xffffffffu);
     t->wait_kind = WAIT_CONDVAR;
     t->wait_addr = key;
     t->wait_mutex = mutex;
@@ -374,12 +432,14 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     // Enter saw its own handle in the lock word and ArbitrateLock waited on itself forever (issue #19's thread dump: a
     // controller thread's timer-event wait).
     uint32_t r = block_current(timeout);
+    if (traced) kt(KT_WAIT_END, key, mutex, rdw(key), rdw(mutex), 0, r);
     pthread_mutex_unlock(&g_klock);
     return r;
 }
 
 static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
     pthread_mutex_lock(&g_klock);
+    uint32_t kbefore = rdw(key);
     int woken = 0;
     bool any_left = false;
     for (;;) {
@@ -403,6 +463,7 @@ static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
     for (KThread *t = g_waitlist; t; t = t->wnext)
         if (t->wait_kind == WAIT_CONDVAR && t->wait_addr == key) any_left = true;
     if (!any_left) __atomic_store_n(u32p(key), 0, __ATOMIC_SEQ_CST);
+    if (!kt_timed_key(key, false)) kt(KT_SIGNAL, key, 0, kbefore, rdw(key), (uint32_t)woken, (uint32_t)count);
     pthread_mutex_unlock(&g_klock);
 }
 
@@ -456,7 +517,6 @@ static bool arbiter_update(uint64_t addr, int32_t expected, int32_t desired) {
 static uint32_t svc_signal_to_address(uint64_t addr, uint32_t type, int32_t value, int32_t count) {
     pthread_mutex_lock(&g_klock);
     uint32_t r = R_OK;
-    int32_t cur = (int32_t)__atomic_load_n(u32p(addr), __ATOMIC_SEQ_CST);
     if (type == ARB_SIGNAL) {
         arbiter_wake(addr, count);
     } else if (type == ARB_SIGNAL_INC_EQ) {
@@ -508,6 +568,8 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
         if (t->cancel) { t->cancel = false; r = R_CANCELLED; goto out; }
         if (g_rt_unwind) { r = R_CANCELLED; goto out; }
         t->in_sync_wait = true;
+        t->wait_since = plat_now_ns();
+        t->sync_handles = handles_ptr, t->sync_count = count;
         t->snext = g_syncwaiters;
         g_syncwaiters = t;
         bool ok = kwait(timeout < 0 ? -1 : timeout, &ts);
@@ -846,6 +908,87 @@ void kernel_stop_threads(void (*idle)(void)) {
     LOG("[reboot] %d guest threads stopped in %llums\n", n, (unsigned long long)((plat_now_ns() - t0) / 1000000));
 }
 
+// (diagnostics) every guest thread and what it waits on, with the guest frame chain (x29 / x30 pairs on the guest
+// stack: the game function that waits). Doesn't wait for g_klock: a hang may hold it (then says so).
+void kernel_dump_threads(const char *prefix) {
+    bool locked = false;
+    for (int i = 0; i < 100 && !(locked = pthread_mutex_trylock(&g_klock) == 0); i++) usleep(1000);
+    if (!locked) LOG("%s g_klock held for 100+ ms: read without it\n", prefix);
+    static const char *const kinds[] = {"-", "mutex", "condvar", "arbiter"};
+    uint64_t now = plat_now_ns();
+    for (KThread *t = g_threads; t; t = t->anext) {
+        if (!t->started || t->finished) continue;
+        bool waiting = t->wait_kind != WAIT_NONE || t->in_sync_wait;
+        LOG("%s thread %llu h %x prio %d entry %llx pc %llx lr %llx wait %s addr %llx mutex %llx tag %x%s%s for %llu ms\n",
+            prefix, (unsigned long long)t->id, t->handle, t->prio, (unsigned long long)t->entry, (unsigned long long)t->cpu.pc,
+            (unsigned long long)t->cpu.x[30], (unsigned)t->wait_kind < 4 ? kinds[t->wait_kind] : "?",
+            (unsigned long long)t->wait_addr, (unsigned long long)t->wait_mutex, t->wait_tag,
+            t->in_sync_wait ? " in WaitSynchronization" : "", t->cancel ? " (cancel pending)" : "",
+            waiting ? (unsigned long long)((now - t->wait_since) / 1000000) : 0ull);
+        if (t->wait_kind == WAIT_CONDVAR || t->wait_kind == WAIT_MUTEX) {
+            uint64_t m = t->wait_kind == WAIT_CONDVAR ? t->wait_mutex : t->wait_addr;
+            LOG("%s   mutex word %x%s\n", prefix, *(volatile uint32_t *)(uintptr_t)m,
+                t->wait_kind == WAIT_CONDVAR ? "" : " (waiting to be handed it)");
+        }
+        for (int i = 0; t->in_sync_wait && i < t->sync_count && i < 8; i++) {
+            uint32_t h = ((const uint32_t *)(uintptr_t)t->sync_handles)[i];
+            KObject *o = h > 0x100 && h - 0x100 < MAX_HANDLES ? handles[h - 0x100] : NULL;
+            LOG("%s   handle %x type %d%s\n", prefix, h, o ? (int)o->type : 0, o && o->signaled ? " signaled" : "");
+        }
+        uint64_t fp = t->cpu.x[29];  // guest frames: [fp] = caller's fp, [fp + 8] = return address
+        for (int i = 0; i < 12 && fp >= STACK_BASE && fp < STACK_BASE + STACK_SIZE && !(fp & 15); i++) {
+            LOG("%s   frame %d: lr %llx\n", prefix, i, (unsigned long long)*(uint64_t *)(uintptr_t)(fp + 8));
+            uint64_t up = *(uint64_t *)(uintptr_t)fp;
+            if (up <= fp) break;
+            fp = up;
+        }
+    }
+    {   // the kernel trace: oldest first
+        static const char *const kn[] = {"cv-wait", "cv-wait-end", "cv-signal", "arb-lock", "arb-lock-end", "arb-unlock"};
+        uint64_t n = __atomic_load_n(&ktrace_n, __ATOMIC_RELAXED), first = n > KTRACE_N ? n - KTRACE_N : 0;
+        LOG("%s kernel trace, last %llu of %llu (ms before now; words before -> after):\n", prefix,
+            (unsigned long long)(n - first), (unsigned long long)n);
+        for (uint64_t i = first; i < n; i++) {
+            const KTrace *e = &ktrace[i % KTRACE_N];
+            long long ago = (long long)(now - e->ns) / 1000000;
+            switch (e->kind) {
+            case KT_WAIT: LOG("%s  -%lld t%llu cv-wait key %llx (%x) mutex %llx %x -> %x\n", prefix, ago,
+                              (unsigned long long)e->tid, (unsigned long long)e->addr, e->w0, (unsigned long long)e->addr2,
+                              e->w1, e->w2); break;
+            case KT_WAIT_END: LOG("%s  -%lld t%llu cv-wait-end key %llx (%x) mutex %llx (%x) r %x\n", prefix, ago,
+                                  (unsigned long long)e->tid, (unsigned long long)e->addr, e->w0, (unsigned long long)e->addr2,
+                                  e->w1, e->arg); break;
+            case KT_SIGNAL: LOG("%s  -%lld t%llu cv-signal key %llx %x -> %x count %d woke %u\n", prefix, ago,
+                                (unsigned long long)e->tid, (unsigned long long)e->addr, e->w0, e->w1, (int)e->arg, e->w2); break;
+            default: LOG("%s  -%lld t%llu %s mutex %llx %x -> %x owner %x tag/r %x\n", prefix, ago, (unsigned long long)e->tid,
+                         kn[e->kind < 6 ? e->kind : 0], (unsigned long long)e->addr, e->w0, e->w1, e->w2, e->arg);
+            }
+        }
+    }
+    if (locked) pthread_mutex_unlock(&g_klock);
+}
+
+// LARECOMP_HANG_DUMP=<s> (default 30, 0 off): the main guest thread in one kernel wait that long -> one dump (and one
+// more if it is still the same wait a period later). Startup hangs (Windows, few cores) leave no other trace.
+static void *hang_watch(void *arg) {
+    uint64_t s = (uint64_t)(uintptr_t)arg, dumped_since = 0;
+    for (int dumps = 0; dumps < 4;) {
+        sleep(1);
+        pthread_mutex_lock(&g_klock);
+        KThread *m = g_main_thread;  // (the current boot's: kernel_reset clears it)
+        uint64_t since = m ? m->wait_since : 0;
+        bool stuck = m && m->started && !m->finished && (m->wait_kind != WAIT_NONE || m->in_sync_wait) &&
+                     plat_now_ns() - since >= s * 1000000000ull && since != dumped_since;
+        pthread_mutex_unlock(&g_klock);
+        if (!stuck) continue;
+        LOG("[hang] main guest thread in one kernel wait for %llu s: guest threads\n", (unsigned long long)s);
+        kernel_dump_threads("[hang]");
+        dumped_since = since;
+        dumps++;
+    }
+    return NULL;
+}
+
 // Reboot, step 2 (threads stopped): a fresh kernel. Kernel objects are leaked rather than freed: host statics
 // can still point at some (vi.c's vsync event, signalled by its host timer thread).
 void kernel_reset(void) {
@@ -856,6 +999,7 @@ void kernel_reset(void) {
         free(t);
     }
     g_threads = NULL;
+    g_main_thread = NULL;
     g_waitlist = NULL;
     g_syncwaiters = NULL;
     memset(handles, 0, sizeof handles);

@@ -431,3 +431,8 @@ void plat_frame_work(uint64_t busy_ns, uint64_t target_ns) {
 }
 
 void plat_thread_guest(int prio) { (void)prio; }  // (plat_thread_core places the threads on phones)
+
+int plat_cpu_count(void) {
+    cpu_set_t set;
+    return sched_getaffinity(0, sizeof set, &set) == 0 ? CPU_COUNT(&set) : 0;
+}

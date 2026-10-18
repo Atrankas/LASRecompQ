@@ -868,9 +868,16 @@ static void run_translate(void (*fn)(void *), void *arg) { run_translate_q(fn, a
 
 static void start_workers(void) {
     // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
-    int n = SDL_GetNumLogicalCPUCores() - 4;
+    int n = plat_cpu_count();  // (the process's affinity mask: a process held to a few cores, few workers)
+    if (n <= 0) n = SDL_GetNumLogicalCPUCores();
+    n -= 4;
     if (n < 4) n = 4;
     if (n > 16) n = 16;
+#ifdef __ANDROID__
+    // phones: two - with four, entering a new area drove every core at once on top of the game, render and
+    // translator threads, and that peak was when the S20 FE (worn battery) hard-reset; pipelines take a little longer
+    n = 2;
+#endif
     if (getenv("LARECOMP_VK_JOBS")) n = atoi(getenv("LARECOMP_VK_JOBS")) > 0 ? atoi(getenv("LARECOMP_VK_JOBS")) : 1;
     for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
 }

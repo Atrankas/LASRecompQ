@@ -20,6 +20,7 @@ void rt_dig_hole(Cpu *c);  // digs.c
 uint64_t rt_hole_cap(void);
 void rt_frame_job_kickoff(uint64_t owner);  // delegate_null.c
 void rt_frame_job_finish(uint64_t job);
+void rt_owner_call_notify(Cpu *c, uint64_t obj);
 
 int rt_hook(Cpu *c, uint64_t site) {
     switch (site) {
@@ -75,6 +76,9 @@ int rt_hook(Cpu *c, uint64_t site) {
         return 0;
     case GUEST(GA_FRAME_JOB_KICKOFF_SITES_3):
         rt_frame_job_kickoff(c->x[21]);
+        return 0;
+    case GUEST(GA_OWNER_CALL_NOTIFY_SITE):  // OWNER_CALL_NOTIFY_SITE - add x0, x21, #0x38: notify only once the caller waits
+        rt_owner_call_notify(c, c->x[21]);
         return 0;
     case GUEST(GA_FRAME_JOB_FINISH_SITE):  // FRAME_JOB_FINISH_SITE - ldr x8, [x0]: a frame job's finish (debug delay)
         rt_frame_job_finish(c->x[0]);
