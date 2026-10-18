@@ -31,6 +31,7 @@ typedef struct NvnTexture {
     uint64_t pool_offset;
     void *backend;  // renderer-side texture
     uint64_t debug_id;
+    uint32_t pool_refs;  // texture pool entries that name it (cleared when it is finalized: runtime/nvn/objects.c)
     char label[64];
 } NvnTexture;
 
@@ -52,7 +53,11 @@ typedef struct {
     NvnTexture *tex;
     NvnTextureView view;
     bool has_view;
+    uint32_t dead_format;  // the texture registered here was finalized (NVN format + 1; 0 = no): tex is NULL
 } NvnTexEntry;
+
+// A draw named a texture pool slot whose texture was finalized (runtime/nvn/objects.c): logged, a few times
+void nvn_dead_slot_sampled(const NvnTexEntry *e, uint32_t slot);
 
 typedef struct NvnDescPool {
     uint64_t addr;

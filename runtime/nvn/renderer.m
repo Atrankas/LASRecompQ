@@ -534,11 +534,67 @@ static id<MTLTexture> view_cached(id<MTLTexture> base, uint64_t params, id<MTLTe
     return v;
 }
 
+// Metal format views: an ordinary colour format can be viewed as another one of the same size, a compressed one only
+// as itself or its sRGB / linear twin, depth and stencil formats only as themselves. Anything else is a Metal
+// assertion (not only with API validation: newTextureViewWithPixelFormat checks it in the driver and aborts).
+static int mtl_color_bytes(MTLPixelFormat f) {  // texel size of an ordinary colour format, 0 = not one
+    switch (f) {
+    case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Unorm_sRGB: case MTLPixelFormatR8Snorm: case MTLPixelFormatR8Uint:
+    case MTLPixelFormatR8Sint: case MTLPixelFormatA8Unorm:
+        return 1;
+    case MTLPixelFormatR16Unorm: case MTLPixelFormatR16Snorm: case MTLPixelFormatR16Uint: case MTLPixelFormatR16Sint:
+    case MTLPixelFormatR16Float: case MTLPixelFormatRG8Unorm: case MTLPixelFormatRG8Unorm_sRGB: case MTLPixelFormatRG8Snorm:
+    case MTLPixelFormatRG8Uint: case MTLPixelFormatRG8Sint: case MTLPixelFormatB5G6R5Unorm: case MTLPixelFormatA1BGR5Unorm:
+    case MTLPixelFormatABGR4Unorm: case MTLPixelFormatBGR5A1Unorm:
+        return 2;
+    case MTLPixelFormatR32Uint: case MTLPixelFormatR32Sint: case MTLPixelFormatR32Float: case MTLPixelFormatRG16Unorm:
+    case MTLPixelFormatRG16Snorm: case MTLPixelFormatRG16Uint: case MTLPixelFormatRG16Sint: case MTLPixelFormatRG16Float:
+    case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatRGBA8Unorm_sRGB: case MTLPixelFormatRGBA8Snorm:
+    case MTLPixelFormatRGBA8Uint: case MTLPixelFormatRGBA8Sint: case MTLPixelFormatBGRA8Unorm:
+    case MTLPixelFormatBGRA8Unorm_sRGB: case MTLPixelFormatRGB10A2Unorm: case MTLPixelFormatRGB10A2Uint:
+    case MTLPixelFormatBGR10A2Unorm: case MTLPixelFormatRG11B10Float: case MTLPixelFormatRGB9E5Float:
+        return 4;
+    case MTLPixelFormatRG32Uint: case MTLPixelFormatRG32Sint: case MTLPixelFormatRG32Float: case MTLPixelFormatRGBA16Unorm:
+    case MTLPixelFormatRGBA16Snorm: case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA16Sint:
+    case MTLPixelFormatRGBA16Float:
+        return 8;
+    case MTLPixelFormatRGBA32Uint: case MTLPixelFormatRGBA32Sint: case MTLPixelFormatRGBA32Float:
+        return 16;
+    default:
+        return 0;
+    }
+}
+static MTLPixelFormat mtl_linear_twin(MTLPixelFormat f) {  // compressed sRGB format -> its linear one
+    switch (f) {
+    case MTLPixelFormatBC1_RGBA_sRGB: return MTLPixelFormatBC1_RGBA;
+    case MTLPixelFormatBC2_RGBA_sRGB: return MTLPixelFormatBC2_RGBA;
+    case MTLPixelFormatBC3_RGBA_sRGB: return MTLPixelFormatBC3_RGBA;
+    case MTLPixelFormatBC7_RGBAUnorm_sRGB: return MTLPixelFormatBC7_RGBAUnorm;
+    default:
+        if (f >= MTLPixelFormatASTC_4x4_sRGB && f <= MTLPixelFormatASTC_12x12_sRGB)
+            return f - MTLPixelFormatASTC_4x4_sRGB + MTLPixelFormatASTC_4x4_LDR;
+        return f;
+    }
+}
+static bool mtl_view_compatible(MTLPixelFormat base, MTLPixelFormat view) {
+    if (base == view) return true;
+    int bb = mtl_color_bytes(base), vb = mtl_color_bytes(view);
+    if (bb || vb) return bb == vb;
+    return mtl_linear_twin(base) == mtl_linear_twin(view);  // (depth / stencil formats have no twin)
+}
+
 static id<MTLTexture> view_texture(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render,
                                    id<MTLBlitCommandEncoder> blit) {
     id<MTLTexture> base = renderer_texture(t, blit, render);
     if (!has_view || !v->setmask) return base;
     MTLPixelFormat pf = (v->setmask & 4) ? renderer_pixel_format(v->format) : base.pixelFormat;
+    if (!mtl_view_compatible(base.pixelFormat, pf)) {  // (see mtl_view_compatible: the base format instead)
+        static int nlog;
+        if (!nlog++)
+            LOG("[view] texture %ux%u fmt %#x (mtl %lu) can't be viewed as nvn %#x (mtl %lu): its own format instead "
+                "(logged once)\n", t->width, t->height, t->format, (unsigned long)base.pixelFormat, v->format, (unsigned long)pf);
+        pf = base.pixelFormat;
+    }
     NSUInteger lv0 = (v->setmask & 1) ? v->base_level : 0;
     NSUInteger nlv = (v->setmask & 1) && v->num_levels ? v->num_levels : base.mipmapLevelCount - lv0;
     NSUInteger ly0 = (v->setmask & 2) ? v->min_layer : 0;
@@ -1622,6 +1678,7 @@ static void bind_textures(int stage, ShaderInfo *si) {
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            else if (e->dead_format) nvn_dead_slot_sampled(e, tic);
             if (e->tex && stage == 1) {
                 extern int renderer_texpatch_of(NvnTexture *t);
                 extern int texpatch_bottle_kind(int id);
@@ -1923,6 +1980,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            else if (e->dead_format) nvn_dead_slot_sampled(e, tic);
             if (e->tex && i < 64) renderer_texture_scale(e->tex, &tex_sc[0][i][0], &tex_sc[0][i][1]);
             for (int k = 0; k < nfeedback; k++)
                 if (e->tex == feedback_tex[k]) {
@@ -2580,7 +2638,10 @@ static void draw(CmdRec *r, bool indexed) {
         if (fkey.flip_x) rs[65][0] = (float)st.rt.color[0]->width;  // (mirror mode: the composite's width, guest pixels)
         [enc setFragmentBytes:rs length:(NSUInteger)(fkey.flip_x ? 66 : 1 + pr->fi->ntex) * 16 atIndex:RSCALE_BUFFER_INDEX];
     }
-    if (st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && !(st.ubuf[0][2].addr & 3)) {  // cut bushes' items
+    // (uniform buffer 2 = the model matrix - only when the vertex shader reads it: a binding left from an earlier draw
+    // is another object's matrix)
+    bool model_ubo = (pr->vi->cbuf_mask >> (cbuf_base + 2)) & 1;
+    if (model_ubo && st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && !(st.ubuf[0][2].addr & 3)) {  // cut bushes' items
         extern void pot_item_draw(float *m);                                                 // (runtime/hle/pot_glow.c)
         pot_item_draw((float *)(uintptr_t)st.ubuf[0][2].addr);
     }
@@ -2618,11 +2679,11 @@ static void draw(CmdRec *r, bool indexed) {
         float tint[8] = {0};
         extern bool pot_tint(const float *m, float tint[8], uint64_t mesh);
         extern bool pot_glow_active(void);
-        if (st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && pot_glow_active())
+        if (model_ubo && st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && pot_glow_active())
             pot_tint((const float *)(uintptr_t)st.ubuf[0][2].addr, tint, st.vbuf[0].addr);
         if (draw_bottle) {  // the gold Escape Bottle (runtime/hle/escape.c): its item icon / held-up model
             extern void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]);
-            int u = draw_bottle == 3 ? 3 : 0;  // (the fairy model: its bone matrices, for where it stands - souls.c)
+            int u = draw_bottle == 3 || draw_bottle == 6 ? 3 : 0;  // (fairy / Piece of Power models: their bone matrices, for where they stand - souls.c, triforce.c)
             escape_bottle_tint(draw_bottle, (const float *)(uintptr_t)st.ubuf[0][u].addr, (uint32_t)st.ubuf[0][u].size, tint);
         }
         if (draw_heart) { extern void texpatch_heart_tint(int kind, float tint[8]); texpatch_heart_tint(draw_heart, tint); }
@@ -2639,13 +2700,17 @@ static void draw(CmdRec *r, bool indexed) {
     // Instanced draws with item spots among their instances (bushsanity: bushes are drawn in batches, each instance's
     // model matrix in vertex storage buffer 0, indexed by instance id): drawn as runs of instances, gold runs tinted.
     // (Metal's instance_id includes the base instance, so a run [b + k, b + k + n) draws exactly those instances.)
+    // Only for a vertex shader that reads storage buffer 0: the binding stays from the last draw that set it, so any
+    // other instanced draw (particle effects: leaves, dust, sparkles) took a bush batch's matrices for its own
+    // instances and was tinted wherever that batch had an unchecked bush at the same index - and a batch of a single
+    // bush was never looked at.
     uint32_t inst_all = indexed ? (uint32_t)r->x[6] : (uint32_t)r->x[4], base_all = indexed ? (uint32_t)r->x[5] : (uint32_t)r->x[3];
     if (!inst_all) inst_all = 1;
     enum { MAX_RUNS = 64 };
     uint32_t run_at[MAX_RUNS], run_n[MAX_RUNS];
     bool run_gold[MAX_RUNS];
     int nruns = 0;
-    if (pr->fi->uses_tint && inst_all > 1 && st.sbuf[0][0].addr) {
+    if (pr->fi->uses_tint && (pr->vi->ssbo_read & 1) && st.sbuf[0][0].addr) {
         extern bool pot_glow_active(void);
         extern bool pot_instance_gold(const float *m);
         uint64_t recs = st.sbuf[0][0].size / 64;

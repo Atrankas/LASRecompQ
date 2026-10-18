@@ -404,9 +404,10 @@ NVN(nvnTextureInitialize) {
     SET_HOST(A(0), t);
     RET(1);
 }
+static void pool_entries_forget(NvnTexture *t);
 NVN(nvnTextureFinalize) {
     NvnTexture *t = HOST(NvnTexture, A(0));
-    if (t) gt_texture_destroyed(t);  // (and freed; in order after the lists that may still use it)
+    if (t) { pool_entries_forget(t); gt_texture_destroyed(t); }  // (destroyed and freed in order after the lists that may still use it)
     SET_HOST(A(0), 0);
 }
 NVN(nvnTextureSetDebugLabel) {
@@ -566,9 +567,47 @@ static void register_texture(Cpu *c) {
     int id = (int)A(1);
     if (id < 0 || id >= d->count) return;
     NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
+    if (e->tex && e->tex->pool_refs) e->tex->pool_refs--;
     e->tex = HOST(NvnTexture, A(2));
+    if (e->tex) e->tex->pool_refs++;
+    e->dead_format = 0;
     e->has_view = A(3) != 0;
     if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
+}
+
+// A finalized texture can stay registered: the game frees a room's textures on a level / room change and leaves
+// their pool slots as they are until it registers something else there, and a draw can still name such a slot.
+// Entries held its NvnTexture pointer, so the next texture allocated at the same address (another format) got the
+// old entry's view: a BC4 / BC5 / BC1 texture viewed as RGBA8 or the reverse, a Metal assertion that stopped the
+// game (about 1 in 6 long dungeon runs). Those entries are emptied (sampled as nothing, like an unregistered slot).
+static void pool_entries_forget(NvnTexture *t) {
+    if (!t->pool_refs) return;
+    int n = 0;
+    for (int p = 0; p < 64 && t->pool_refs; p++) {
+        NvnDescPool *d = g_texture_pools[p];
+        if (!d) continue;
+        NvnTexEntry *ents = (NvnTexEntry *)d->entries;
+        for (int i = 0; i < d->count && t->pool_refs; i++)
+            if (ents[i].tex == t) {
+                ents[i].tex = NULL;
+                ents[i].has_view = false;
+                ents[i].dead_format = t->format + 1;
+                t->pool_refs--;
+                n++;
+            }
+    }
+    static int nlog;
+    if (n && nlog++ < 8)
+        LOG("[nvn] texture %ux%u fmt %#x finalized while in %d texture pool slot(s): emptied%s\n", t->width, t->height,
+            t->format, n, nlog == 8 ? " (further ones not logged)" : "");
+}
+void nvn_dead_slot_sampled(const NvnTexEntry *e, uint32_t slot) {
+    static int nlog;
+    if (nlog < 8) {
+        nlog++;
+        LOG("[nvn] draw samples texture pool slot %u, whose texture (fmt %#x) was finalized: nothing bound%s\n", slot,
+            e->dead_format - 1, nlog == 8 ? " (further ones not logged)" : "");
+    }
 }
 NVN(nvnTexturePoolRegisterTexture) { register_texture(c); }
 NVN(nvnTexturePoolRegisterImage) { register_texture(c); }
