@@ -370,6 +370,12 @@ static volatile int g_prep_skip;
 static bool g_prep_skip_ask;  // Skip pressed: "are you sure?" in front of the bar (LARECOMP_LAUNCHER_SHOT=<f>:skipask)
 static void prep_progress(int done, int total) { g_prep_frac = total ? (float)done / (float)total : 0.0f; }
 static void prepare_shaders(bool background = false) {
+#ifdef __ANDROID__
+    // (phones: off - every variant before PLAY took minutes on an Adreno 650 after each shader update, and doubled the
+    // compile load with the shader head start, which builds what the player saw, in the background: exec.c)
+    (void)background;
+    return;
+#endif
     g_prep_skip = 0, g_prep_frac = 0;
     if (!background) set_job("Preparing shaders");
     shader_prep_run((g_root + "/romfs").c_str(), prep_progress, &g_prep_skip);
