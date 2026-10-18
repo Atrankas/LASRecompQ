@@ -102,6 +102,10 @@ typedef struct {
     // predicated instruction sees the uints current (hflush_all, hreset_all: maxwell_translate, emit_insn).
     uint8_t hstate[256];
     bool huse[256];
+    // hc<r>: the register's f32 value as a half (hx(r, 1u)), kept while the register stands: the lit shaders convert a
+    // pixel's inputs again for every light (hcstate 1: current; any write to r<r> or h<r> drops it)
+    uint8_t hcstate[256];
+    bool hcuse[256];
     bool in_guard;  // translating a predicated instruction: nothing may change state inside it
     // an XMAD of a's low half by an immediate (cfull, C = RZ) waiting for the XMAD.PSL of the high half that completes
     // the 32-bit product (emit_insn: one multiply instead of the two halves' expansions)
@@ -130,7 +134,12 @@ static void hmat(Ctx *c, int r) {  // the 32-bit value of a register whose shado
     c->hstate[r] = 2;
 }
 static void hflush_all(Ctx *c) { for (int r = 0; r < 256; r++) hmat(c, r); }
-static void hreset_all(Ctx *c) { memset(c->hstate, 0, sizeof c->hstate); }
+static bool hc_on(void) {  // LARECOMP_VK_HALF_CONV=0: hx(r, 1u) converts each time (comparisons)
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_VK_HALF_CONV") ? atoi(getenv("LARECOMP_VK_HALF_CONV")) != 0 : 1;
+    return on;
+}
+static void hreset_all(Ctx *c) { memset(c->hstate, 0, sizeof c->hstate), memset(c->hcstate, 0, sizeof c->hcstate); }
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
 static int64_t sbits(uint64_t w, int lo, int n) {
@@ -262,7 +271,8 @@ static void writes_after_insn(Ctx *c, size_t text0, bool guarded) {
         if (r >= 256) continue;
         int tz = r == c->tz_dst ? c->tz_val : 0;
         c->reg_tz[r] = (uint8_t)(guarded ? TZMIN((int)c->reg_tz[r], tz) : tz);
-        if (strncmp(p + 3, "packFloat2x16(h", 15)) c->hstate[r] = 0;
+        if (strncmp(p + 3, "packFloat2x16(h", 15)) c->hstate[r] = 0, c->hcstate[r] = 0;
+        if (!strncmp(p + 3, "floatBitsToUint(float((", 23)) c->hcstate[r] = 0;  // (an F32 half result: a new value)
         if (c->xmad_lo_pc && (r == c->xmad_a || r == c->xmad_d)) c->xmad_lo_pc = 0;  // (the pair's operands changed)
     }
 }
@@ -422,6 +432,14 @@ static const char *hsrc(Ctx *c, const char *v, int swz, bool neg, bool abs_, cha
         }
         c->huse[r] = true;
         sprintf(t, swz == 2 ? "h%d.xx" : swz == 3 ? "h%d.yy" : "h%d", r);
+    } else if (r >= 0 && swz == 1 && hshadow_on(c) && hc_on() && (c->hcstate[r] || !c->in_guard)) {  // the f32 as a half, kept
+        if (!c->hcstate[r]) {
+            hmat(c, r);
+            sp(&c->body, "    hc%d = f16vec2(float16_t(uintBitsToFloat(r%d)));\n", r, r);
+            c->hcstate[r] = 1;
+        }
+        c->hcuse[r] = true;
+        sprintf(t, "hc%d", r);
     } else {
         if (r >= 0) hmat(c, r);  // the f32 bits (swz 1), or the uint under a guard
         sprintf(t, "hx(%s, %du)", v, swz);
@@ -452,7 +470,7 @@ static void hstore(Ctx *c, int d, const char *expr, int merge, bool sat) {
             if (!c->hstate[d]) sp(&c->body, "    h%d = unpackFloat2x16(r%d);\n", d, d);  // (the lane kept)
             sp(&c->body, "    { f16vec2 t_ = %s; h%d.%c = t_.%c; }\n", e, d, merge == 2 ? 'x' : 'y', merge == 2 ? 'x' : 'y');
         }
-        c->hstate[d] = 1;
+        c->hstate[d] = 1, c->hcstate[d] = 0;
         return;
     }
     hmat(c, d);  // (hpack reads the uint)
@@ -1268,7 +1286,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                 if (d != RZ) {
                     c->reg_used[d] = 1, c->huse[d] = true;
                     sp(&c->body, bits(w, 50, 1) ? "    h%d = saturate(f16vec2(%s, 0.0hf));\n" : "    h%d = f16vec2(%s, 0.0hf);\n", d, v);
-                    c->hstate[d] = 1;
+                    c->hstate[d] = 1, c->hcstate[d] = 0;
                 }
             } else {
                 sprintf(t, "float(%s)", v);
@@ -2792,6 +2810,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (c->reg_used[i]) sp(&s, "  uint r%d = 0u;\n", i);
     for (int i = 0; i < 256; i++)
         if (c->huse[i]) sp(&s, "  f16vec2 h%d = f16vec2(0.0hf);\n", i);
+    for (int i = 0; i < 256; i++)
+        if (c->hcuse[i]) sp(&s, "  f16vec2 hc%d = f16vec2(0.0hf);\n", i);
     for (int i = 0; i < 7; i++)
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0u; bool ccz = false, ccs = false;\n");
@@ -2936,34 +2956,54 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (k == FLOW_BRX && brx_of(c, j) < 0) brx = true;  // (a BRX with a table: a BRA to each of its targets)
         if (k == FLOW_SYNC || k == FLOW_BRK || k == FLOW_CONT) last_pop = j;
     }
+    // A loop header keeps what holds on entry for the registers its loop never writes (the lit shaders' light loop:
+    // the pixel's inputs, converted and unpacked once instead of per light): loop_end[t] is the last instruction a
+    // back edge to t comes from (end: not known), and every destination field in [t, loop_end] counts as a write.
     uint8_t *back = calloc(end + 4, 1);
+    size_t *loop_end = calloc(end + 4, sizeof *loop_end);
+#define BACK(t, j) do { size_t t__ = (t), j__ = (j); back[t__] = 1; if (j__ > loop_end[t__]) loop_end[t__] = j__; } while (0)
     for (size_t j = 1; j < end && !brx; j++) {
         int k = j % 4 ? flow_kind(cw[j]) : FLOW_NONE;
         if (k == FLOW_BRX) {
             int b = brx_of(c, j);
-            for (int q = 0; q < c->brx[b].n; q++) if (c->brx[b].t[q] / 8 <= j) back[c->brx[b].t[q] / 8] = 1;
+            for (int q = 0; q < c->brx[b].n; q++) if (c->brx[b].t[q] / 8 <= j) BACK(c->brx[b].t[q] / 8, j);
             continue;
         }
         if (k != FLOW_BRA && k != FLOW_SSY && k != FLOW_PBK && k != FLOW_PCNT) continue;
         int64_t t = norm_target((int64_t)(j * 8) + 8 + sbits(cw[j], 20, 24)) / 8;
         if (t < 0 || (size_t)t >= end) continue;
-        if (k == FLOW_BRA ? (size_t)t <= j : last_pop > j && last_pop >= (size_t)t) back[t] = 1;
+        if (k == FLOW_BRA) { if ((size_t)t <= j) BACK((size_t)t, j); }
+        else if (last_pop > j && last_pop >= (size_t)t) BACK((size_t)t, end);
     }
+#undef BACK
     if (brx) nlab = 0;
-    uint8_t *ltz = malloc(nlab * 256 + 1), *lh = malloc(nlab * 256 + 1);
-    memset(ltz, 32, nlab * 256), memset(lh, 2, nlab * 256);  // (nothing seen yet: everything holds)
+    uint8_t *ltz = malloc(nlab * 256 + 1), *lh = malloc(nlab * 256 + 1), *lhc = malloc(nlab * 256 + 1);
+    memset(ltz, 32, nlab * 256), memset(lh, 2, nlab * 256), memset(lhc, 1, nlab * 256);  // (nothing seen yet: everything holds)
     uint32_t *pushed = malloc(sizeof(uint32_t) * (end + 1));
     size_t npushed = 0;
 #define MEET(t) do { size_t t_ = (t); if (!brx && t_ < end && labno[t_] >= 0) for (int r_ = 0; r_ < 256; r_++) { \
         uint8_t *z_ = ltz + (size_t)labno[t_] * 256 + r_, *h_ = lh + (size_t)labno[t_] * 256 + r_; \
         if (c->reg_tz[r_] < *z_) *z_ = c->reg_tz[r_]; \
-        if (c->hstate[r_] != 2) *h_ = 0; } } while (0)
+        if (c->hstate[r_] != 2) *h_ = 0; \
+        if (c->hcstate[r_] != 1) lhc[(size_t)labno[t_] * 256 + r_] = 0; } } while (0)
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
         uint32_t pc = (uint32_t)(i * 8);
         if (label[i]) {  // a block entry
-            if (brx || back[i]) memset(c->reg_tz, 0, sizeof c->reg_tz), hreset_all(c);
-            else memcpy(c->reg_tz, ltz + (size_t)labno[i] * 256, 256), memcpy(c->hstate, lh + (size_t)labno[i] * 256, 256);
+            if (brx) memset(c->reg_tz, 0, sizeof c->reg_tz), hreset_all(c);
+            else {
+                memcpy(c->reg_tz, ltz + (size_t)labno[i] * 256, 256), memcpy(c->hstate, lh + (size_t)labno[i] * 256, 256);
+                memcpy(c->hcstate, lhc + (size_t)labno[i] * 256, 256);
+                if (back[i])  // (a loop header: what the loop writes, by destination fields, is unknown)
+                    for (size_t j = i; j <= loop_end[i] && j < end; j++) {
+                        if (j % 4 == 0) continue;
+                        int d0 = (int)bits(cw[j], 0, 8), d1 = (int)bits(cw[j], 28, 8);
+                        for (int k = 0; k < 4; k++) {
+                            if (d0 + k < 256) c->reg_tz[d0 + k] = 0, c->hstate[d0 + k] = 0, c->hcstate[d0 + k] = 0;
+                            if (d1 + k < 256) c->reg_tz[d1 + k] = 0, c->hstate[d1 + k] = 0, c->hcstate[d1 + k] = 0;
+                        }
+                    }
+            }
             c->xmad_lo_pc = 0;
         }
         if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
@@ -3007,7 +3047,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         }
     }
 #undef MEET
-    free(labno), free(back), free(ltz), free(lh), free(pushed);
+    free(labno), free(back), free(loop_end), free(ltz), free(lh), free(lhc), free(pushed);
     free(c->flow_to), c->flow_to = NULL;
     free(off0), free(off1);
     free(label);
