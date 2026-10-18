@@ -137,11 +137,12 @@ final class GpuDrivers {
                + probe.getAbsolutePath();
     }
 
-    // No choice made in the menu, and the system's driver is older than Vulkan 1.3, which the renderer needs (Adreno 6xx
+    // No custom driver selected, and the system's driver is older than Vulkan 1.3, which the renderer needs (Adreno 6xx
     // phones that stopped getting updates, e.g. the Galaxy S20 FE's 1.1): the Turnip build the APK carries runs
     static boolean auto(Context c) {
-        return !prefs(c).contains("use")
-               && !c.getPackageManager().hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION, 0x403000);
+        // (also after a custom driver was switched off: the system's can't run the game without Vulkan 1.3 - it
+        // crashed at start)
+        return !c.getPackageManager().hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION, 0x403000);
     }
 
     // The driver in the APK's assets (turnip/: meta.json and its library, tools/android/build_deps.sh), copied out once
