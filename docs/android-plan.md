@@ -122,7 +122,14 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
 - [ ] Campo no trecho mais pesado: ~20-24 ms de GPU mesmo em 50% (capim alto 3-4 ms de geometria): a geração pausa ali
 - [ ] Controles físicos (Xbox, PS, GameSir): suporte via SDL3 já existe, falta testar com um controle no aparelho
 - [x] Resolução dinâmica lembra o fator de cada área (voltar ao Campo depois de uma casa não começa alto demais)
-- [ ] Campo, medido por passe (escala 0.5, ~27 ms de GPU em média): passe de cor principal ~13 ms, pré-passe de
+- [x] Geração de código dos shaders (com o Fable): leituras de cbuf alinhadas, meia precisão sem empacotar, min/max sem
+      `isnan` onde o GPU já segue as regras do Maxwell, conhecimento propagado entre blocos. Campo: 0.5 27 -> 15 ms,
+      720p 27.5 -> 22.3 ms, 1080p 42 -> 33.5 ms; shader iluminado com 16 registros (4 waves). Casa / Tail Cave em 720p:
+      23/20 -> 30 fps. Campo andando no capim: 60 na tela sem quedas, resolução dinâmica ~0.65-0.70
+- [x] Menu a 60 por cima do jogo a 30 (um segundo quadro com o menu redesenhado); arrastar rola 1:1 com o dedo
+- [ ] Água com blocos azuis (Martha's Bay, `Field_15J`): cópias de profundidade envolvidas; em investigação
+- [ ] Casa da Madam: quadros reais de ~34.6 ms com a GPU em 21 ms (a geração pausa: 30 na tela) - investigar a CPU
+- [ ] Campo, medido por passe (escala 0.5, ~27 ms de GPU em média, antes da geração de código nova): passe de cor principal ~13 ms, pré-passe de
       profundidade 2.4 ms, sombras 2.1 ms; ~16 ms não dependem da resolução (vértices: ~1.9 milhão por quadro; o
       capim alto tem um VS de 1101 instruções com 32 registros). O shader iluminado (2669 instruções, 2 waves) e os
       VS pesados são o alvo: propostas de geração de código em teste (sem `isnan` nos min/max/saturate, leituras de
