@@ -874,9 +874,7 @@ static void start_workers(void) {
     if (n < 4) n = 4;
     if (n > 16) n = 16;
 #ifdef __ANDROID__
-    // phones: two - with four, entering a new area drove every core at once on top of the game, render and
-    // translator threads, and that peak was when the S20 FE (worn battery) hard-reset; pipelines take a little longer
-    n = 2;
+    n = 3;  // (phones: three, so the game, render and translator threads keep cores of their own - less heat too)
 #endif
     if (getenv("LARECOMP_VK_JOBS")) n = atoi(getenv("LARECOMP_VK_JOBS")) > 0 ? atoi(getenv("LARECOMP_VK_JOBS")) : 1;
     for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
