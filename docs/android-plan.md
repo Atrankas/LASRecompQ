@@ -127,8 +127,15 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
       720p 27.5 -> 22.3 ms, 1080p 42 -> 33.5 ms; shader iluminado com 16 registros (4 waves). Casa / Tail Cave em 720p:
       23/20 -> 30 fps. Campo andando no capim: 60 na tela sem quedas, resolução dinâmica ~0.65-0.70
 - [x] Menu a 60 por cima do jogo a 30 (um segundo quadro com o menu redesenhado); arrastar rola 1:1 com o dedo
-- [ ] Água com blocos azuis (Martha's Bay, `Field_15J`): cópias de profundidade envolvidas; em investigação
-- [ ] Casa da Madam: quadros reais de ~34.6 ms com a GPU em 21 ms (a geração pausa: 30 na tela) - investigar a CPU
+- [x] Água com blocos azuis (Martha's Bay, `Field_15J`): o passe de reflexo compara a própria profundidade com a de
+      outro shader; sem `precise` as posições saíam um fio diferentes. `precise` de volta nos celulares (~0.3 ms)
+- [x] Casa da Madam: a geração pausava por um quadro atrasado isolado (média lenta agora) e a resolução caía por causa
+      da CPU (agora só cai quando a GPU está no limite): 57-59 na tela em 0.75-0.8
+- [x] Quadro gerado com o movimento próprio dos objetos (blocos 16x16 comparados com o quadro anterior, do port do
+      WWHD): o Link não treme mais ao andar (na vertical principalmente)
+- [x] Resolução dinâmica no limite real da GPU: Campo andando no capim a 60 firmes em 0.9-0.95 (era 0.65)
+- [ ] Aquecimento: depois de ~1 h de testes seguidos o aparelho chega a status térmico 4 e tudo cai; a resolução
+      dinâmica cobre a GPU, mas a CPU lenta atrasa quadros
 - [ ] Campo, medido por passe (escala 0.5, ~27 ms de GPU em média, antes da geração de código nova): passe de cor principal ~13 ms, pré-passe de
       profundidade 2.4 ms, sombras 2.1 ms; ~16 ms não dependem da resolução (vértices: ~1.9 milhão por quadro; o
       capim alto tem um VS de 1101 instruções com 32 registros). O shader iluminado (2669 instruções, 2 waves) e os
