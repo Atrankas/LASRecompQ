@@ -33,7 +33,7 @@ final class RootBoost {
         "smax=\"\"; for p in /sys/devices/system/cpu/cpufreq/policy*; do smax=\"$smax $p:$(cat $p/scaling_max_freq 2>/dev/null)\"; done\n" +
         // balanced: the GPU's floor at the clock nearest three quarters of the top one
         "gtop=$(cat $g/devfreq/max_freq 2>/dev/null); gbal=$gtop\n" +
-        "for f in $(cat $g/devfreq/available_frequencies 2>/dev/null); do [ $(( f * 4 )) -ge $(( gtop * 3 )) ] && [ $f -lt $gbal ] && gbal=$f; done\n" +
+        "for f in $(cat $g/devfreq/available_frequencies 2>/dev/null); do [ $(( f / 1000 * 4 )) -ge $(( gtop / 1000 * 3 )) ] && [ $f -lt $gbal ] && gbal=$f; done\n" +
         // on while the game is in front (the marker) and alive (a crash or a kill skips onPause)
         "while [ -f \"$M\" ] && kill -0 \"$PID\" 2>/dev/null; do\n" +
         "  echo -1 > /sys/power/cpufreq_max_limit 2>/dev/null\n" +
