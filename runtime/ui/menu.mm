@@ -76,6 +76,9 @@ static void push(const QEvent &e) {
     pthread_mutex_unlock(&q_lock);
 }
 
+#ifndef __APPLE__
+extern "C" double vk_shown_fps(void);  // (vulkan/device.c: every picture shown, generated ones too: the FPS counter)
+#endif
 bool menu_is_open(void) { return g_open.load(); }
 static void set_open(bool open);
 extern "C" void menu_toggle(void) { set_open(!g_open.load()); }  // (the touch controls' menu button)
@@ -982,7 +985,11 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+#ifdef __APPLE__
         ImGui::Text("%.0f fps", io.Framerate);
+#else
+        ImGui::Text("%.0f fps", vk_shown_fps() > 0 ? vk_shown_fps() : io.Framerate);
+#endif
         ImGui::End();
     }
 

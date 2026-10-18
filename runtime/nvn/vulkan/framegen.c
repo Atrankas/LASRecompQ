@@ -52,7 +52,15 @@ static const char kWarp[] =
     // where the scene point at g lands in the generated picture
     "vec2 moved(vec2 g) {\n"
     "  vec2 n = g / p.b.xy;\n"
-    "  float d = textureLod(depthT, n * p.b.zw, 0.0).r;\n"
+    // the depth as an average over ~9x9 pixels (five plain fetches, as view distance): the exact depth tore thin
+    // layered things (tall grass, plants) into rows when the camera moved - neighbouring pixels near and far
+    "  vec2 o = 4.0 / vec2(textureSize(depthT, 0));\n"
+    "  float z = 0.0;\n"
+    "  for (int i = 0; i < 5; i++) {\n"
+    "    vec2 q = n * p.b.zw + o * (i == 0 ? vec2(0.0) : vec2((i & 1) == 1 ? -1.0 : 1.0, (i & 2) == 2 ? -1.0 : 1.0));\n"
+    "    z += 1.0 / max(1.0 - textureLod(depthT, q, 0.0).r, 1e-6);\n"
+    "  }\n"
+    "  float d = 1.0 - 5.0 / z;\n"
     "  vec4 c = vec4(n.x * 2.0 - 1.0, p.a.x > 0.5 ? 1.0 - 2.0 * n.y : 2.0 * n.y - 1.0, p.a.y > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
     "  vec4 h = vec4(dot(p.m0, c), dot(p.m1, c), dot(p.m2, c), dot(p.m3, c));\n"
     "  if (h.w <= 1e-5) return g;\n"

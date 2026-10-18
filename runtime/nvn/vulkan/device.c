@@ -1028,6 +1028,8 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
 }
 
 static bool g_fg_copy;  // vk_frame_end: copy the window picture for frame generation (backend_present_gpu)
+static double g_shown_fps;
+double vk_shown_fps(void) { return g_shown_fps; }
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
@@ -1056,6 +1058,13 @@ void vk_frame_end(const char *shot_path) {
     if (driver_probe[0] && r >= 0 && ++presented == 60) unlink(driver_probe), driver_probe[0] = 0;  // (the driver works)
 #endif
     cur_frame.ok = false;
+    {   // pictures shown a second (generated ones too): the menu's FPS counter
+        static uint64_t t0, n;
+        uint64_t now = SDL_GetTicksNS();
+        n++;
+        if (!t0) t0 = now;
+        if (now - t0 >= 500000000ull) g_shown_fps = n * 1e9 / (double)(now - t0), n = 0, t0 = now;
+    }
     if (shot_path) {
         vk_wait_seq(seq);
         uint32_t w = g_vk.sc_extent.width, h = g_vk.sc_extent.height;
