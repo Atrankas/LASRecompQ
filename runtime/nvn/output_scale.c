@@ -34,7 +34,9 @@
 // (with frame generation the fence-measured time runs ~4 ms over the frame's own work, the in-between frame's share:
 // the Field held 30 real / 60 shown at 1.0 with 29 ms measured, and broke at 1.15.) The Power setting's Balanced
 // keeps ~10% of the GPU spare: held at its limit, with frame generation on top, the phone drew so much for so long
-// that its worn battery couldn't keep up (hard resets); maximum performance goes to the limit.
+// that its worn battery couldn't keep up (hard resets); maximum performance goes to the limit. (Measured later, the
+// resets were frame generation's passes - but the margin still pays: at the limit the S20 FE reached 48 C and thermal
+// status 4 in 7 minutes and collapsed to 20 fps at 67% speed; with it, 15 minutes at 42 C, 60 shown, same final res.)
 #define DYN_GPU_SLOW (g_settings.power_mode == 1 ? 30.0 : 27.0)
 #define DYN_GPU_ROOM (g_settings.power_mode == 1 ? 26.0 : 23.5)  // (+0.05 near 1: ~10% more pixels, ~1 ms in the Field)
 extern bool fg_enabled(void);
