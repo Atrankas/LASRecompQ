@@ -134,6 +134,11 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
 - [x] Quadro gerado com o movimento próprio dos objetos (blocos 16x16 comparados com o quadro anterior, do port do
       WWHD): o Link não treme mais ao andar (na vertical principalmente)
 - [x] Resolução dinâmica no limite real da GPU: Campo andando no capim a 60 firmes em 0.9-0.95 (era 0.65)
+- [ ] Ideias do port do mamcjr (github.com/mamcjr/LASRecompAndroid, MIT): pilhas SSY/PBK/PCNT resolvidas na
+      tradução e janela do BRX (em porte); heap como memória da GPU (`VK_EXT_map_memory_placed`) descartado aqui: o
+      jogo pede um heap de 3,2 GB e a memória posicionada é toda alocada de uma vez (o S20 FE tem 6 GB)
+- [x] Energia: "Equilibrado" (padrão) não segura mais a GPU no clock máximo nem passa por cima do limite de
+      temperatura; "Máximo desempenho" como antes
 - [ ] Aquecimento: depois de ~1 h de testes seguidos o aparelho chega a status térmico 4 e tudo cai; a resolução
       dinâmica cobre a GPU, mas a CPU lenta atrasa quadros
 - [ ] Campo, medido por passe (escala 0.5, ~27 ms de GPU em média, antes da geração de código nova): passe de cor principal ~13 ms, pré-passe de
