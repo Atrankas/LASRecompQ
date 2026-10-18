@@ -9,6 +9,8 @@
 //                  (each change reallocates the render targets: a short hitch, so it changes rarely, with hysteresis)
 // Test overrides: LARECOMP_SCALE=<f> (render height = 1080 x f), LARECOMP_WIDE_TEST=<f> (forced shape).
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 
 #include "../hle.h"
@@ -46,7 +48,30 @@ static int g_dyn_n, g_dyn_gpu_n, g_dyn_good;
 static double g_dyn_cool_until, g_dyn_probe_wait = 5.0, g_dyn_probe_at;
 static double g_dyn_last_raise = -100;
 
+// The factor each level settled at: back in a level, start from it (the Field after a house began at the house's
+// factor and spent seconds at 20 fps coming down). This session only.
+static struct { char name[32]; double f; } g_dyn_levels[48];
+static void dyn_level_check(double now) {
+    extern const char *game_level_name(void);
+    static char cur[32];
+    const char *lv = game_level_name();
+    if (!lv || !*lv || !strncmp(lv, cur, sizeof cur - 1)) return;
+    int i, freei = -1;
+    for (i = 0; i < 48 && g_dyn_levels[i].name[0]; i++)
+        if (!strcmp(g_dyn_levels[i].name, cur)) break;
+    if (cur[0] && i < 48) snprintf(g_dyn_levels[i].name, sizeof g_dyn_levels[i].name, "%s", cur), g_dyn_levels[i].f = g_dyn;
+    snprintf(cur, sizeof cur, "%s", lv);
+    for (i = 0; i < 48 && g_dyn_levels[i].name[0]; i++)
+        if (!strcmp(g_dyn_levels[i].name, cur)) { g_dyn = g_dyn_levels[i].f; freei = i; break; }
+    if (freei >= 0) {
+        g_dyn_dt_sum = g_dyn_gpu_sum = 0, g_dyn_n = g_dyn_gpu_n = 0, g_dyn_good = 0;
+        g_dyn_cool_until = now + 1.0;
+        LOG("[dynres] back in %s: %.2f\n", cur, g_dyn);
+    }
+}
+
 static void dyn_update(double now, double gpu_ms) {
+    dyn_level_check(now);
     double dt = g_last_t > 0 ? (now - g_last_t) * 1000.0 : 16.7;
     g_last_t = now;
     if (dt > 250) return;  // (loading, menus, a stall: not the GPU's steady state)

@@ -1166,8 +1166,9 @@ static inline bool ss_need(uint32_t bit, bool same) {
 #define PG_MAX 1024
 static VkQueryPool pg_qp;
 static int pg_n, pg_state;  // marks written; 0 not yet, 1 recording the frame, 2 waiting for it, 3 done
-static uint64_t pg_frame, pg_draws0;
+static uint64_t pg_frame, pg_draws0, pg_verts;
 static char pg_what[PG_MAX][112];
+static uint64_t pg_vc[PG_MAX];  // (draw marks: the vertices that draw ran)
 uint64_t renderer_present_count(void);
 static void pg_mark(VkCommandBuffer cb, const char *fmt, ...) {
     if (pg_state == 0) {
@@ -1210,20 +1211,21 @@ static void pg_report(void) {  // (present: the frame's GPU work is done a few f
     for (int i = 0; i < pg_n - 1 && i < 40; i++)
         LOG("[passgpu] %6.3f ms  #%d %s\n", (t[order[i] + 1] - t[order[i]]) * per, order[i], pg_what[order[i]]);
     if (pg_draws_on()) {  // (each draw mark closes the time since the mark before it: that draw's)
-        static struct { char what[112]; double ms; int n; } sum[256];
+        LOG("[drawgpu] vertices drawn in the frame: %llu\n", (unsigned long long)pg_verts);
+        static struct { char what[112]; double ms; int n; uint64_t v; } sum[256];
         int ns = 0;
         for (int i = 1; i < pg_n; i++) {
             if (strncmp(pg_what[i], "draw ", 5)) continue;
             int k = 0;
             while (k < ns && strcmp(sum[k].what, pg_what[i])) k++;
             if (k == ns && ns < 256) snprintf(sum[ns++].what, sizeof sum[0].what, "%s", pg_what[i]);
-            if (k < 256) sum[k].ms += (t[i] - t[i - 1]) * per, sum[k].n++;
+            if (k < 256) sum[k].ms += (t[i] - t[i - 1]) * per, sum[k].n++, sum[k].v += pg_vc[i];
         }
         for (int i = 0; i < ns && i < 25; i++) {
             int b = i;
             for (int j = i + 1; j < ns; j++) if (sum[j].ms > sum[b].ms) b = j;
             if (b != i) { __typeof__(sum[0]) x = sum[i]; sum[i] = sum[b]; sum[b] = x; }
-            LOG("[drawgpu] %6.3f ms  %3d draws  %s\n", sum[i].ms, sum[i].n, sum[i].what);
+            LOG("[drawgpu] %6.3f ms  %3d draws %8llu vertices  %s\n", sum[i].ms, sum[i].n, (unsigned long long)sum[i].v, sum[i].what);
         }
     }
 }
@@ -4372,6 +4374,10 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (pg_state == 1 && pg_draws_on()) pg_mark(cb, "draw fs %llx vs %llx", (unsigned long long)st.program->stages[1].code_addr,
                                                 (unsigned long long)st.program->stages[0].code_addr);
+    if (pg_state == 1 && pg_draws_on() && pg_n > 0) {
+        uint64_t vc = (uint64_t)(use_index ? icount : count) * (inst ? inst : 1);
+        pg_verts += vc, pg_vc[pg_n - 1] = vc;
+    }
     dl_note("  draw vs %llx fs %llx (hash %016llx) count %u inst %u", (unsigned long long)st.program->stages[0].code_addr,
             (unsigned long long)st.program->stages[1].code_addr, (unsigned long long)g_cur_fs_hash, (unsigned)count, (unsigned)inst);
     if (dl_on == 3) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=3: each draw its own submission)
