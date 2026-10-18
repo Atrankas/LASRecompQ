@@ -246,7 +246,7 @@ static void left_end(void) {
     ImGui::PopStyleVar();
     if (const char *t = getenv("LARECOMP_OPT_SCROLL")) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(t));  // (test)
     ImGui::EndChild();
-    if (g_cards) { ImGui::PopID(); return; }  // (descriptions in the cards: no pane)
+    if (g_cards) return;  // (descriptions in the cards: no pane)
     // the description: the hovered row (mouse) wins, else the selected one (controller), else the last shown
     if (!g_desc_hover.empty()) g_desc_shown = g_desc_hover;
     else if (!g_desc_focus.empty()) g_desc_shown = g_desc_focus;
@@ -276,6 +276,7 @@ void opt_desc_text(void) {
 
 void opt_end(void) {
     left_end();
+    if (g_cards) { ImGui::PopID(); return; }  // (cards: the descriptions are in them, no pane - and one PopID only)
     right_begin("##desc", ImGuiWindowFlags_NoNav);
     opt_desc_text();
     ImGui::EndChild();
