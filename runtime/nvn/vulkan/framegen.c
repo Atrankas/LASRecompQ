@@ -204,20 +204,36 @@ bool fg_frame_wanted(uint64_t frame, TexBackend *fin) {
         g_have_vp = g_have_prev = false;
     }
     // only while the game holds its 30: real frames late (the GPU full) get no in-between ones - their GPU time goes
-    // back to the game until it has room again (a period average under 34.5 ms for 2 s)
+    // back to the game until it has room again (a period average under 34.5 ms for 1 s). The average moves slowly
+    // (~1 s): a single late frame (a 50 ms one now and then in Madam MeowMeow's house) paused it for seconds before
     static double last, avg = 33.3, room_since = -1;
     static bool paused;
     double now = SDL_GetTicksNS() / 1e6;
-    if (last > 0 && now - last < 200) avg += (now - last - avg) * 0.15;
+    if (last > 0 && now - last < 200) avg += (now - last - avg) * 0.05;
     last = now;
     if (!paused && avg > 36.5) paused = true, room_since = -1;
     else if (paused && avg < 34.5) {
         if (room_since < 0) room_since = now;
-        else if (now - room_since > 2000) paused = false;
+        else if (now - room_since > 1000) paused = false;
     } else if (paused) {
         room_since = -1;
     }
     bool ok = have && g_have_prev && g_scene_ok && g_depth && g_depth->backend && g_game_interval == 2 && !menu_is_open() && !paused;
+    static int logwhy = -1;  // LARECOMP_LOG_FRAMEGEN=1: why frames went without an in-between one, every 2 s
+    if (logwhy < 0) logwhy = getenv("LARECOMP_LOG_FRAMEGEN") != NULL;
+    if (logwhy) {
+        static int n, why[6];
+        static double at;
+        n++;
+        why[0] += !have || !g_have_prev, why[1] += !g_scene_ok, why[2] += !g_depth || !g_depth->backend;
+        why[3] += g_game_interval != 2, why[4] += menu_is_open(), why[5] += paused;
+        if (now - at > 2000) {
+            if (why[0] + why[1] + why[2] + why[3] + why[5])
+                LOG("[framegen] of %d frames without: camera %d, scene %d, depth %d, interval %d, menu %d, paused %d (avg %.1f ms)\n", n,
+                    why[0], why[1], why[2], why[3], why[4], why[5], avg);
+            n = 0, memset(why, 0, sizeof why), at = now;
+        }
+    }
     if (!ok) g_scene_ok = false, g_depth = NULL;
     g_fin = fin;
     return ok;

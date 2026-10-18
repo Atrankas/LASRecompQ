@@ -88,7 +88,9 @@ static void dyn_update(double now, double gpu_ms) {
     g_dyn_n = g_dyn_gpu_n = 0;
     if (now < g_dyn_cool_until) return;
     double prev = g_dyn;
-    bool slow = avg_dt > DYN_SLOW_MS || (avg_gpu >= 0 && avg_gpu > DYN_GPU_SLOW);
+    // (frames late with the GPU far under its budget: the CPU's doing - fewer pixels wouldn't help; Madam MeowMeow's
+    // house went from 1.2 to 0.6 for 1 ms)
+    bool slow = (avg_dt > DYN_SLOW_MS && (avg_gpu < 0 || avg_gpu >= DYN_GPU_ROOM)) || (avg_gpu >= 0 && avg_gpu > DYN_GPU_SLOW);
     if (slow) {
         // the step by how far over (GPU time ~ the square of the factor): entering the Field from a house it took
         // ten seconds at 20 fps, 0.05 at a time, to get down to where it fits
