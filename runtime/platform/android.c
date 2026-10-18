@@ -436,3 +436,6 @@ int plat_cpu_count(void) {
     cpu_set_t set;
     return sched_getaffinity(0, sizeof set, &set) == 0 ? CPU_COUNT(&set) : 0;
 }
+
+// (phones: in the log; the game keeps running)
+void plat_notice(const char *text) { __android_log_print(ANDROID_LOG_WARN, "LASRecomp", "[notice] %s", text); }
