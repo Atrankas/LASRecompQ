@@ -32,8 +32,8 @@ int maxwell_precise_pos = 1;
 int maxwell_scalar_cbuf;
 int maxwell_ieee_minmax;
 int maxwell_robust_cbuf;
-bool maxwell_static_stacks = true;  // (LARECOMP_DYN_STACKS=1: the stack arrays, as before)
-bool maxwell_brx_table = true;      // (LARECOMP_VK_BRX_TABLE=0: every instruction after a BRX a possible target)
+bool maxwell_static_stacks = false;  // (off until the phone restarts are cleared; LARECOMP_DYN_STACKS=0: on)
+bool maxwell_brx_table = false;      // (off until the phone restarts are cleared; LARECOMP_VK_BRX_TABLE=1: on)
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
