@@ -11,6 +11,8 @@
 #include <float.h>
 #include <math.h>
 
+#include "imgui_internal.h"
+
 struct TouchUi {
     SDL_FingerID id = 0;
     bool active = false, drag = false, flinging = false;
@@ -68,3 +70,13 @@ struct TouchUi {
         return px;
     }
 };
+
+// After ImGui::NewFrame: the frame's scroll (TouchUi::frame) straight onto the page under the finger, pixel for pixel -
+// as wheel steps it went through ImGui's step size (5 lines of whatever font the page has) and the page drifted
+// ahead of or behind the finger.
+inline void touch_scroll_apply(float px) {
+    if (px == 0) return;
+    ImGuiWindow *w = GImGui->HoveredWindow;
+    while (w && w->ScrollMax.y <= 0 && (w->Flags & ImGuiWindowFlags_ChildWindow) && w->ParentWindow) w = w->ParentWindow;
+    if (w && w->ScrollMax.y > 0) ImGui::SetScrollY(w, ImClamp(w->Scroll.y - px, 0.0f, w->ScrollMax.y));
+}

@@ -30,6 +30,7 @@ int maxwell_gmem_mirror;
 int maxwell_half_native;
 int maxwell_precise_pos = 1;
 int maxwell_scalar_cbuf;
+int maxwell_ieee_minmax;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -86,7 +87,34 @@ typedef struct {
     bool glsl;               // emit Vulkan GLSL: dialect-specific constructs here, the rest via glsl_rewrite()
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
     uint32_t cbuf_need[18];  // highest constant vec4 index + 1 per cbuf (array size of the GLSL block)
+    // GLSL: how many low bits of each register are known to be zero (0: nothing known, 32: the register is zero), kept
+    // through the integer instructions that preserve them (tz_result). A constant-buffer load from a register that is
+    // a multiple of 16 is then one load of a constant word of a constant row (cbuf_ref_aligned): on Adreno one ldc
+    // instead of a vec4 ldc and a chain of selects for the word (nir_lower_ubo_vec4, unaligned path).
+    uint8_t reg_tz[256];
+    int tz_dst, tz_val;  // the instruction being translated: its tracked result, or tz_dst -1 (tz_after_insn)
+    // GLSL, native fp16: the half-precision instructions keep their results in f16vec2 shadows h<r> of the registers
+    // and read them there (hsrc / hstore); the register's uint is packed from the shadow only when a 32-bit read
+    // needs it (reg). hstate: 0 the uint is current, 1 the shadow is (uint stale), 2 both. Every block entry and every
+    // predicated instruction sees the uints current (hflush_all, hreset_all: maxwell_translate, emit_insn).
+    uint8_t hstate[256];
+    bool huse[256];
+    bool in_guard;  // translating a predicated instruction: nothing may change state inside it
 } Ctx;
+
+static bool id_char(char ch);
+static bool hshadow_on(Ctx *c) {
+    static int on = -1;  // LARECOMP_VK_HALF_SHADOW=0: hx / hpack on the registers, as before (comparisons)
+    if (on < 0) on = getenv("LARECOMP_VK_HALF_SHADOW") ? atoi(getenv("LARECOMP_VK_HALF_SHADOW")) != 0 : 1;
+    return on && c->glsl && maxwell_half_native;
+}
+static void hmat(Ctx *c, int r) {  // the 32-bit value of a register whose shadow is the current one
+    if (r == RZ || c->hstate[r] != 1) return;
+    sp(&c->body, "    r%d = packFloat2x16(h%d);\n", r, r);
+    c->hstate[r] = 2;
+}
+static void hflush_all(Ctx *c) { for (int r = 0; r < 256; r++) hmat(c, r); }
+static void hreset_all(Ctx *c) { memset(c->hstate, 0, sizeof c->hstate); }
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
 static int64_t sbits(uint64_t w, int lo, int n) {
@@ -113,11 +141,19 @@ static uint32_t norm_target(int64_t t) {
 static const char *reg(Ctx *c, int r, char *buf) {
     if (r == RZ) return "0u";
     c->reg_used[r] = 1;
+    if (c->hstate[r]) hmat(c, r);  // a 32-bit read
+    sprintf(buf, "r%d", r);
+    return buf;
+}
+static const char *reg_raw(Ctx *c, int r, char *buf) {  // a half instruction's operand: hsrc picks the shadow or the uint
+    if (r == RZ) return "0u";
+    c->reg_used[r] = 1;
     sprintf(buf, "r%d", r);
     return buf;
 }
 
 #define R(r) reg(c, (r), alloca(16))
+#define RH(r) reg_raw(c, (r), alloca(16))
 #define F(expr) fmt_f(alloca(512), (expr))
 static char *fmt_f(char *b, const char *e) { sprintf(b, "as_type<float>(%s)", e); return b; }
 
@@ -136,6 +172,16 @@ static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char 
     if (!dyn && idx < 18 && off >= 0 && (uint32_t)(off >> 4) + 1 > c->cbuf_need[idx]) c->cbuf_need[idx] = (uint32_t)(off >> 4) + 1;
     if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu)", idx, dyn, (long long)off);
     else sprintf(buf, "cb%d[%lld][%lld]", idx, (long long)(off >> 4), (long long)((off >> 2) & 3));
+    return buf;
+}
+
+// LDC from a register known to be a multiple of 16: the row is (reg >> 4) + a constant, the word a constant (cbra, the
+// prelude; cbras through scalar_cbuf_rewrite). The same words as cbuf_ref's, short of a wrapped reg + offset, out of the
+// cbuf either way.
+static const char *cbuf_ref_aligned(Ctx *c, int idx, int64_t off, const char *dyn, char *buf) {
+    c->info->cbuf_mask |= 1u << idx;
+    c->info->cbuf_dynamic |= 1u << idx;
+    sprintf(buf, "cbra(cb%d, (%s) >> 4, %lldu, %lldu)", idx, dyn, (long long)(off >> 4), (long long)((off >> 2) & 3));
     return buf;
 }
 
@@ -163,6 +209,40 @@ static const char *operand_b(Ctx *c, uint64_t w, bool float_imm, char *buf) {
     }
 }
 #define B(fi) operand_b(c, w, (fi), alloca(128))
+
+// Known trailing zero bits (Ctx reg_tz): of a register, of operand B, of the halves XMAD multiplies
+static int ctz_u32(uint32_t v) { int n = 0; if (!v) return 32; while (!(v & 1u)) v >>= 1, n++; return n; }
+#define TZR(r) ((r) == RZ ? 32 : (int)c->reg_tz[(r)])
+#define TZMIN(x, y) ((x) < (y) ? (x) : (y))
+#define TZADD(x, y) ((x) + (y) > 32 ? 32 : (x) + (y))
+static void tz_result(Ctx *c, int d, int tz) { c->tz_dst = d; c->tz_val = tz; }
+static int tz_half(int tz, bool hi) { return hi ? (tz >= 32 ? 32 : tz > 16 ? tz - 16 : 0) : (tz >= 16 ? 32 : tz); }
+static int tz_of_b(Ctx *c, uint64_t w) {
+    switch (b_form(w)) {
+    case B_REG: return TZR((int)bits(w, 20, 8));
+    case B_CBUF: return 0;
+    default: {
+        uint32_t v = (uint32_t)bits(w, 20, 19) | ((uint32_t)bits(w, 56, 1) << 19);
+        if (v & 0x80000u) v |= 0xFFF00000u;
+        return ctz_u32(v);
+    }
+    }
+}
+// After an instruction: every register it wrote (`r<n> = ` in its text; every write is spelled so) knows nothing any
+// more, but for the tracked result; guarded, the old value may survive, so the weaker of the two. Its half shadow is
+// stale too - unless the line is the shadow being packed into it (hmat).
+static void writes_after_insn(Ctx *c, size_t text0, bool guarded) {
+    for (const char *p = c->body.buf + text0; (p = strstr(p, " = ")) != NULL; p += 3) {
+        const char *q = p;
+        while (q > c->body.buf + text0 && q[-1] >= '0' && q[-1] <= '9') q--;
+        if (q == p || q[-1] != 'r' || (q - 1 > c->body.buf + text0 && id_char(q[-2]))) continue;
+        int r = atoi(q);
+        if (r >= 256) continue;
+        int tz = r == c->tz_dst ? c->tz_val : 0;
+        c->reg_tz[r] = (uint8_t)(guarded ? TZMIN((int)c->reg_tz[r], tz) : tz);
+        if (strncmp(p + 3, "packFloat2x16(h", 15)) c->hstate[r] = 0;
+    }
+}
 
 // The "C" operand of three-source ops: REG_39, or the cbuf/reg swap form (0x51/0x53/... classes).
 static const char *operand_c_for_ffma(Ctx *c, uint64_t w, char *buf, const char **b_out, char *bbuf) {
@@ -310,9 +390,19 @@ static void attr_store(Ctx *c, int src, uint32_t addr) {
 // Swizzle: 0 H1_H0 (both halves), 1 F32 (one f32 used for both lanes), 2 H0_H0, 3 H1_H1.
 // Merge: 0 H1_H0 (pack both), 1 F32 (lane 0 as f32), 2 MRG_H0 (replace low half), 3 MRG_H1 (replace high half).
 static const char *hsrc(Ctx *c, const char *v, int swz, bool neg, bool abs_, char *buf) {
-    (void)c;
     char t[300];
-    sprintf(t, "hx(%s, %du)", v, swz);
+    int r = v[0] == 'r' && v[1] >= '0' && v[1] <= '9' ? atoi(v + 1) : -1;  // (a register operand: RH)
+    if (r >= 0 && swz != 1 && hshadow_on(c) && (c->hstate[r] || !c->in_guard)) {  // the shadow, made from the uint if need be
+        if (!c->hstate[r]) {  // (not under a guard: the other path would miss the unpack)
+            sp(&c->body, "    h%d = unpackFloat2x16(r%d);\n", r, r);
+            c->hstate[r] = 2;
+        }
+        c->huse[r] = true;
+        sprintf(t, swz == 2 ? "h%d.xx" : swz == 3 ? "h%d.yy" : "h%d", r);
+    } else {
+        if (r >= 0) hmat(c, r);  // the f32 bits (swz 1), or the uint under a guard
+        sprintf(t, "hx(%s, %du)", v, swz);
+    }
     if (abs_ && neg) sprintf(buf, "(-abs(%s))", t);
     else if (abs_) sprintf(buf, "abs(%s)", t);
     else if (neg) sprintf(buf, "(-%s)", t);
@@ -326,6 +416,23 @@ static void hstore(Ctx *c, int d, const char *expr, int merge, bool sat) {
     if (sat) sprintf(e, "saturate(%s)", expr); else strcpy(e, expr);
     if (d == RZ) return;
     c->reg_used[d] = 1;
+    if (hshadow_on(c) && !c->in_guard) {  // into the shadow (merges: one lane of it), the uint only for an f32 result
+        c->huse[d] = true;
+        if (merge == 1) {
+            sp(&c->body, "    r%d = floatBitsToUint(float((%s).x));\n", d, e);
+            c->hstate[d] = 0;
+            return;
+        }
+        if (merge == 0) {
+            sp(&c->body, "    h%d = %s;\n", d, e);
+        } else {
+            if (!c->hstate[d]) sp(&c->body, "    h%d = unpackFloat2x16(r%d);\n", d, d);  // (the lane kept)
+            sp(&c->body, "    { f16vec2 t_ = %s; h%d.%c = t_.%c; }\n", e, d, merge == 2 ? 'x' : 'y', merge == 2 ? 'x' : 'y');
+        }
+        c->hstate[d] = 1;
+        return;
+    }
+    hmat(c, d);  // (hpack reads the uint)
     sprintf(t, "hpack(%s, %du, r%d)", e, merge, d);
     set_reg(c, d, t);
 }
@@ -366,7 +473,7 @@ static bool emit_half(Ctx *c, uint64_t w) {
                 sat = bits(w, 32, 1); absb = bits(w, 30, 1); swb = (int)bits(w, 28, 2);
                 if (kind == 0) negb = bits(w, 31, 1);
                 else { nega = bits(w, 31, 1); negb = false; }  // HMUL2 reg: the negate bit is A's at 31
-                bv = R((int)bits(w, 20, 8));
+                bv = RH((int)bits(w, 20, 8));
             } else if (form == 1) {
                 sat = bits(w, 52, 1); negb = kind == 0 ? bits(w, 56, 1) : false; absb = bits(w, 54, 1); swb = 1;
                 bv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb);
@@ -375,7 +482,7 @@ static bool emit_half(Ctx *c, uint64_t w) {
                 sprintf(ib, "0x%08xu", himm(w)); bv = ib;
             }
         }
-        sprintf(t, kind == 0 ? "(%s + %s)" : "(%s * %s)", HS(R(a), swa, nega, absa), HS(bv, swb, negb, absb));
+        sprintf(t, kind == 0 ? "(%s + %s)" : "(%s * %s)", HS(RH(a), swa, nega, absa), HS(bv, swb, negb, absb));
         hstore(c, d, t, merge, sat);
         return true;
     }
@@ -395,38 +502,38 @@ static bool emit_half(Ctx *c, uint64_t w) {
         case 0:
             merge = (int)bits(w, 49, 2); sat = bits(w, 32, 1); negb = bits(w, 31, 1); negc = bits(w, 30, 1);
             swb = (int)bits(w, 28, 2); swc = (int)bits(w, 35, 2);
-            bv = R((int)bits(w, 20, 8)); cv = R((int)bits(w, 39, 8));
+            bv = RH((int)bits(w, 20, 8)); cv = RH((int)bits(w, 39, 8));
             break;
         case 1:  // b = cbuf, c = reg
             merge = (int)bits(w, 49, 2); sat = bits(w, 52, 1); negb = bits(w, 56, 1); negc = bits(w, 51, 1);
             swb = 1; swc = (int)bits(w, 53, 2);
-            bv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb); cv = R((int)bits(w, 39, 8));
+            bv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb); cv = RH((int)bits(w, 39, 8));
             break;
         case 2:  // b = reg (field at 39), c = cbuf
             merge = (int)bits(w, 49, 2); sat = bits(w, 52, 1); negb = bits(w, 56, 1); negc = bits(w, 51, 1);
             swb = (int)bits(w, 53, 2); swc = 1;
-            bv = R((int)bits(w, 39, 8)); cv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb2);
+            bv = RH((int)bits(w, 39, 8)); cv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb2);
             break;
         case 3:  // b = imm, c = reg
             merge = (int)bits(w, 49, 2); sat = bits(w, 52, 1); negb = false; negc = bits(w, 51, 1);
             swb = 0; swc = (int)bits(w, 53, 2);
-            sprintf(ib, "0x%08xu", himm(w)); bv = ib; cv = R((int)bits(w, 39, 8));
+            sprintf(ib, "0x%08xu", himm(w)); bv = ib; cv = RH((int)bits(w, 39, 8));
             break;
         default:  // 32I: c = d
             merge = 0; sat = false; negb = false; negc = bits(w, 51, 1);
             swa = (int)bits(w, 47, 2); swb = 0; swc = 0;
-            sprintf(ib, "0x%08xu", (uint32_t)bits(w, 20, 32)); bv = ib; cv = R(d);
+            sprintf(ib, "0x%08xu", (uint32_t)bits(w, 20, 32)); bv = ib; cv = RH(d);
             break;
         }
-        sprintf(t, "fma(%s, %s, %s)", HS(R(a), swa, false, false), HS(bv, swb, negb, false), HS(cv, swc, negc, false));
+        sprintf(t, "fma(%s, %s, %s)", HS(RH(a), swa, false, false), HS(bv, swb, negb, false), HS(cv, swc, negc, false));
         hstore(c, d, t, merge, sat);
         return true;
     }
     // ---- HSETP2 / HSET2 (reg forms)
     if ((op & 0xfff8) == 0x5d20 || (op & 0xfff8) == 0x5d18) {
         bool setp = (op & 0xfff8) == 0x5d20;
-        const char *x = HS(R(a), (int)bits(w, 47, 2), bits(w, 43, 1), bits(w, 44, 1));
-        const char *y = HS(R((int)bits(w, 20, 8)), (int)bits(w, 28, 2), bits(w, 31, 1), bits(w, 30, 1));
+        const char *x = HS(RH(a), (int)bits(w, 47, 2), bits(w, 43, 1), bits(w, 44, 1));
+        const char *y = HS(RH((int)bits(w, 20, 8)), (int)bits(w, 28, 2), bits(w, 31, 1), bits(w, 30, 1));
         int cop = (int)bits(w, 35, 4), bop = (int)bits(w, 45, 2);
         const char *pp = P((int)bits(w, 39, 3), bits(w, 42, 1));
         char lx[512], ly[512];
@@ -776,6 +883,7 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
         char cs[3][40], lay[96], lodv[48], offv[96], drv[48], gcall[4096];
         const char *co[3], *layp = NULL, *lodp = NULL, *offp = NULL, *drp = NULL;
         int ar2 = a, p2 = b, lk = 0;
+        hflush_all(c);  // (the registers read below, not through reg)
         if (array) { sprintf(lay, "min(uint(r%d), uint(tsize%d(0).z) - 1u)", a, slot); c->reg_used[a] = 1; ar2 = a + 1; layp = lay; }
         for (int i = 0; i < ncoord; i++) { sprintf(cs[i], "as_type<float>(r%d)", ar2 + i); c->reg_used[ar2 + i] = 1; co[i] = cs[i]; }
         if (lod_mode == 2 || lod_mode == 3 || lod_mode == 6 || lod_mode == 7) {
@@ -845,6 +953,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     }
     bool guarded = !(pr == PT && !prn);
     if (pr == PT && prn) return;  // @!pt: never executes
+    size_t text0 = c->body.len;
+    c->tz_dst = -1;
+    c->in_guard = guarded;
+    if (guarded) hflush_all(c);  // (a shadow packed inside the guard would be missed on the other path)
     if (guarded) sp(&c->body, "  if (%s) {\n", P(pr, prn));
 
 #define OPM(val, mask) ((w & (uint64_t)(mask)) == (uint64_t)(val))
@@ -910,9 +1022,14 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int n = sz == 5 ? 2 : 1;
         char rb[16];
         const char *dyn = a == RZ ? NULL : reg(c, a, rb);
+        // LARECOMP_VK_ALIGNED_CBUF=0: every run-time indexed load through cbr (comparisons)
+        static int aligned_on = -1;
+        if (aligned_on < 0) aligned_on = getenv("LARECOMP_VK_ALIGNED_CBUF") ? atoi(getenv("LARECOMP_VK_ALIGNED_CBUF")) != 0 : 1;
+        bool aligned = dyn && c->glsl && aligned_on && c->reg_tz[a] >= 4;  // (a multiple of 16: cbuf_ref_aligned)
         for (int i = 0; i < n; i++) {
             char cb[256];
-            cbuf_ref(c, idx, off + 4 * i, dyn, cb);
+            if (aligned) cbuf_ref_aligned(c, idx, off + 4 * i, dyn, cb);
+            else cbuf_ref(c, idx, off + 4 * i, dyn, cb);
             if (!dyn && (off + 4 * i) & 0) {}
             if (dyn) c->info->cbuf_size[idx] = 0x10000;
             set_reg(c, d + i, cb);
@@ -1047,9 +1164,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0x5c98000000000000ull, 0xfff8000000000000ull) || OPM(0x4c98000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x3898000000000000ull, 0xfef8000000000000ull)) {  // MOV
         set_reg(c, d, B(false));
+        tz_result(c, d, tz_of_b(c, w));
     } else if (OPM(0x0100000000000000ull, 0xfff0000000000000ull)) {  // MOV32I
         sprintf(t, "0x%08xu", (uint32_t)bits(w, 20, 32));
         set_reg(c, d, t);
+        tz_result(c, d, ctz_u32((uint32_t)bits(w, 20, 32)));
     } else if (OPM(0x5ca0000000000000ull, 0xfff8000000000000ull) || OPM(0x4ca0000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x38a0000000000000ull, 0xfef8000000000000ull)) {  // SEL
         sprintf(t, "(%s ? %s : %s)", P((int)bits(w, 39, 3), bits(w, 42, 1)), R(a), B(false));
@@ -1114,6 +1233,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0x5c10000000000000ull, 0xfff8000000000000ull) || OPM(0x4c10000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x3810000000000000ull, 0xfef8000000000000ull)) {  // IADD
         if (bits(w, 43, 1) || bits(w, 47, 1)) c->uses_cc = true;
+        tz_result(c, d, bits(w, 43, 1) ? 0 : TZMIN(TZR(a), tz_of_b(c, w)));  // (negation keeps trailing zeros)
         sprintf(t, "(%s%s + %s%s%s)", bits(w, 49, 1) ? "-" : "", R(a), bits(w, 48, 1) ? "-" : "", B(false),
                 bits(w, 43, 1) ? " + cc" : "");
         if (bits(w, 47, 1)) {
@@ -1127,6 +1247,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0x1c00000000000000ull, 0xfe00000000000000ull)) {  // IADD32I (CC bit 52, X bit 53)
         bool wcc = bits(w, 52, 1), x = bits(w, 53, 1);
         if (wcc || x) c->uses_cc = true;
+        tz_result(c, d, x ? 0 : TZMIN(TZR(a), ctz_u32((uint32_t)bits(w, 20, 32))));
         sp(&c->body, "    { ulong sum = ulong(%s%s) + ulong(0x%08xu)%s;%s\n", bits(w, 56, 1) ? "-" : "", R(a), (uint32_t)bits(w, 20, 32),
            x ? " + ulong(cc)" : "", wcc ? " cc = uint(sum >> 32) & 1u;" : "");
         if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = uint(sum);\n", d); }
@@ -1134,6 +1255,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0x5cc0000000000000ull, 0xfff0000000000000ull) || OPM(0x4cc0000000000000ull, 0xfff0000000000000ull) ||
                OPM(0x38c0000000000000ull, 0xfef0000000000000ull)) {  // IADD3
         bool wcc3 = bits(w, 47, 1), x3 = bits(w, 48, 1);
+        tz_result(c, d, x3 ? 0 : TZMIN(TZMIN(TZR(a), tz_of_b(c, w)), TZR((int)bits(w, 39, 8))));
         if (wcc3 || x3) {  // carry in/out (64-bit address math)
             c->uses_cc = true;
             sp(&c->body, "    { ulong sum = ulong(%s%s) + ulong(%s%s) + ulong(%s%s)%s;\n", bits(w, 51, 1) ? "-" : "", R(a),
@@ -1150,6 +1272,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                OPM(0x3818000000000000ull, 0xfef8000000000000ull)) {  // ISCADD
         sprintf(t, "((%s%s << %du) + %s%s)", bits(w, 49, 1) ? "-" : "", R(a), (int)bits(w, 39, 5), bits(w, 48, 1) ? "-" : "",
                 B(false));
+        tz_result(c, d, TZMIN(TZADD(TZR(a), (int)bits(w, 39, 5)), tz_of_b(c, w)));
         if (bits(w, 47, 1)) {  // .CC: carry out for a following IADD.X (64-bit address math)
             c->uses_cc = true;
             sp(&c->body, "    { uint s = %s%s << %du; uint t2 = %s%s; uint res = s + t2; cc = (res < s) ? 1u : 0u;\n",
@@ -1162,6 +1285,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0x1400000000000000ull, 0xfc00000000000000ull)) {  // ISCADD32I
         sprintf(t, "((%s << %du) + 0x%08xu)", R(a), (int)bits(w, 53, 5), (uint32_t)bits(w, 20, 32));
         set_reg(c, d, t);
+        tz_result(c, d, TZMIN(TZADD(TZR(a), (int)bits(w, 53, 5)), ctz_u32((uint32_t)bits(w, 20, 32))));
     } else if (OPM(0x5b60000000000000ull, 0xfff0000000000000ull) || OPM(0x4b60000000000000ull, 0xfff0000000000000ull) ||
                OPM(0x3660000000000000ull, 0xfef0000000000000ull)) {  // ISETP
         char cmp[512];
@@ -1192,6 +1316,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (bits(w, 39, 1)) sprintf(t, "(%s << (%s & 31u))", R(a), bv);
         else sprintf(t, "((%s) >= 32u ? 0u : (%s << (%s)))", bv, R(a), bv);
         set_reg(c, d, t);
+        if (b_form(w) == B_IMM) {
+            uint32_t s = (uint32_t)bits(w, 20, 19) | ((uint32_t)bits(w, 56, 1) << 19);
+            tz_result(c, d, bits(w, 39, 1) ? TZADD(TZR(a), (int)(s & 31)) : s >= 32 ? 32 : TZADD(TZR(a), (int)s));
+        }
     } else if (OPM(0x5c28000000000000ull, 0xfff8000000000000ull) || OPM(0x4c28000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x3828000000000000ull, 0xfef8000000000000ull)) {  // SHR
         const char *bv = B(false);
@@ -1208,6 +1336,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int op = (int)bits(w, 41, 2);
         if (op == 3) sprintf(t, "%s", y);
         else sprintf(t, "(%s %s %s)", x, ops[op], y);
+        if (!bits(w, 39, 1) && !bits(w, 40, 1)) {
+            int ta = TZR(a), tb = tz_of_b(c, w);
+            tz_result(c, d, op == 0 ? (ta > tb ? ta : tb) : op == 3 ? tb : TZMIN(ta, tb));
+        }
         int pd = (int)bits(w, 48, 3);
         if (pd != PT) {
             c->pred_used[pd] = 1;
@@ -1227,6 +1359,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (op == 3) sprintf(t, "%s", y);
         else sprintf(t, "(%s %s %s)", x, ops[op], y);
         set_reg(c, d, t);
+        if (!bits(w, 55, 1) && !bits(w, 56, 1)) {
+            int ta = TZR(a), tb = ctz_u32((uint32_t)bits(w, 20, 32));
+            tz_result(c, d, op == 0 ? (ta > tb ? ta : tb) : op == 3 ? tb : TZMIN(ta, tb));
+        }
     } else if (OPM(0x5be0000000000000ull, 0xfff8000000000000ull) || OPM(0x3c00000000000000ull, 0xfc00000000000000ull) ||
                OPM(0x0200000000000000ull, 0xfe00000000000000ull)) {  // LOP3
         uint32_t lut;
@@ -1291,6 +1427,15 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         }
         bool sa = bits(w, 48, 1), sb = bits(w, 49, 1), wcc = bits(w, 47, 1);
         if (ext || wcc) c->uses_cc = true;
+        {   // trailing zeros of the result: the halves' add up in the product (sign extension keeps them; PSL adds 16),
+            // the C term's per cmode; a merge or a carry in: nothing known
+            int cr = top == 0x51 ? -1 : (int)bits(w, 39, 8);
+            int tb = (top & 0xfe) == 0x36 ? ctz_u32((uint32_t)bits(w, 20, 16)) : top == 0x5b ? tz_half(TZR((int)bits(w, 20, 8)), hb) : 0;
+            int tp = TZADD(tz_half(TZR(a), ha), tb);
+            if (psl) tp = TZADD(tp, 16);
+            int tc = cr < 0 ? 0 : cmode == 0 ? TZR(cr) : cmode == 1 ? tz_half(TZR(cr), false) : cmode == 2 ? tz_half(TZR(cr), true) : 0;
+            tz_result(c, d, ext || mrg ? 0 : TZMIN(tp, tc));
+        }
         sp(&c->body, "    { uint xa = (%s >> %d) & 0xFFFFu; uint xb = (%s >> %d) & 0xFFFFu; uint xbu = %s;\n", R(a), ha ? 16 : 0, bv, hb ? 16 : 0, bv);
         if (sa) sp(&c->body, "      xa = uint(int(short(xa)));\n");
         if (sb) sp(&c->body, "      xb = uint(int(short(xb)));\n");
@@ -1350,9 +1495,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (bits(w, 39, 1)) sprintf(t, bits(w, 40, 1) ? "uint(mulhi(int(%s), int(%s)))" : "mulhi(%s, %s)", R(a), B(false));
         else sprintf(t, "(%s * %s)", R(a), B(false));
         set_reg(c, d, t);
+        if (!bits(w, 39, 1)) tz_result(c, d, TZADD(TZR(a), tz_of_b(c, w)));
     } else if (OPM(0x1f00000000000000ull, 0xff00000000000000ull)) {  // IMUL32I
         sprintf(t, "(%s * 0x%08xu)", R(a), (uint32_t)bits(w, 20, 32));
         set_reg(c, d, t);
+        tz_result(c, d, TZADD(TZR(a), ctz_u32((uint32_t)bits(w, 20, 32))));
     } else if (OPM(0x5ce0000000000000ull, 0xfff8000000000000ull) || OPM(0x4ce0000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x38e0000000000000ull, 0xfef8000000000000ull)) {  // I2I
         int dt = (int)((bits(w, 8, 2)) | (bits(w, 12, 1) << 2)), st = (int)((bits(w, 10, 2)) | (bits(w, 13, 1) << 2));
@@ -1641,6 +1788,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     }
     (void)op13;
     if (guarded) sp(&c->body, "  }\n");
+    if (c->glsl) writes_after_insn(c, text0, guarded);
+    c->in_guard = false;
 }
 
 // ------------------------------------------------------------------ program assembly
@@ -2132,6 +2281,7 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
+    "#define cbra(cb, row, k, comp) cb[min((row) + (k), uint(cb.length() - 1))][comp]\n"
     "uint as_u(float x) { return floatBitsToUint(x); }\n"
     "uint as_u(uint x) { return x; }\n"
     "uint as_u(int x) { return uint(x); }\n"
@@ -2144,11 +2294,6 @@ static const char glsl_prelude[] =
     "int sx8(int v) { return bitfieldExtract(v, 0, 8); }\n"
     "int sx16(uint v) { return bitfieldExtract(int(v), 0, 16); }\n"
     "int sx16(int v) { return bitfieldExtract(v, 0, 16); }\n"
-    // MSL semantics: saturate(NaN) = 0, fmin/fmax return the non-NaN operand
-    "float saturate(float x) { return isnan(x) ? 0.0f : clamp(x, 0.0f, 1.0f); }\n"
-    "vec2 saturate(vec2 x) { return vec2(saturate(x.x), saturate(x.y)); }\n"
-    "float fmin(float a, float b) { return isnan(a) ? b : (isnan(b) ? a : min(a, b)); }\n"
-    "float fmax(float a, float b) { return isnan(a) ? b : (isnan(b) ? a : max(a, b)); }\n"
     "uint clz(uint v) { return v == 0u ? 32u : uint(31 - findMSB(v)); }\n"
     "uint popcount(uint v) { return uint(bitCount(v)); }\n"
     "uint mulhi(uint a, uint b) { uint hi, lo; umulExtended(a, b, hi, lo); return hi; }\n"
@@ -2158,6 +2303,19 @@ static const char glsl_prelude[] =
     "uint bfi(uint ins, uint ctl, uint base) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u || pos >= 32u) return base; return bitfieldInsert(base, ins, int(pos), int(min(len, 32u - pos))); }\n"
     "float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n"
     "uvec2 rsc(uvec2 c, vec4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uvec2(floor((vec2(c) + 0.5f) * s.xy)); }\n";
+// MSL semantics: saturate(NaN) = 0, fmin/fmax return the non-NaN operand - as Maxwell's .SAT and FMNMX. On a GPU whose
+// min / max / clamp do the same by themselves (maxwell_ieee_minmax, probed by device.c; Adreno) the plain functions:
+// the isnan selects cost two to four instructions a site, and keep the Adreno compiler from folding the clamp into
+// the (sat) bit of the instruction that made the value (it only does so for that value's single use).
+static const char glsl_prelude_minmax[] =
+    "float saturate(float x) { return isnan(x) ? 0.0f : clamp(x, 0.0f, 1.0f); }\n"
+    "float fmin(float a, float b) { return isnan(a) ? b : (isnan(b) ? a : min(a, b)); }\n"
+    "float fmax(float a, float b) { return isnan(a) ? b : (isnan(b) ? a : max(a, b)); }\n";
+static const char glsl_prelude_minmax_ieee[] =
+    "float saturate(float x) { return clamp(x, 0.0f, 1.0f); }\n"
+    "float fmin(float a, float b) { return min(a, b); }\n"
+    "float fmax(float a, float b) { return max(a, b); }\n";
+static const char glsl_prelude_minmax2[] = "vec2 saturate(vec2 x) { return vec2(saturate(x.x), saturate(x.y)); }\n";
 static const char glsl_prelude_h2f_bits[] =
     // half -> float by bits, not unpackHalf2x16: NVIDIA's driver recognises unpacked halves and runs some of the
     // fp32 math after them in native fp16, differently per shader, so a depth pre-pass and its colour pass (EQUAL
@@ -2178,7 +2336,6 @@ static const char glsl_prelude_h2f_native[] =
 // Switch's GPU does; else in fp32, rounded when packed.
 static const char glsl_prelude_half_native[] =
     "f16vec2 hx(uint v, uint swz) { if (swz == 1u) return f16vec2(float16_t(uintBitsToFloat(v))); f16vec2 h = unpackFloat2x16(v); return swz == 2u ? h.xx : (swz == 3u ? h.yy : h); }\n"
-    "f16vec2 saturate(f16vec2 x) { return mix(clamp(x, f16vec2(0.0hf), f16vec2(1.0hf)), f16vec2(0.0hf), isnan(x)); }\n"
     "uint hpack(f16vec2 r, uint merge, uint old) { if (merge == 1u) return floatBitsToUint(float(r.x)); uint p = packFloat2x16(r); if (merge == 2u) return (old & 0xFFFF0000u) | (p & 0xFFFFu); if (merge == 3u) return (old & 0xFFFFu) | (p & 0xFFFF0000u); return p; }\n";
 static const char glsl_prelude2[] =
     "vec2 hx(uint v, uint swz) { if (swz == 1u) return vec2(uintBitsToFloat(v)); vec2 h = unpack_h2(v); return swz == 2u ? h.xx : (swz == 3u ? h.yy : h); }\n"
@@ -2199,13 +2356,15 @@ static const char *glsl_sampler_type(const ShaderTexture *t) {
 // Each load is then one word: as uvec4 rows a light loop's dozen loads per light took four registers each (the
 // driver hoists loads), and the lit shaders ran at two waves per core - latency-bound on a phone GPU.
 static char *scalar_cbuf_rewrite(const char *src, int idx) {
-    char name[8], cbrn[16];
+    char name[8], cbrn[16], cbran[16];
     snprintf(name, sizeof name, "cb%d", idx);
     snprintf(cbrn, sizeof cbrn, "cbr(cb%d,", idx);
-    size_t nl = strlen(name), cl = strlen(cbrn);
+    snprintf(cbran, sizeof cbran, "cbra(cb%d,", idx);
+    size_t nl = strlen(name), cl = strlen(cbrn), al = strlen(cbran);
     Str o = {0};
     for (const char *p = src; *p;) {
         bool word = p == src || !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
+        if (word && !strncmp(p, cbran, al)) { sp(&o, "cbras(cb%d_s,", idx); p += al; continue; }
         if (word && !strncmp(p, cbrn, cl)) { sp(&o, "cbrs(cb%d_s,", idx); p += cl; continue; }
         if (word && !strncmp(p, name, nl) && p[nl] == '[') {
             // two bracketed indices (each balanced)
@@ -2253,10 +2412,14 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         static int exact = -1;
         if (exact < 0) exact = getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0;
         bool bits = exact || (maxwell_h2f_bits && stage != STAGE_FRAGMENT && stage != STAGE_COMPUTE);
-        sp(&s, "%s%s", rest, bits ? glsl_prelude_h2f_bits : glsl_prelude_h2f_native);
+        sp(&s, "%s%s%s%s", rest, maxwell_ieee_minmax ? glsl_prelude_minmax_ieee : glsl_prelude_minmax, glsl_prelude_minmax2,
+           bits ? glsl_prelude_h2f_bits : glsl_prelude_h2f_native);
         if (maxwell_half_native) {
             const char *hp = strstr(glsl_prelude2, "uint prmt(");  // (the fp32 hx / hpack replaced)
-            sp(&s, "%s%s", glsl_prelude_half_native, hp);
+            sp(&s, "%s%s%s", glsl_prelude_half_native,
+               maxwell_ieee_minmax ? "f16vec2 saturate(f16vec2 x) { return clamp(x, f16vec2(0.0hf), f16vec2(1.0hf)); }\n"
+                                   : "f16vec2 saturate(f16vec2 x) { return mix(clamp(x, f16vec2(0.0hf), f16vec2(1.0hf)), f16vec2(0.0hf), isnan(x)); }\n",
+               hp);
         } else {
             sp(&s, "%s", glsl_prelude2);
         }
@@ -2282,7 +2445,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
         sp(&s, "layout(std140, set = %d, binding = %d) uniform CB%d { uvec4 cb%d[%u]; };\n", set, i, i, i, n);
     }
-    if (maxwell_scalar_cbuf && info->cbuf_dynamic) sp(&s, "#define cbrs(cb, off) cb[min((off) >> 2, uint(cb.length() - 1))]\n");
+    if (maxwell_scalar_cbuf && info->cbuf_dynamic)  // (cbras: row * 4 + word, an offset the compiler sees as 16-aligned)
+        sp(&s, "#define cbrs(cb, off) cb[min((off) >> 2, uint(cb.length() - 1))]\n"
+               "#define cbras(cb, row, k, comp) cb[min((row) + (k), uint(cb.length() / 4 - 1)) * 4u + (comp)]\n");
     if (info->uses_gmem && !maxwell_gmem_chunk_shift) {
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
@@ -2382,6 +2547,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     for (int i = 0; i < 256; i++)
         if (c->reg_used[i]) sp(&s, "  uint r%d = 0u;\n", i);
+    for (int i = 0; i < 256; i++)
+        if (c->huse[i]) sp(&s, "  f16vec2 h%d = f16vec2(0.0hf);\n", i);
     for (int i = 0; i < 7; i++)
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0u; bool ccz = false, ccs = false;\n");
@@ -2502,14 +2669,21 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
         uint32_t pc = (uint32_t)(i * 8);
+        if (label[i]) memset(c->reg_tz, 0, sizeof c->reg_tz), hreset_all(c);  // a block entry: nothing known of the registers
         if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
         if (annotate) sp(&c->body, "    // pc %x: %016llx\n", pc, (unsigned long long)((const uint64_t *)code)[i]);
         off0[i] = c->body.len;
         emit_insn(c, ((const uint64_t *)code)[i], pc);
+        {   // the uints current before a block entry, a flow instruction (its text goes: structure_body) or the end
+            size_t nx = i + 1;
+            if (nx % 4 == 0) nx++;
+            if (nx >= end || label[nx] || flow_kind(((const uint64_t *)code)[nx]) != FLOW_NONE) hflush_all(c);
+        }
         off1[i] = c->body.len;
         if (dbg && pc == maxwell_dbg_pc) {
             int rr = maxwell_dbg_reg % 1000, half = maxwell_dbg_reg / 1000;  // +1000: low f16, +2000: high f16
             c->reg_used[rr] = 1;
+            hmat(c, rr);
             if (half == 3) sp(&c->body, "    dbgv = float(r%d) * 0.125f;\n", rr);  // +3000: an integer, / 8
             else if (half) sp(&c->body, c->glsl ? "    dbgv = unpackHalf2x16(r%d)[%d];\n" : "    dbgv = float(as_type<half2>(r%d)[%d]);\n", rr, half - 1);
             else sp(&c->body, c->glsl ? "    dbgv = as_f(r%d);\n" : "    dbgv = as_type<float>(r%d);\n", rr);

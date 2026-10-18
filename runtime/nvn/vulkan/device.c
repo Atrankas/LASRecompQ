@@ -513,6 +513,97 @@ static void create_device(void) {
     device_created();
 }
 
+// Do this GPU's min / max keep the non-NaN operand, and its clamp make NaN 0 - what Maxwell's FMNMX and .SAT do? Then
+// the guest shaders' saturate / fmin / fmax go without the isnan selects around them (maxwell_ieee_minmax; shader.h,
+// translate.c). A one-thread compute dispatch over a NaN read from a buffer (nothing the compiler can fold), its
+// result words compared with the Switch's. LARECOMP_VK_IEEE_MINMAX=0/1 decides instead of the probe.
+static void probe_ieee_minmax(void) {
+    const char *e = getenv("LARECOMP_VK_IEEE_MINMAX");
+    if (e) { maxwell_ieee_minmax = atoi(e) != 0; return; }
+    char src[1200];
+    snprintf(src, sizeof src,
+             "#version 460\n%s"
+             "layout(local_size_x = 1) in;\n"
+             "layout(std430, set = 0, binding = 0) buffer B { uint w[12]; };\n"
+             "void main() { float n = uintBitsToFloat(w[0]), one = uintBitsToFloat(w[1]);\n"
+             "  w[2] = floatBitsToUint(max(n, one)); w[3] = floatBitsToUint(min(n, one));\n"
+             "  w[4] = floatBitsToUint(max(one, n)); w[5] = floatBitsToUint(min(one, n));\n"
+             "  w[6] = floatBitsToUint(clamp(n, 0.0f, 1.0f)); w[7] = floatBitsToUint(clamp(fma(n, one, one), 0.0f, 1.0f));\n"
+             "  w[8] = floatBitsToUint(clamp(n * one, 0.0f, 1.0f));%s }\n",
+             maxwell_half_native ? "#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require\n" : "",
+             maxwell_half_native ? " w[9] = packFloat2x16(clamp(f16vec2(float16_t(n), float16_t(one) + float16_t(n)), f16vec2(0.0hf), f16vec2(1.0hf)));"
+                                 : "");
+    VkShaderModule sm = vk_compile_glsl(src, STAGE_COMPUTE, "ieee_minmax.comp");
+    if (!sm) { LOG("[vk] NaN probe: no shader (isnan selects kept)\n"); return; }
+    VkDescriptorSetLayout dl = VK_NULL_HANDLE;
+    VkPipelineLayout pl = VK_NULL_HANDLE;
+    VkPipeline p = VK_NULL_HANDLE;
+    VkDescriptorPool dp = VK_NULL_HANDLE;
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    VkBuffer buf = VK_NULL_HANDLE;
+    VmaAllocation mem = NULL;
+    VmaAllocationInfo info = {0};
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    VkDescriptorSetLayoutBinding b = {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+                                      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+    VkDescriptorSetLayoutCreateInfo dli = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
+    bool ok = vkCreateDescriptorSetLayout(g_vk.dev, &dli, NULL, &dl) == VK_SUCCESS;
+    VkPipelineLayoutCreateInfo pli = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dl};
+    ok = ok && vkCreatePipelineLayout(g_vk.dev, &pli, NULL, &pl) == VK_SUCCESS;
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = pl,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main"}};
+    ok = ok && vkCreateComputePipelines(g_vk.dev, VK_NULL_HANDLE, 1, &ci, NULL, &p) == VK_SUCCESS;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 64, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                  .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    ok = ok && vmaCreateBuffer(g_vk.vma, &bi, &ai, &buf, &mem, &info) == VK_SUCCESS && info.pMappedData;
+    VkDescriptorPoolSize ps = {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1};
+    VkDescriptorPoolCreateInfo dpi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps};
+    ok = ok && vkCreateDescriptorPool(g_vk.dev, &dpi, NULL, &dp) == VK_SUCCESS;
+    VkDescriptorSetAllocateInfo dai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = dp,
+                                       .descriptorSetCount = 1, .pSetLayouts = &dl};
+    ok = ok && vkAllocateDescriptorSets(g_vk.dev, &dai, &ds) == VK_SUCCESS;
+    VkCommandBufferAllocateInfo cai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_vk.pool,
+                                       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+    ok = ok && vkAllocateCommandBuffers(g_vk.dev, &cai, &cb) == VK_SUCCESS;
+    uint32_t *w = info.pMappedData;
+    if (ok) {
+        memset(w, 0xEE, 64);
+        w[0] = 0x7fc00000u, w[1] = 0x3f800000u;  // NaN, 1.0
+        vmaFlushAllocation(g_vk.vma, mem, 0, 64);
+        VkDescriptorBufferInfo dbi = {.buffer = buf, .range = 64};
+        VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
+                                   .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &dbi};
+        vkUpdateDescriptorSets(g_vk.dev, 1, &wr, 0, NULL);
+        VkCommandBufferBeginInfo cbi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+        ok = vkBeginCommandBuffer(cb, &cbi) == VK_SUCCESS;
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, NULL);
+        vkCmdDispatch(cb, 1, 1, 1);
+        ok = ok && vkEndCommandBuffer(cb) == VK_SUCCESS;
+        VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
+        ok = ok && vkQueueSubmit(g_vk.queue, 1, &si, VK_NULL_HANDLE) == VK_SUCCESS && vkQueueWaitIdle(g_vk.queue) == VK_SUCCESS;
+        vmaInvalidateAllocation(g_vk.vma, mem, 0, 64);
+    }
+    if (ok) {
+        bool good = w[2] == 0x3f800000u && w[3] == 0x3f800000u && w[4] == 0x3f800000u && w[5] == 0x3f800000u && !w[6] && !w[7] &&
+                    !w[8] && (!maxwell_half_native || !w[9]);
+        maxwell_ieee_minmax = good;
+        LOG("[vk] NaN through max min max min clamp clamp(fma) clamp(mul) clamp16: %08x %08x %08x %08x %08x %08x %08x %08x: %s\n",
+            w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], good ? "as Maxwell: plain saturate / fmin / fmax" : "not Maxwell's: isnan selects kept");
+    } else {
+        LOG("[vk] NaN probe failed (isnan selects kept)\n");
+    }
+    if (cb) vkFreeCommandBuffers(g_vk.dev, g_vk.pool, 1, &cb);
+    if (dp) vkDestroyDescriptorPool(g_vk.dev, dp, NULL);
+    if (buf) vmaDestroyBuffer(g_vk.vma, buf, mem);
+    if (p) vkDestroyPipeline(g_vk.dev, p, NULL);
+    if (pl) vkDestroyPipelineLayout(g_vk.dev, pl, NULL);
+    if (dl) vkDestroyDescriptorSetLayout(g_vk.dev, dl, NULL);
+    vkDestroyShaderModule(g_vk.dev, sm, NULL);
+}
+
 // What follows the device's creation, whichever way it was made
 static void device_created(void) {
 #ifdef VK_NO_PROTOTYPES
@@ -538,6 +629,7 @@ static void device_created(void) {
     VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                   .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = g_vk.qfam};
     VK_CHECK(vkCreateCommandPool(g_vk.dev, &pi, NULL, &g_vk.pool));
+    probe_ieee_minmax();  // (before any guest shader is translated: vk_headstart_begin below)
 
     // pipeline cache: cache/vk_pipelines.bin (written by vk_pipeline_cache_save)
     size_t sz = 0;
@@ -604,7 +696,7 @@ static VkPresentModeKHR present_mode(void) {
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
-static bool g_sc_turned;
+static bool g_sc_turned, g_fifo_present;  // (FIFO: a second picture per game frame shows a refresh later)
 static atomic_bool g_background, g_surface_stale;  // (the app in the background: below)
 static void create_swapchain(void) {
     VkSurfaceCapabilitiesKHR caps;
@@ -645,6 +737,7 @@ static void create_swapchain(void) {
         .presentMode = present_mode(), .clipped = VK_TRUE,
         .oldSwapchain = old};
     VkResult cr = vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain);
+    g_fifo_present = ci.presentMode == VK_PRESENT_MODE_FIFO_KHR;
     if (cr == VK_ERROR_SURFACE_LOST_KHR || cr == VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) {  // (Android: the app went away)
         LOG("[vk] swapchain: surface lost (%d)\n", cr);
         g_vk.swapchain = VK_NULL_HANDLE;
@@ -994,6 +1087,9 @@ static void present_game(void) {
     }
 }
 
+static bool menu_open(void) { extern bool menu_is_open(void); return menu_is_open(); }
+static uint32_t game_interval(void) { extern uint32_t g_game_interval; return g_game_interval; }
+
 void backend_present_gpu(NvnTexture *t);
 void backend_present(NvnTexture *t) {
     g_last_presented = t;
@@ -1069,6 +1165,13 @@ void backend_present_gpu(NvnTexture *t) {
             float rect[4] = {(float)vx, (float)vy, (float)vw, (float)vh};
             fg_draw(vk_cmd(), g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height, b, rect, crop, pv[0] > 0.5f);
             vk_frame_end(fs0 ? "build/fg_gen0.png" : NULL);
+        } else if (!gen && g_fifo_present && menu_open() && game_interval() == 2 && vk_frame_begin(black)) {
+            // the menu over the game's 30: a second picture with the menu drawn again from the latest input, a refresh
+            // later - scrolling with a finger moves at 60 instead of with the game's frames
+            cb = vk_cmd();
+            vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
+            menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
+            vk_frame_end(NULL);
         }
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
@@ -1147,8 +1250,13 @@ void backend_present_gpu(NvnTexture *t) {
         {
             extern double g_game_speed;  // (runtime/hle/framepace.c: the game's speed, its 30 / 60 fps mode)
             extern uint32_t g_game_interval;
-            LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms speed %.0f%% (mode %d) level %s (%s)\n", now,
-                (unsigned long long)total_frames, frames / (now - last_fps_time), max_gap * 1000.0, g_game_speed * 100,
+            extern _Atomic uint64_t g_gpu_busy_ns;
+            static uint64_t gb_at;
+            uint64_t gbn = atomic_load(&g_gpu_busy_ns);
+            double gpu_avg = frames && gb_at ? (gbn - gb_at) / 1e6 / frames : 0;  // (GPU ms per presented frame)
+            gb_at = gbn;
+            LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms gpu %.1fms speed %.0f%% (mode %d) level %s (%s)\n", now,
+                (unsigned long long)total_frames, frames / (now - last_fps_time), max_gap * 1000.0, gpu_avg, g_game_speed * 100,
                 g_game_interval ? 60 / (int)g_game_interval : 60, game_level_name(), renderer_stats());
         }
         max_gap = 0;

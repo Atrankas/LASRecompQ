@@ -19,6 +19,8 @@ typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one; } VkFmt;
 // DEPTH24_STENCIL8 as itself where the GPU has it for everything the game does with depth (NVIDIA, Intel): half the
 // bytes of D32_SFLOAT_S8_UINT (4 instead of 8 per pixel) for every depth test, clear and copy - the game copies its
 // full-size depth twice a frame. AMD has no D24S8 attachments: D32S8 there (and on Metal). LARECOMP_VK_D24=0: D32S8.
+// Phones: D32S8 - with Turnip's D24S8 the sea came out in blocks (the water reads its depth back and 24 bits weren't
+// enough: Martha's Bay), and D32S8 costs nothing there (separate depth / stencil planes). LARECOMP_VK_D24=1: D24S8.
 static VkFormat depth24_stencil8(void) {
     static VkFormat f;
     if (!f) {
@@ -28,7 +30,12 @@ static VkFormat depth24_stencil8(void) {
         VkFormatFeatureFlags want = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
                                     VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
                                     VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
-        bool ok = (p.optimalTilingFeatures & want) == want && !(e && !atoi(e));
+#ifdef __ANDROID__
+        bool want_d24 = e && atoi(e);
+#else
+        bool want_d24 = !(e && !atoi(e));
+#endif
+        bool ok = (p.optimalTilingFeatures & want) == want && want_d24;
         f = ok ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT;
         LOG("[vk] depth24 stencil8: %s\n", ok ? "D24_UNORM_S8_UINT" : "D32_SFLOAT_S8_UINT");
     }

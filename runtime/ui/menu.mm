@@ -1022,7 +1022,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     io.DisplaySize = ImVec2((float)tw, (float)th);
     io.DisplayFramebufferScale = ImVec2(1, 1);
     static double last;
-    double now = SDL_GetTicks() / 1000.0;
+    double now = SDL_GetTicksNS() / 1e9;
     io.DeltaTime = last > 0 && now > last ? (float)(now - last) : 1.0f / 60;
     last = now;
     drain_events(io);
@@ -1030,10 +1030,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     float scale = (float)(th / 1080.0);
     if (scale < 0.45f) scale = 0.45f;
     io.FontGlobalScale = scale;
-    {   // a drag / flick: this frame's scroll as one wheel step (ImGui: 5 lines of the menu font a step)
-        float px = g_touch.frame(io.DeltaTime, [&](float x, float y) { io.AddMousePosEvent(x, y); });
-        if (px != 0) io.AddMouseWheelEvent(0, px / (5 * 39 * kUi * scale));
-    }
+    // a drag / flick: this frame's scroll, applied after NewFrame (touch_scroll_apply)
+    float touch_px = g_touch.frame(io.DeltaTime, [&](float x, float y) { io.AddMousePosEvent(x, y); });
 
 #ifdef __APPLE__
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1056,6 +1054,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui_ImplVulkan_NewFrame();
 #endif
     ImGui::NewFrame();
+    touch_scroll_apply(touch_px);
 
     if (g_settings.show_fps) {
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 16 * scale, 16 * scale), 0, ImVec2(1, 0));

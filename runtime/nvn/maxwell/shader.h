@@ -102,6 +102,9 @@ extern int maxwell_half_native;
 extern int maxwell_precise_pos;
 // 1: run-time indexed cbufs as word arrays (scalar block layout; translate.c scalar_cbuf_rewrite)
 extern int maxwell_scalar_cbuf;
+// 1: the device's min / max return the non-NaN operand and clamp(NaN, 0, 1) is 0, as Maxwell's FMNMX and .SAT do
+// (device.c probes it): saturate / fmin / fmax in GLSL without the isnan selects (translate.c)
+extern int maxwell_ieee_minmax;
 // (GLSL / Vulkan) A GPU whose storage buffers can't span the heap (maxStorageBufferRange: 1 GB on Intel, issue #8)
 // gets it as chunks of 1 << maxwell_gmem_chunk_shift bytes, one buffer each - chunk 0 at GMEM_BUFFER_INDEX, chunk k
 // at GMEM_CHUNK_BINDING + k - 1 - and shaders pick the chunk from the address. 0: one buffer, as before.

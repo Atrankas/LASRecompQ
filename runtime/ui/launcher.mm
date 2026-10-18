@@ -1214,11 +1214,10 @@ extern "C" void launcher_run(const char *root) {
             // controller presses launcher_pad_event fed in and turns gamepad navigation off: set it again while a
             // controller is connected
             if (SDL_HasGamepad()) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
-            {   // a drag / flick (touch_ui.h): this frame's scroll as one wheel step (5 lines of the page's font)
-                float px = g_touch.frame(io.DeltaTime, [&](float x, float y) { io.AddMousePosEvent(x, y); });
-                if (px != 0) io.AddMouseWheelEvent(0, px / (5 * 52.5f * (io.FontGlobalScale > 0 ? io.FontGlobalScale : 1)));
-            }
+            // a drag / flick (touch_ui.h): this frame's scroll, onto the page under the finger
+            float touch_px = g_touch.frame(io.DeltaTime, [&](float x, float y) { io.AddMousePosEvent(x, y); });
             ImGui::NewFrame();
+            touch_scroll_apply(touch_px);
 
             ImVec2 ds = io.DisplaySize;
             float s = ds.y / 720.0f;  // layout scale (fonts are built for ~2x)

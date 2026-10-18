@@ -3599,6 +3599,24 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
         }
     }
     if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
+    if (getenv("LARECOMP_LOG_NOFILTER") && smp && h && st.tpool && tic < (uint32_t)st.tpool->count && st.spool && tsc < (uint32_t)st.spool->count) {
+        NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+        NvnSamplerDesc *d = &((NvnSamplerDesc *)st.spool->entries)[tsc];
+        TexBackend *tb = e->tex ? vk_tex(e->tex, false) : NULL;
+        if (tb && d->mag_filter == 1) {
+            VkFormatProperties fp;
+            vkGetPhysicalDeviceFormatProperties(g_vk.phys, tb->format, &fp);
+            static VkFormat seen[32];
+            static int ns;
+            bool known = false;
+            for (int k = 0; k < ns; k++) known |= seen[k] == tb->format;
+            if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) && !known && ns < 32) {
+                seen[ns++] = tb->format;
+                LOG("[nofilter] format %d %ux%u sampled linear (no linear filtering here): fs %llx stage %d\n", tb->format,
+                    tb->width, tb->height, (unsigned long long)st.program->stages[1].code_addr, stage);
+            }
+        }
+    }
     if (!view) view = vk_dummy_view(st_->type);
     if (!smp) smp = vk_default_sampler(true);
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
