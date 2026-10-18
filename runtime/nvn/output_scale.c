@@ -32,7 +32,7 @@
 #define DYN_SLOW_MS 34.5   // (a 30 fps frame is 33.3 ms; one late frame is 50)
 #define DYN_SLOWER_MS 40.0
 #define DYN_GPU_SLOW (fg_on() ? 27.0 : 30.0)
-#define DYN_GPU_ROOM (fg_on() ? 20.0 : 23.0)  // (+0.05 near 1: ~10% more pixels)
+#define DYN_GPU_ROOM (fg_on() ? 23.5 : 26.0)  // (+0.05 near 1: ~10% more pixels, ~1 ms in the Field)
 extern bool fg_enabled(void);
 static bool fg_on(void) { return fg_enabled(); }
 #else
@@ -47,6 +47,9 @@ static double g_dyn_gpu_sum, g_dyn_dt_sum, g_last_t;
 static int g_dyn_n, g_dyn_gpu_n, g_dyn_good;
 static double g_dyn_cool_until, g_dyn_probe_wait = 5.0, g_dyn_probe_at;
 static double g_dyn_last_raise = -100;
+// A raise taken back soon after: that factor is out of reach for a while (30 s, doubling to 5 min) - walking in the
+// Field it went 0.65 -> 0.70 -> 0.65 every few seconds, each change a render-target reallocation (a hitch)
+static double g_dyn_ceiling = 99, g_dyn_ceiling_until, g_dyn_ceiling_wait = 30;
 
 // The factor each level settled at: back in a level, start from it (the Field after a house began at the house's
 // factor and spent seconds at 20 fps coming down). This session only.
@@ -61,6 +64,7 @@ static void dyn_level_check(double now) {
         if (!strcmp(g_dyn_levels[i].name, cur)) break;
     if (cur[0] && i < 48) snprintf(g_dyn_levels[i].name, sizeof g_dyn_levels[i].name, "%s", cur), g_dyn_levels[i].f = g_dyn;
     snprintf(cur, sizeof cur, "%s", lv);
+    g_dyn_ceiling = 99, g_dyn_ceiling_until = 0, g_dyn_ceiling_wait = 30;  // (another place: its own limits)
     for (i = 0; i < 48 && g_dyn_levels[i].name[0]; i++)
         if (!strcmp(g_dyn_levels[i].name, cur)) { g_dyn = g_dyn_levels[i].f; freei = i; break; }
     if (freei >= 0) {
@@ -90,6 +94,11 @@ static void dyn_update(double now, double gpu_ms) {
         // ten seconds at 20 fps, 0.05 at a time, to get down to where it fits
         double down = avg_dt > DYN_SLOWER_MS ? 0.1 : 0.05;
         if (avg_gpu > DYN_GPU_SLOW) down = fmax(down, fmin(0.3, g_dyn * (1 - sqrt((DYN_GPU_SLOW - 2) / avg_gpu))));
+        if (now - g_dyn_last_raise < 20.0) {
+            if (now < g_dyn_ceiling_until + 60.0 && fabs(g_dyn - g_dyn_ceiling) < 0.01) g_dyn_ceiling_wait = fmin(g_dyn_ceiling_wait * 2, 300.0);
+            else g_dyn_ceiling_wait = 30;
+            g_dyn_ceiling = g_dyn, g_dyn_ceiling_until = now + g_dyn_ceiling_wait;
+        }
         g_dyn = fmax(0.5, g_dyn - down);
         g_dyn_good = 0;
         if (now - g_dyn_last_raise < 3.0) g_dyn_probe_wait = fmin(g_dyn_probe_wait * 2, 60.0);  // raised too eagerly
@@ -101,6 +110,10 @@ static void dyn_update(double now, double gpu_ms) {
         // to 0.2 at once - a house after the Field went from half to full in a minute 0.05 at a time
         double step = 0.05;
         if (avg_gpu > 0) step = fmax(0.05, fmin(0.2, g_dyn * (sqrt(DYN_GPU_ROOM / avg_gpu) - 1)));
+        if (room && now < g_dyn_ceiling_until && g_dyn + step > g_dyn_ceiling - 0.01) {
+            step = round((g_dyn_ceiling - 0.05 - g_dyn) * 20) / 20;  // (up to just under it)
+            room = step > 0.01;
+        }
         if (room) { g_dyn = fmin(DYN_MAX, g_dyn + step); g_dyn_good = 0; g_dyn_last_raise = now; g_dyn_probe_at = now + g_dyn_probe_wait; }
     }
     g_dyn = round(g_dyn * 20) / 20;
