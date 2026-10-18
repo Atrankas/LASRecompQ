@@ -69,6 +69,12 @@ int rt_hook(Cpu *c, uint64_t site) {
         if (c->x[0]) return 0;
         LOG("[event] empty handler skipped (issue #41)\n");
         return 2;  // (the dispatcher's catch: returns 0)
+    case GUEST(GA_CHOICE_COUNT_SITE): {  // CHOICE_COUNT_SITE - str w8, [x19, #0x1cc4]: a question's answer count (issue #183)
+        int32_t n = (int32_t)c->x[8];
+        if (n >= 2 && n <= 4) return 0;
+        FATAL("a question's answer count is %d: the game's text doesn't fit its language (issue #183)\n", n);
+        return 0;
+    }
     case GUEST(GA_FRAME_JOB_KICKOFF_SITES_0):  // FRAME_JOB_KICKOFF_SITES - a frame job's rebuild waits for its last finish (#19)
     case GUEST(GA_FRAME_JOB_KICKOFF_SITES_1):
     case GUEST(GA_FRAME_JOB_KICKOFF_SITES_2):
