@@ -32,6 +32,8 @@ int maxwell_precise_pos = 1;
 int maxwell_scalar_cbuf;
 int maxwell_ieee_minmax;
 int maxwell_robust_cbuf;
+bool maxwell_static_stacks = true;  // (LARECOMP_DYN_STACKS=1: the stack arrays, as before)
+bool maxwell_brx_table = true;      // (LARECOMP_VK_BRX_TABLE=0: every instruction after a BRX a possible target)
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -107,6 +109,13 @@ typedef struct {
     bool xmad_new;        // this instruction is one (registered after its writes are scanned)
     int xmad_a, xmad_d;
     uint32_t xmad_imm;
+    // (from mamcjr/LASRecompAndroid, MIT) maxwell_static_stacks: the SSY / PBK / PCNT stacks followed at translation
+    // (resolve_stacks): flow_to[i] is the target of the SYNC / BRK / CONT at i, and the state machine has no stack
+    // arrays. maxwell_brx_table: each BRX's targets read from the compiler's constants after the code (brx_table).
+    bool static_stacks;
+    int32_t *flow_to;
+    int nbrx;
+    struct { uint32_t at; int n; uint32_t t[256]; } brx[4];
 } Ctx;
 
 static bool id_char(char ch);
@@ -981,6 +990,14 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         uint32_t target = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
         c->uses_branches = true;
         sp(&c->body, "    pc = %uu; continue;\n", target);
+    } else if (c->static_stacks && (OPM(0xe290000000000000ull, 0xfff0000000000020ull) || OPM(0xe2a0000000000000ull, 0xfff0000000000020ull) ||
+                                    OPM(0xe2b0000000000000ull, 0xfff0000000000020ull))) {  // SSY / PBK / PCNT, resolved
+        c->uses_branches = true;
+    } else if (c->static_stacks && (OPM(0xf0f8000000000000ull, 0xfff8000000000000ull) || OPM(0xe340000000000000ull, 0xfff0000000000000ull) ||
+                                    OPM(0xe350000000000000ull, 0xfff0000000000000ull))) {  // SYNC / BRK / CONT, resolved
+        int32_t t = c->flow_to[pc / 8];
+        if (t >= 0) sp(&c->body, "    pc = %uu; continue;\n", (uint32_t)t);
+        else sp(&c->body, "    exit_now = true; break;\n");  // (never reached)
     } else if (OPM(0xe290000000000000ull, 0xfff0000000000020ull)) {  // SSY
         c->uses_branches = true;
         sp(&c->body, "    ssy[ssy_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
@@ -1876,6 +1893,118 @@ static int flow_kind(uint64_t w) {
 }
 static bool flow_leaves(int k) { return k == FLOW_BRA || k == FLOW_EXIT || k == FLOW_SYNC || k == FLOW_BRK || k == FLOW_CONT; }
 
+// (from mamcjr/LASRecompAndroid, MIT) A BRX whose register was just loaded from cbuf 1 - the compiler's constants,
+// stored after the shader code (blob + max_size) - jumps through a table in it: every target is pc + 8 + imm + one
+// of its words. All its words that land on an instruction after the BRX become labels (a superset of the table's),
+// for the state machine, structure_body and the label dataflow alike. Without it every instruction is a label.
+static bool brx_table(Ctx *c, const uint64_t *code, size_t i, size_t end, const uint32_t *cb1, uint8_t *label) {
+    if (!cb1 || c->nbrx == 4) return false;
+    uint64_t w = code[i];
+    int ra = (int)bits(w, 8, 8);
+    if (ra == RZ) return false;
+    bool from_cb1 = false;
+    for (size_t k = i; k-- > 0;) {  // the nearest earlier write of ra, in straight code
+        if (k % 4 == 0) continue;
+        uint64_t wk = code[k];
+        uint32_t top = (uint32_t)(wk >> 52);
+        if ((top >= 0xe20 && top <= 0xe3f) || (wk & 0xfff8000000000000ull) == 0xf0f8000000000000ull) break;
+        if ((int)bits(wk, 0, 8) != ra) continue;
+        from_cb1 = (wk & 0xfff8000000000000ull) == 0xef90000000000000ull && bits(wk, 36, 5) == 1;
+        break;
+    }
+    if (!from_cb1) return false;
+    int64_t imm = sbits(w, 20, 24);
+    int n = 0;
+    uint32_t *t = c->brx[c->nbrx].t;
+    for (int j = 0; j < 1024; j++) {
+        uint32_t tt = (uint32_t)((int64_t)i * 8 + 8 + (int64_t)cb1[j] + imm);
+        if (((tt >> 3) & 3u) == 0u) tt += 8u;
+        if (tt & 7u || tt <= i * 8 || tt / 8 >= end) continue;
+        bool dup = false;
+        for (int q = 0; q < n && !dup; q++) dup = t[q] == tt;
+        if (dup) continue;
+        if (n == 256) return false;
+        int q = n++;
+        while (q > 0 && t[q - 1] > tt) { t[q] = t[q - 1]; q--; }  // (ascending)
+        t[q] = tt;
+    }
+    if (!n) return false;
+    c->brx[c->nbrx].at = (uint32_t)i, c->brx[c->nbrx].n = n;
+    c->nbrx++;
+    for (int q = 0; q < n; q++) label[t[q] / 8] = 1;
+    return true;
+}
+static int brx_of(const Ctx *c, size_t i) {
+    for (int b = 0; b < c->nbrx; b++) if (c->brx[b].at == i) return b;
+    return -1;
+}
+
+// (from mamcjr/LASRecompAndroid, MIT) Follows every path from the entry with the SSY / PBK / PCNT stacks' contents, as
+// the state machine runs them per invocation: a SYNC / BRK goes to the target it pops, a CONT to its top (kept), and
+// their guarded forms may also fall through with the stack as it was. flow_to[i]: the target of the SYNC / BRK /
+// CONT at i. False (keep the stacks) when an instruction is reached with two different stacks, a stack under- or
+// overflows, or the program has a jump table without a table or a call / return.
+typedef struct { uint8_t n[3], seen; uint32_t v[3][16]; } FlowSt;
+static bool resolve_stacks(const Ctx *c, const uint64_t *code, size_t end, int32_t *flow_to) {
+    FlowSt *st = calloc(end, sizeof *st);
+    uint32_t *work = malloc(end * 2 * sizeof *work + 16);
+    size_t nwork = 0;
+    bool ok = true;
+    for (size_t i = 0; i < end; i++) flow_to[i] = -1;
+#define FLOW_NEXT(i) ((i) + 1 + (((i) + 1) % 4 == 0))
+#define FLOW_GO(j, S) do { size_t j_ = (j); if (j_ >= end) break; \
+        if (!st[j_].seen) { st[j_] = (S); st[j_].seen = 1; work[nwork++] = (uint32_t)j_; } \
+        else if (memcmp(st[j_].n, (S).n, 3) || memcmp(st[j_].v, (S).v, sizeof (S).v)) ok = false; } while (0)
+    if (end > 1) { FlowSt e = {{0}}; FLOW_GO(1, e); }
+    while (nwork && ok) {
+        size_t i = work[--nwork];
+        FlowSt S = st[i];
+        uint64_t w = code[i];
+        uint32_t pc = (uint32_t)(i * 8);
+        uint32_t top = (uint32_t)(w >> 52);
+        int pr = (int)bits(w, 16, 3);
+        bool prn = bits(w, 19, 1);
+        bool push = (w & 0xfff0000000000020ull) == 0xe290000000000000ull || (w & 0xfff0000000000020ull) == 0xe2a0000000000000ull ||
+                    (w & 0xfff0000000000020ull) == 0xe2b0000000000000ull;
+        if (push || (w & 0xfff0000000000000ull) == 0xe270000000000000ull) pr = PT, prn = false;  // (as emit_insn)
+        if (pr == PT && prn) { FLOW_GO(FLOW_NEXT(i), S); continue; }  // (never executes)
+        bool cond = !(pr == PT && !prn);
+        int64_t t = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
+        if ((w & 0xfff0000000000020ull) == 0xe240000000000000ull) {  // BRA
+            if (t >= 0) FLOW_GO((size_t)t / 8, S);
+            if (cond) FLOW_GO(FLOW_NEXT(i), S);
+        } else if (push) {  // SSY / PBK / PCNT
+            int k = top == 0xe29 ? 0 : top == 0xe2a ? 1 : 2;
+            if (S.n[k] == 16 || t < 0) { ok = false; break; }
+            S.v[k][S.n[k]++] = (uint32_t)t;
+            FLOW_GO(FLOW_NEXT(i), S);
+        } else if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || top == 0xe34 || top == 0xe35) {  // SYNC BRK CONT
+            int k = top == 0xe34 ? 1 : top == 0xe35 ? 2 : 0;
+            if (!S.n[k]) { ok = false; break; }
+            uint32_t to = S.v[k][S.n[k] - 1];
+            flow_to[i] = (int32_t)to;
+            if (cond) FLOW_GO(FLOW_NEXT(i), S);
+            if (k != 2) S.v[k][--S.n[k]] = 0;  // (cleared: states are compared whole)
+            FLOW_GO(to / 8, S);
+        } else if (top == 0xe30) {  // EXIT
+            if (cond) FLOW_GO(FLOW_NEXT(i), S);
+        } else if (top == 0xe25 && brx_of(c, i) >= 0) {  // BRX through a table: each target, with this stack
+            int b = brx_of(c, i);
+            for (int q = 0; q < c->brx[b].n; q++) FLOW_GO(c->brx[b].t[q] / 8, S);
+            if (cond) FLOW_GO(FLOW_NEXT(i), S);
+        } else if (top >= 0xe20 && top <= 0xe3f && top != 0xe33) {  // BRX, CAL, RET, PRET, ... (KIL: 0xe33)
+            ok = false;
+        } else {
+            FLOW_GO(FLOW_NEXT(i), S);
+        }
+    }
+#undef FLOW_GO
+#undef FLOW_NEXT
+    free(work);
+    free(st);
+    return ok;
+}
+
 #define FLOW_DEPTH 16
 #define FLOW_SUCC 128  // successors of a block: 2, or a BRX's possible targets
 typedef struct { uint8_t n[3]; uint32_t v[3][FLOW_DEPTH]; } FlowStacks;  // ssy, pbk, pcnt
@@ -2026,6 +2155,11 @@ static char *structure_body(Ctx *c, const uint64_t *code, size_t end, const uint
     (void)label;
     for (size_t i = 0; i < end; i++) {
         if (i % 4 == 0 || flow_kind(code[i]) != FLOW_BRX) continue;
+        if (brx_of(c, i) >= 0) {  // (its table: the targets are known, and labels already)
+            brx_end[i] = i + 1;
+            for (int q = 0; q < c->brx[brx_of(c, i)].n; q++) lab[c->brx[brx_of(c, i)].t[q] / 8] = 1;
+            continue;
+        }
         size_t lim = 0;
         for (size_t j = 0; j < i; j++) {
             int k = j % 4 ? flow_kind(code[j]) : FLOW_NONE;
@@ -2113,7 +2247,16 @@ static char *structure_body(Ctx *c, const uint64_t *code, size_t end, const uint
         }
         int n = 0;
         FlowStacks sst[FLOW_SUCC];
-        if (x->brx >= 0) {  // every possible target, with the stacks as they are (then the fallthrough if guarded)
+        if (x->brx >= 0 && brx_of(c, x->last) >= 0) {  // the table's targets, with the stacks as they are
+            int b = brx_of(c, x->last);
+            for (int q = 0; q < c->brx[b].n; q++) {
+                size_t j = c->brx[b].t[q] / 8;
+                if (bof[j] < 0 || f.b[bof[j]].first != j) FLOW_FAIL(13);
+                if (n == FLOW_SUCC - 1) FLOW_FAIL(12);
+                x->succ[n] = bof[j], sst[n++] = st;
+            }
+            if (guarded) x->succ[n] = id + 1 < f.nb ? id + 1 : -1, sst[n++] = st;
+        } else if (x->brx >= 0) {  // every possible target, with the stacks as they are (then the fallthrough if guarded)
             for (size_t j = x->last + 1; j < brx_end[x->last]; j++)
                 if (j % 4 && bof[j] >= 0 && f.b[bof[j]].first == j) {
                     if (n == FLOW_SUCC - 1) FLOW_FAIL(12);
@@ -2626,7 +2769,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->uses_local) sp(&s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", LMEM_WORDS, LMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
-        sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0u; uint pbk[16]; uint pbk_n = 0u; uint pcnt[16]; uint pcnt_n = 0u;\n");
+        if (c->static_stacks) sp(&s, "  uint pc = 8u;\n");  // (the stacks resolved: no arrays)
+        else sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0u; uint pbk[16]; uint pbk_n = 0u; uint pcnt[16]; uint pcnt_n = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
         sp(&s, "  for (uint guard = 0u; guard < %uu; guard++) {\n  switch (pc) {\n", stage == STAGE_COMPUTE ? 100000u : 16384u);
         sp(&s, "%s", body.buf ? body.buf : "");
@@ -2722,9 +2866,12 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
             if (t >= 0 && (size_t)(t / 8) < end) label[t / 8] = 1;
             any_branch = true;
         }
-        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: any instruction may be a target
+        if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: its table's targets, else any instruction
             any_branch = true;
-            memset(label, 1, end);
+            static int table_on = -1;
+            if (table_on < 0) table_on = getenv("LARECOMP_VK_BRX_TABLE") ? atoi(getenv("LARECOMP_VK_BRX_TABLE")) != 0 : maxwell_brx_table;
+            if (!(table_on && c->glsl && max_size < 0x10000 && brx_table(c, (const uint64_t *)code, i, end, (const uint32_t *)(blob + max_size), label)))
+                memset(label, 1, end);
         }
         if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || (w & 0xfff0000000000000ull) == 0xe340000000000000ull ||
             (w & 0xfff0000000000000ull) == 0xe350000000000000ull)
@@ -2736,6 +2883,14 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     static int annotate = -1;
     if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
     c->branchy = any_branch;
+    if (c->glsl && any_branch) {  // (maxwell_static_stacks) the stacks resolved: emit_insn, glsl_finish
+        static int dyn = -1;
+        if (dyn < 0) dyn = getenv("LARECOMP_DYN_STACKS") ? atoi(getenv("LARECOMP_DYN_STACKS")) != 0 : !maxwell_static_stacks;
+        if (!dyn) {
+            c->flow_to = malloc(end * sizeof *c->flow_to + 4);
+            c->static_stacks = c->flow_to && resolve_stacks(c, (const uint64_t *)code, end, c->flow_to);
+        }
+    }
     size_t *off0 = calloc(end + 1, sizeof(size_t)), *off1 = calloc(end + 1, sizeof(size_t));  // (each instruction's text)
     // What is known of the registers at a block entry (reg_tz, hstate: emit_insn) is what holds on every path there:
     // the fall-through and each branch to it, recorded as they are emitted (all earlier in the code), unless a later
@@ -2749,12 +2904,17 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     for (size_t i = 0; i < end; i++) labno[i] = label[i] ? (int)nlab++ : -1;
     for (size_t j = 1; j < end; j++) {
         int k = j % 4 ? flow_kind(cw[j]) : FLOW_NONE;
-        if (k == FLOW_BRX) brx = true;
+        if (k == FLOW_BRX && brx_of(c, j) < 0) brx = true;  // (a BRX with a table: a BRA to each of its targets)
         if (k == FLOW_SYNC || k == FLOW_BRK || k == FLOW_CONT) last_pop = j;
     }
     uint8_t *back = calloc(end + 4, 1);
     for (size_t j = 1; j < end && !brx; j++) {
         int k = j % 4 ? flow_kind(cw[j]) : FLOW_NONE;
+        if (k == FLOW_BRX) {
+            int b = brx_of(c, j);
+            for (int q = 0; q < c->brx[b].n; q++) if (c->brx[b].t[q] / 8 <= j) back[c->brx[b].t[q] / 8] = 1;
+            continue;
+        }
         if (k != FLOW_BRA && k != FLOW_SSY && k != FLOW_PBK && k != FLOW_PCNT) continue;
         int64_t t = norm_target((int64_t)(j * 8) + 8 + sbits(cw[j], 20, 24)) / 8;
         if (t < 0 || (size_t)t >= end) continue;
@@ -2790,6 +2950,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         {   // what this instruction's paths bring to the labels they reach
             int64_t t = norm_target((int64_t)pc + 8 + sbits(cw[i], 20, 24)) / 8;
             if (fk == FLOW_BRA && t >= 0) MEET((size_t)t);
+            if (fk == FLOW_BRX && brx_of(c, i) >= 0)
+                for (int q = 0; q < c->brx[brx_of(c, i)].n; q++) MEET(c->brx[brx_of(c, i)].t[q] / 8);
             if ((fk == FLOW_SSY || fk == FLOW_PBK || fk == FLOW_PCNT) && t >= 0) pushed[npushed++] = (uint32_t)t;
             if (fk == FLOW_SYNC || fk == FLOW_BRK || fk == FLOW_CONT)
                 for (size_t k = 0; k < npushed; k++) MEET(pushed[k]);
@@ -2817,6 +2979,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     }
 #undef MEET
     free(labno), free(back), free(ltz), free(lh), free(pushed);
+    free(c->flow_to), c->flow_to = NULL;
     free(off0), free(off1);
     free(label);
     if (c->fail) { free(c->body.buf); free(c); return info; }

@@ -108,6 +108,14 @@ extern int maxwell_ieee_minmax;
 // 1: the device reads zeros past a constant buffer's end (Vulkan robustBufferAccess): run-time indexed cbuf loads
 // without the clamp to the block (translate.c glsl_prelude_cbr_robust)
 extern int maxwell_robust_cbuf;
+// (GLSL; from mamcjr/LASRecompAndroid, MIT) SSY / PBK / PCNT targets resolved while translating: SYNC / BRK / CONT
+// jump to constants and the state machine has no stack arrays (48 dynamically indexed words: registers or scratch on
+// a mobile GPU). Shaders where a target isn't the same on every path keep the stacks. LARECOMP_DYN_STACKS=1: off.
+extern bool maxwell_static_stacks;
+// (GLSL; from mamcjr/LASRecompAndroid, MIT) a BRX's targets read from its jump table in the constants after the
+// code, instead of every instruction being a possible target (the labels split straight code into blocks the GPU's
+// compiler can't schedule: an SSAO pass at 20 ms instead of 1). LARECOMP_VK_BRX_TABLE=0: off.
+extern bool maxwell_brx_table;
 // (GLSL / Vulkan) A GPU whose storage buffers can't span the heap (maxStorageBufferRange: 1 GB on Intel, issue #8)
 // gets it as chunks of 1 << maxwell_gmem_chunk_shift bytes, one buffer each - chunk 0 at GMEM_BUFFER_INDEX, chunk k
 // at GMEM_CHUNK_BINDING + k - 1 - and shaders pick the chunk from the address. 0: one buffer, as before.
