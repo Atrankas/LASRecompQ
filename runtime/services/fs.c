@@ -18,6 +18,7 @@
 #include "../rando.h"
 #include "../ipc.h"
 #include "../romfs_build.h"
+#include "../settings.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
 #define FS_PATH_EXISTS MAKE_RESULT(2, 2)
@@ -365,10 +366,18 @@ static void rom_index(void) {
     }
     // Randomizer seed: replacement files are served from the seed folder. The file-meta table is patched
     // (in a copy) to point them at data appended past the end of the image; reads there go to host files.
+    // The Brazilian Portuguese fan translation (settings_translation_dir) the same way, under a seed's own files.
+    const char *tr = settings_translation_dir();
+    int ntr = 0;
     for (int i = 0; i < rom_nfiles; i++) {
         char host[1200];
-        if (!rando_romfs_override(rom_files[i].path, host, sizeof host)) continue;
         struct stat sb;
+        if (!rando_romfs_override(rom_files[i].path, host, sizeof host)) {
+            if (!tr) continue;
+            snprintf(host, sizeof host, "%s/%s", tr, rom_files[i].path);
+            if (stat(host, &sb) || !S_ISREG(sb.st_mode)) continue;
+            ntr++;
+        }
         if (stat(host, &sb)) continue;
         if (!ov_meta) {
             ov_meta = malloc(fsz);
@@ -389,7 +398,8 @@ static void rom_index(void) {
         ov_n++;
         ov_end = (ov_end + size + 0xF) & ~0xFull;
     }
-    if (ov_n) LOG("[fs] randomizer: %d romfs files replaced\n", ov_n);
+    if (ov_n - ntr) LOG("[fs] randomizer: %d romfs files replaced\n", ov_n - ntr);
+    if (tr) LOG("[fs] translation %s: %d romfs files replaced\n", tr, ntr);
     if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
     rt_romfs_files = rom_nfiles;  // (the game's own: before a seed's added files; the crash dialog checks it)
     add_new_files(h, dmeta, dsz, fsz);

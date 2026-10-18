@@ -15,6 +15,7 @@
 
 #include <string>
 #include "imgui.h"
+#include "i18n.h"
 
 extern "C" {
 #include "../hle.h"
@@ -304,10 +305,10 @@ static void pets_draw(ImDrawList *dl, ImFont *font, float ox, float oy, float u)
     if (sel >= 0) {  // on the slot: the game-style cursor around the card, "(A) Choose" under the list
         cursor_frame(dl, ImVec2(a.x - 6 * u, a.y - 6 * u), ImVec2(b.x + 6 * u, b.y + 6 * u), u);
         float y = b.y - 22 * u, fs = 15 * u;
-        ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, "Choose");
+        ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, T("Choose"));
         float w = 22 * u + ts.x, x0 = cx - w * 0.5f;
         confirm_glyph(dl, font, ImVec2(x0 + 8 * u, y), 9 * u);
-        dl->AddText(font, fs, ImVec2(x0 + 22 * u, y - ts.y * 0.5f), IM_COL32(255, 245, 225, 255), "Choose");
+        dl->AddText(font, fs, ImVec2(x0 + 22 * u, y - ts.y * 0.5f), IM_COL32(255, 245, 225, 255), T("Choose"));
     } else {  // a hint that the grid's cursor reaches it: an arrow on the card's right edge
         float y = (a.y + b.y) * 0.5f;
         dl->AddTriangleFilled(ImVec2(b.x - 4 * u, y - 7 * u), ImVec2(b.x - 4 * u, y + 7 * u), ImVec2(b.x - 12 * u, y),

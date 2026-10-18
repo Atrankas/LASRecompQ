@@ -8,6 +8,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"  // (SetKeyOwner, NavCursorVisible)
 
+#include "i18n.h"
 #include "option_rows.h"
 #include "osk.h"
 
@@ -46,17 +47,20 @@ void opt_begin(const char *id, float scale) {
 }
 
 void opt_section(const char *title) {
-    std::string t = title;
-    for (char &c : t) c = (char)toupper((unsigned char)c);
+    std::string t = T(title);
+    ui_upper(t);
     if (ImGui::GetCursorPosY() > ImGui::GetStyle().WindowPadding.y + 1) ImGui::Dummy(ImVec2(0, 10 * g_scale));
     ImGui::TextColored(ImVec4(0.55f, 0.58f, 0.52f, 1), "%s", t.c_str());
 }
 
 // One row: draws it, handles A / click and left / right while selected. Returns 2 (A / click), -1 / +1 (left / right) or 0.
 // arrows: ◀ value ▶ (a choice of several, or a stepper): left / right step it, and the arrows click too
-static int row(const char *label, const std::string &value, bool changed, const char *desc, bool upper = true,
+// (label, value and desc are shown through T(); the ID stays the English label)
+static int row(const char *label, const std::string &value_en, bool changed, const char *desc, bool upper = true,
                bool arrows = false) {
     ImGui::PushID(label);
+    std::string value = T(value_en.c_str());
+    desc = T(desc);
     if (g_indent) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + g_indent * 28 * g_scale);  // (an option of the row above)
     ImVec2 p = ImGui::GetCursorScreenPos();
     float w = ImGui::GetContentRegionAvail().x, h = ImGui::GetFontSize() * 1.9f;
@@ -104,9 +108,8 @@ static int row(const char *label, const std::string &value, bool changed, const 
     dl->AddRect(p, ImVec2(p.x + w, p.y + h), hov || foc ? (off ? IM_COL32(236, 194, 84, 120) : kGold)
                                                         : IM_COL32(255, 255, 255, off ? 18 : 38), r, 0,
                 hov || foc ? 2.0f : 1.0f);
-    std::string t = label;
-    if (upper && !g_cards)
-        for (char &c : t) c = (char)toupper((unsigned char)c);
+    std::string t = T(label);
+    if (upper && !g_cards) ui_upper(t);
     float ty = p.y + (h - fs) * 0.5f;
     ImU32 label_col = off ? IM_COL32(110, 110, 102, 255) : IM_COL32(240, 236, 224, 255);  // (greyed out: clearly dim)
     if (g_cards) {
@@ -160,7 +163,7 @@ bool opt_choice(const char *label, int *v, const char *const *names, int n, int 
 
 bool opt_slider(const char *label, float *v, float lo, float hi, float step, float def, const char *fmt, const char *desc) {
     char buf[32];
-    snprintf(buf, sizeof buf, fmt, *v);
+    snprintf(buf, sizeof buf, T(fmt), *v);
     int s = row(label, buf, fabsf(*v - def) > step * 0.01f, desc, true, true);
     if (!s) return false;
     float eps = step * 0.01f, n = roundf(*v / step) * step + (s == 2 ? step : s * step);
@@ -172,8 +175,8 @@ bool opt_slider(const char *label, float *v, float lo, float hi, float step, flo
 bool opt_int(const char *label, int *v, int lo, int hi, int step, int def, const char *fmt, const char *desc,
              const char *lo_name) {
     char buf[48];
-    if (lo_name && *v == lo) snprintf(buf, sizeof buf, "%s", lo_name);
-    else snprintf(buf, sizeof buf, fmt, *v);
+    if (lo_name && *v == lo) snprintf(buf, sizeof buf, "%s", T(lo_name));
+    else snprintf(buf, sizeof buf, T(fmt), *v);
     int s = row(label, buf, *v != def, desc, true, true);
     if (!s) return false;
     int d = s == 2 ? step : s * step * (g_held && hi - lo > 40 * step ? 10 : 1);
@@ -211,14 +214,14 @@ bool opt_text(const char *label, char *buf, size_t cap, const char *hint, const 
     static int focus;        // frames left to give it the keyboard focus
     ImGuiID id = ImGui::GetID(label);
     if (editing != id) {
-        if (row(label, buf[0] ? buf : (hint ? hint : ""), false, desc) == 2) editing = id, focus = 2;
+        if (row(label, buf[0] ? buf : (hint ? T(hint) : ""), false, desc) == 2) editing = id, focus = 2;
         return false;
     }
     ImGui::PushID(label);
     ImGui::SetNextItemWidth(-1);
     if (focus > 0) ImGui::SetKeyboardFocusHere(), focus--;
-    bool done = ui_input_text("##text", buf, cap, ImGuiInputTextFlags_EnterReturnsTrue, hint, label);
-    if (ImGui::IsItemFocused()) g_desc_focus = desc ? desc : "";
+    bool done = ui_input_text("##text", buf, cap, ImGuiInputTextFlags_EnterReturnsTrue, T(hint), T(label));
+    if (ImGui::IsItemFocused()) g_desc_focus = desc ? T(desc) : "";
     if (done || ui_input_text_cancelled() || (focus == 0 && !ImGui::IsItemActive() && !osk_is_open())) editing = 0;
     ImGui::PopID();
     return done;

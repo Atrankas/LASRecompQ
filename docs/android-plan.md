@@ -121,6 +121,17 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
       60 fps na tela na casa da Madam, Tail Cave e no Campo depois de assentar; pausa sozinho quando o jogo não segura 30
 - [ ] Campo no trecho mais pesado: ~20-24 ms de GPU mesmo em 50% (capim alto 3-4 ms de geometria): a geração pausa ali
 - [ ] Controles físicos (Xbox, PS, GameSir): suporte via SDL3 já existe, falta testar com um controle no aparelho
+- [x] Resolução dinâmica lembra o fator de cada área (voltar ao Campo depois de uma casa não começa alto demais)
+- [ ] Campo, medido por passe (escala 0.5, ~27 ms de GPU em média): passe de cor principal ~13 ms, pré-passe de
+      profundidade 2.4 ms, sombras 2.1 ms; ~16 ms não dependem da resolução (vértices: ~1.9 milhão por quadro; o
+      capim alto tem um VS de 1101 instruções com 32 registros). O shader iluminado (2669 instruções, 2 waves) e os
+      VS pesados são o alvo: propostas de geração de código em teste (sem `isnan` nos min/max/saturate, leituras de
+      cbuf com componente constante, meias-precisões sem empacotar a cada instrução)
+- [x] Tradução PT-BR (fã, Heroes of Time): idioma "Português (Brasil)" nas configurações; os arquivos da tradução
+      (em `translations/pt-BR` na pasta de dados, ou importados pelo menu no Android) substituem os textos em inglês
+      sem tocar nos arquivos do jogo. Nunca vão para o repositório (`/translations/` no `.gitignore`)
+- [ ] Menus do app em português (`ui_language`: automático pelo idioma do sistema, inglês ou português)
+- Ferramenta: `build/scratch/bench.sh` (média de GPU por quadro no Campo, escala fixa) - um quadro só varia ±1.5 ms
 - Ferramentas: `LARECOMP_DUMP_UBO`, `LARECOMP_DBG_FS` (reg + 3000 = inteiro), `LARECOMP_VK_PASS_GPU_DRAWS=1` (GPU por
   shader), `LARECOMP_DISPLAY` (tela da janela no Mac)
 

@@ -26,6 +26,9 @@ void android_gpu_driver_select(bool use);  // from the next start on
 // Opens the file picker for a driver .zip, installs and selects it; cb (any thread) gets NULL when installed, "" when
 // cancelled, else what went wrong
 void android_gpu_driver_install(void (*cb)(const char *error));
+// The folder picker for a fan translation as extracted; its romfs/ (the folder holding regionUS/) is copied into dest
+// on a thread of the app's, then cb (on that thread): NULL = done, else "nofolder", "notfound" or "copy:<details>".
+void android_import_translation(const char *dest, void (*cb)(const char *error));
 // The name of a driver that failed at its last start (the system's runs instead), once; else NULL
 const char *android_gpu_driver_failed(void);
 // The selected driver for this start: false = the system's. Folders end with '/'. probe: a file to remove once the

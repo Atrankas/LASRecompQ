@@ -20,7 +20,11 @@ enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 
 // System language served to the game (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
 // the game picks its text language from it, as it would from the Switch's own system setting. LANG_AUTO follows the
 // host locale ($LC_ALL / $LC_MESSAGES / $LANG); the rest are the codes of the languages the game has text for.
-enum { LANG_AUTO = 0, N_LANGUAGES = 12 };
+// LANG_PT_BR: Brazilian Portuguese from a fan translation the player brings (translations/pt-BR: settings_translation_dir);
+// the game is told English, whose text files the translation replaces.
+enum { LANG_AUTO = 0, LANG_PT_BR = 12, N_LANGUAGES = 13 };
+// The app's own menus (runtime/ui/i18n.h): auto follows the system (Portuguese -> Portuguese), else English
+enum { UI_LANG_AUTO = 0, UI_LANG_EN = 1, UI_LANG_PT_BR = 2, N_UI_LANGUAGES = 3 };
 extern const char *const g_language_codes[N_LANGUAGES];  // what the game is told: "ja", "en-US", "es", ...
 extern const char *const g_language_names[N_LANGUAGES];  // for the menu ("Auto", "Japanese", ..., "Spanish")
 
@@ -41,6 +45,7 @@ typedef struct {
     int frame_gen;       // 60 fps (generated): in-between frames while the game runs at 30 (Vulkan: framegen.c)
     bool mirror_mode;    // the world mirrored left to right (Gameplay tab): renderers + runtime/hle/input.c
     int language;        // LANG_AUTO or an index into g_language_codes: the game's text language
+    int ui_language;     // UI_LANG_*: the app's menus
     int prompts;         // PROMPTS_*: button glyphs (auto = follow the controller SDL reports): runtime/nvn/texpatch.c
     bool inv_keys;       // randomizer: show every dungeon's keys on the pause menu's Items page
     bool tracker;        // randomizer: check tracker on the pause menu's Map page
@@ -79,3 +84,10 @@ void settings_save(void);
 const char *settings_language(void);
 // That code's name for the menu ("Spanish")
 const char *settings_language_name(void);
+// The fan translation's RomFS folder (its files replace the game's English ones) when Brazilian Portuguese is the
+// language and the folder holds one, else NULL. Accepts translations/pt-BR/romfs or the release as extracted
+// (translations/pt-BR/atmosphere/contents/01006BB00C6F0000/romfs, sxos/titles/..., ReiNX/titles/...).
+const char *settings_translation_dir(void);
+void settings_translation_changed(void);  // (files copied in: look again)
+// Whether the app's menus are in Brazilian Portuguese (ui_language, or the system's language for auto)
+bool settings_ui_portuguese(void);

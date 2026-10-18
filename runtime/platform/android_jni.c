@@ -172,3 +172,25 @@ JNIEXPORT void JNICALL Java_com_lasrecomp_android_LasActivity_nativeGpuDriverIns
     if (g_driver_cb) g_driver_cb(s);
     if (s) (*env)->ReleaseStringUTFChars(env, error, s);
 }
+
+// ---- a fan translation (LasActivity.importTranslation)
+static void (*g_translation_cb)(const char *error);
+
+void android_import_translation(const char *dest, void (*cb)(const char *error)) {
+    g_translation_cb = cb;
+    JNIEnv *env;
+    jclass cls;
+    jmethodID m = activity_method(&env, &cls, "importTranslation", "(Ljava/lang/String;)V");
+    if (!m) { if (cb) cb("nofolder"); return; }
+    jstring jdest = (*env)->NewStringUTF(env, dest);
+    (*env)->CallStaticVoidMethod(env, cls, m, jdest);
+    (*env)->DeleteLocalRef(env, jdest);
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+JNIEXPORT void JNICALL Java_com_lasrecomp_android_LasActivity_nativeTranslationImported(JNIEnv *env, jclass cls, jstring error) {
+    (void)cls;
+    const char *s = error ? (*env)->GetStringUTFChars(env, error, NULL) : NULL;
+    if (g_translation_cb) g_translation_cb(s);
+    if (s) (*env)->ReleaseStringUTFChars(env, error, s);
+}

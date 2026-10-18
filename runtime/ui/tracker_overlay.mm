@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "i18n.h"
 
 extern "C" {
 #include "../hle.h"
@@ -455,7 +456,7 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     dl->PopClipRect();
     if (!hover && hover_group) hover = hover_group;
     char sum[64];
-    snprintf(sum, sizeof sum, "Checks: %d reachable / %d left", reach, left);
+    snprintf(sum, sizeof sum, T("Checks: %d reachable / %d left"), reach, left);
     dl->AddText(font, 20 * u, ImVec2(ox + 190 * u, oy + 640 * u), IM_COL32(255, 245, 225, 255), sum);
     if (hover) {
         std::string t = hover == hover_group ? std::string(hover) : pretty(hover);

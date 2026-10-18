@@ -4,6 +4,8 @@ extracted/
 generated/
 generated-*/
 /rando/
+# fan translations the player brings (game files, modified: never in the repo)
+/translations/
 # Nintendo fonts (users import their own; only the README ships)
 /fonts/*
 !/fonts/README.md

@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/stat.h>
+#include <SDL3/SDL_locale.h>
+#include <SDL3/SDL_stdinc.h>
 
 #include "hle.h"
 #include "input_bind.h"
@@ -41,10 +44,10 @@ Settings g_settings = {
 // reads back (runtime/services/am.c), exactly as it does on the console. Codes as the Switch reports them, except for
 // the Chinese ones: the game only recognizes zh-Hans / zh-Hant and falls back to Japanese when told zh-CN / zh-TW.
 const char *const g_language_codes[N_LANGUAGES] = {"auto", "ja", "en-US", "es", "fr", "de", "it", "nl", "ru", "ko",
-                                                   "zh-Hans", "zh-Hant"};
+                                                   "zh-Hans", "zh-Hant", "pt-BR"};
 const char *const g_language_names[N_LANGUAGES] = {"Auto", "Japanese", "English", "Spanish", "French", "German",
                                                    "Italian", "Dutch", "Russian", "Korean", "Chinese (Simplified)",
-                                                   "Chinese (Traditional)"};
+                                                   "Chinese (Traditional)", "Português (Brasil)"};
 
 // LANG_AUTO: the host's own language (LANG=es_ES.UTF-8 -> es), en-US when it is none of the game's. Linux only:
 // macOS / Windows apps get no locale variables from the system, so Auto is English there (pick one in settings).
@@ -83,14 +86,50 @@ static const char *host_language(void) {
 
 const char *settings_language(void) {
     int i = g_settings.language;
+    if (i == LANG_PT_BR) return "en-US";  // (the translation replaces the English text)
     return i > LANG_AUTO && i < N_LANGUAGES ? g_language_codes[i] : host_language();
 }
 
 const char *settings_language_name(void) {
+    if (g_settings.language == LANG_PT_BR) return g_language_names[LANG_PT_BR];
     const char *c = settings_language();
     for (int i = 0; i < N_LANGUAGES; i++)
         if (!strcmp(c, g_language_codes[i])) return g_language_names[i];
     return "English";
+}
+
+static char g_tr_dir[160];
+static int g_tr_found = -1;  // (looked once; again after an import)
+void settings_translation_changed(void) { g_tr_found = -1; }
+
+const char *settings_translation_dir(void) {
+    if (g_settings.language != LANG_PT_BR) return NULL;
+    if (g_tr_found < 0) {
+        static const char *const where[] = {"translations/pt-BR/romfs", "translations/pt-BR/atmosphere/contents/01006BB00C6F0000/romfs",
+                                            "translations/pt-BR/sxos/titles/01006BB00C6F0000/romfs",
+                                            "translations/pt-BR/ReiNX/titles/01006BB00C6F0000/romfs"};
+        g_tr_found = 0;
+        for (size_t i = 0; i < sizeof where / sizeof where[0] && !g_tr_found; i++) {
+            char probe[200];
+            struct stat sb;
+            snprintf(probe, sizeof probe, "%s/regionUS", where[i]);
+            if (stat(probe, &sb) == 0 && S_ISDIR(sb.st_mode)) snprintf(g_tr_dir, sizeof g_tr_dir, "%s", where[i]), g_tr_found = 1;
+        }
+    }
+    return g_tr_found ? g_tr_dir : NULL;
+}
+
+bool settings_ui_portuguese(void) {
+    if (g_settings.ui_language != UI_LANG_AUTO) return g_settings.ui_language == UI_LANG_PT_BR;
+    static int sys = -1;
+    if (sys < 0) {
+        sys = 0;
+        int n = 0;
+        SDL_Locale **l = SDL_GetPreferredLocales(&n);
+        if (l && n > 0 && l[0]->language && !strcmp(l[0]->language, "pt")) sys = 1;
+        SDL_free(l);
+    }
+    return sys;
 }
 
 void settings_load(void) {
@@ -141,6 +180,7 @@ void settings_load(void) {
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
         else if (!strcmp(key, "frame_gen")) g_settings.frame_gen = atoi(val);
+        else if (!strcmp(key, "ui_language")) g_settings.ui_language = atoi(val) >= 0 && atoi(val) < N_UI_LANGUAGES ? atoi(val) : 0;
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
         else if (!strcmp(key, "prompts")) g_settings.prompts = !strcmp(val, "nintendo") ? PROMPTS_NINTENDO : !strcmp(val, "xbox") ?
                                                               PROMPTS_XBOX : !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION : PROMPTS_AUTO;
@@ -202,6 +242,7 @@ void settings_save(void) {
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);
     fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\nframe_gen = %d\n", g_settings.move_360, g_settings.blur_removal,
             g_settings.hide_hero_icon, g_settings.frame_gen);
+    fprintf(f, "ui_language = %d\n", g_settings.ui_language);
     static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation"};
     fprintf(f, "prompts = %s\n", prompts[g_settings.prompts & 3]);
     fprintf(f, "mirror_mode = %d\n", g_settings.mirror_mode);

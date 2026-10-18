@@ -13,6 +13,7 @@
 #include <algorithm>
 
 #include "imgui.h"
+#include "i18n.h"
 #include "osk.h"
 #include "option_rows.h"
 
@@ -379,7 +380,8 @@ static void poll_generation(void) {
         g_gen_pid = 0;
         g_gen_failed = st != 0;
         g_gen_done = true;
-        g_gen_status = g_gen_failed ? "Generation failed: see rando/" + g_gen_seed + "/generate.log" : "Seed \"" + g_gen_seed + "\" ready.";
+        g_gen_status = g_gen_failed ? T("Generation failed: see rando/") + g_gen_seed + "/generate.log"
+                                    : T("Seed \"") + g_gen_seed + T("\" ready.");
         g_scanned = false;
         g_opts.seed[0] = 0;
         g_opts.rng = new_rng();  // next seed: a fresh ID
@@ -415,23 +417,23 @@ static void gen_overlay(float scale) {
         char over[32];
         int secs = (int)(ImGui::GetTime() - g_gen_start);
         snprintf(over, sizeof over, "%d:%02d", secs / 60, secs % 60);
-        ImGui::TextUnformatted(g_gen_status.c_str());
+        ImGui::TextUnformatted(T(g_gen_status.c_str()));
         ImGui::ProgressBar(g_gen_frac > 0.005f ? g_gen_frac : -0.3f * (float)ImGui::GetTime(), ImVec2(-1, 0), over);
     } else {
         float bw = 230 * scale;
         bool close = false;
         if (g_gen_failed) {
             ImGui::PushTextWrapPos(0);
-            ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", g_gen_status.c_str());
+            ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", T(g_gen_status.c_str()));
             ImGui::PopTextWrapPos();
             ImGui::Spacing();
-            if (ImGui::Button("Close", ImVec2(bw, 0))) close = true;
+            if (ImGui::Button(T("Close"), ImVec2(bw, 0))) close = true;
             ImGui::SetItemDefaultFocus();
         } else {
-            ImGui::TextUnformatted("Seed ready.");
-            ImGui::ProgressBar(1, ImVec2(-1, 0), "Done");
+            ImGui::TextUnformatted(T("Seed ready."));
+            ImGui::ProgressBar(1, ImVec2(-1, 0), T("Done"));
             ImGui::Spacing();
-            if (ImGui::Button("Play Now", ImVec2(bw, 0)) || test_play) {  // (switches in place: the game reboots on the new seed)
+            if (ImGui::Button(T("Play Now"), ImVec2(bw, 0)) || test_play) {  // (switches in place: the game reboots on the new seed)
                 g_gen_done = false;
                 g_gen_status.clear();
                 ImGui::CloseCurrentPopup();
@@ -439,7 +441,7 @@ static void gen_overlay(float scale) {
             }
             ImGui::SetItemDefaultFocus();
             ImGui::SameLine();
-            if (ImGui::Button("Close", ImVec2(bw, 0))) close = true;
+            if (ImGui::Button(T("Close"), ImVec2(bw, 0))) close = true;
         }
         if (close || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
             g_gen_done = false;
@@ -494,9 +496,9 @@ extern "C" void rando_tab_draw(float scale) {
     static std::string act_seed;  // the seed whose actions box is open
     for (const Seed &s : g_seeds) {
         bool is_active = active && s.name == active;
-        std::string d = "Seed ID: " + (s.id.empty() ? std::string("-") : s.id) + "\nLogic: " +
-                        (s.logic.empty() ? std::string("-") : s.logic) + "\n\nPlay it, read its spoiler log, copy its "
-                        "ID to share, rename or delete it. Each seed has its own save files.";
+        std::string d = T("Seed ID: ") + (s.id.empty() ? std::string("-") : s.id) + T("\nLogic: ") +
+                        (s.logic.empty() ? std::string("-") : s.logic) + T("\n\nPlay it, read its spoiler log, copy its "
+                        "ID to share, rename or delete it. Each seed has its own save files.");
         if (opt_action(s.name.c_str(), is_active ? "Playing" : s.logic.c_str(), d.c_str(), false)) {
             act_seed = s.name;
             ImGui::OpenPopup("##seedact");
@@ -525,11 +527,11 @@ extern "C" void rando_tab_draw(float scale) {
                     ImGui::SetNextItemWidth(bw * 2);
                     if (!osk_is_open() && !ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere();
                     if (ui_input_text("##rename", rename_buf, sizeof rename_buf, ImGuiInputTextFlags_EnterReturnsTrue, NULL,
-                                      "Rename seed")) {
+                                      T("Rename seed"))) {
                         std::string to_name = clean_name(rename_buf), to = "rando/" + to_name;
                         struct stat sb;
                         if (!to_name.empty() && to_name != s.name) {
-                            if (!stat(to.c_str(), &sb)) g_gen_status = "A seed named \"" + to_name + "\" already exists.";
+                            if (!stat(to.c_str(), &sb)) g_gen_status = T("A seed named \"") + to_name + T("\" already exists.");
                             else if (rename(("rando/" + s.name).c_str(), to.c_str()) == 0) {
                                 // (seeds made before seed IDs name their spoiler after the folder)
                                 rename((to + "/spoiler_" + s.name + ".txt").c_str(), (to + "/spoiler_" + to_name + ".txt").c_str());
@@ -541,25 +543,25 @@ extern "C" void rando_tab_draw(float scale) {
                     }
                     if (ui_input_text_cancelled()) renaming = false;
                 } else if (confirm_delete) {
-                    ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Delete this seed and its save files?");
+                    ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "%s", T("Delete this seed and its save files?"));
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.15f, 0.15f, 1));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.2f, 0.2f, 1));
-                    if (ImGui::Button("Delete seed + saves", ImVec2(bw, 0))) { delete_seed(s.name); close = true; }
+                    if (ImGui::Button(T("Delete seed + saves"), ImVec2(bw, 0))) { delete_seed(s.name); close = true; }
                     ImGui::PopStyleColor(2);
                     ImGui::SameLine();
                     ImGui::SetItemDefaultFocus();
-                    if (ImGui::Button("Cancel", ImVec2(bw, 0))) confirm_delete = false;
+                    if (ImGui::Button(T("Cancel"), ImVec2(bw, 0))) confirm_delete = false;
                 } else {
-                    if (!is_active && ImGui::Button("Play", ImVec2(bw, 0))) { ImGui::CloseCurrentPopup(); play_seed(s.name.c_str()); }
-                    if (ImGui::Button("Spoiler log", ImVec2(bw, 0))) { g_spoiler_seed = s.name; close = true; }
+                    if (!is_active && ImGui::Button(T("Play"), ImVec2(bw, 0))) { ImGui::CloseCurrentPopup(); play_seed(s.name.c_str()); }
+                    if (ImGui::Button(T("Spoiler log"), ImVec2(bw, 0))) { g_spoiler_seed = s.name; close = true; }
                     ImGui::BeginDisabled(s.id.empty());
-                    if (ImGui::Button("Copy seed ID", ImVec2(bw, 0))) ImGui::SetClipboardText(s.id.c_str());
+                    if (ImGui::Button(T("Copy seed ID"), ImVec2(bw, 0))) ImGui::SetClipboardText(s.id.c_str());
                     ImGui::EndDisabled();
                     ImGui::BeginDisabled(is_active);  // (the game is reading its files)
-                    if (ImGui::Button("Rename", ImVec2(bw, 0))) { renaming = true; strlcpy(rename_buf, s.name.c_str(), sizeof rename_buf); }
-                    if (ImGui::Button("Delete", ImVec2(bw, 0))) confirm_delete = true;
+                    if (ImGui::Button(T("Rename"), ImVec2(bw, 0))) { renaming = true; strlcpy(rename_buf, s.name.c_str(), sizeof rename_buf); }
+                    if (ImGui::Button(T("Delete"), ImVec2(bw, 0))) confirm_delete = true;
                     ImGui::EndDisabled();
-                    if (ImGui::Button("Close", ImVec2(bw, 0))) close = true;
+                    if (ImGui::Button(T("Close"), ImVec2(bw, 0))) close = true;
                 }
                 if (!renaming && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))) {
                     if (confirm_delete) confirm_delete = false;
@@ -600,9 +602,9 @@ extern "C" void rando_tab_draw(float scale) {
         static std::string id_msg;
         if (!g_opts.rng) g_opts.rng = new_rng();
         if (!opt_text_editing("Seed ID")) seed_id_encode(g_opts, idbuf, sizeof idbuf);
-        std::string d = "A seed ID holds the random seed and every option below: the same ID on the same LAS Recomp "
-                        "version makes the same seed. Enter a shared ID here to load its options.";
-        if (!id_msg.empty()) d += "\n\n" + id_msg;
+        std::string d = T("A seed ID holds the random seed and every option below: the same ID on the same LAS Recomp "
+                          "version makes the same seed. Enter a shared ID here to load its options.");
+        if (!id_msg.empty()) d += std::string("\n\n") + T(id_msg.c_str());
         if (opt_text("Seed ID", idbuf, sizeof idbuf, "", d.c_str())) {
             GenOpts t = g_opts;
             id_msg = seed_id_decode(idbuf, t);
@@ -694,7 +696,7 @@ extern "C" void rando_tab_draw(float scale) {
         opt_indent(-1);
         if (last) ImGui::OpenPopup("##entlast");
         if (ImGui::BeginPopupModal("##entlast", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
-            ImGui::TextUnformatted("With the entrance randomizer on, at least one kind of entrance must be shuffled.");
+            ImGui::TextUnformatted(T("With the entrance randomizer on, at least one kind of entrance must be shuffled."));
             ImGui::Spacing();
             ImGui::SetItemDefaultFocus();
             if (ImGui::Button("OK", ImVec2(220 * scale, 0)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||

@@ -31,6 +31,7 @@ public class LasActivity extends SDLActivity {
     private static final String TAG = "LASRecomp";
     private static final int PICK_FOLDER = 4100;
     private static final int PICK_DRIVER = 4101;
+    private static final int PICK_TRANSLATION = 4102;
     private static Uri sTree;  // the folder picked last (read permission kept across restarts)
 
     @Override
@@ -109,6 +110,7 @@ public class LasActivity extends SDLActivity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         if (request == PICK_DRIVER) { driverPicked(result == RESULT_OK && data != null ? data.getData() : null); return; }
+        if (request == PICK_TRANSLATION) { translationPicked(result == RESULT_OK && data != null ? data.getData() : null); return; }
         if (request != PICK_FOLDER) { super.onActivityResult(request, result, data); return; }
         Uri tree = result == RESULT_OK && data != null ? data.getData() : null;
         if (tree != null) {
@@ -184,6 +186,93 @@ public class LasActivity extends SDLActivity {
             return "copy:" + e.getMessage();
         } finally {
             a.runOnUiThread(() -> a.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
+        }
+    }
+
+    // ---- a fan translation (the menu's Language row, runtime/ui/menu.mm): its RomFS folder copied into the app
+
+    private static String sTranslationDest;
+
+    // Opens the folder picker for the translation as extracted (any folder above its romfs/); the copy into dest runs
+    // on a thread of its own and its result comes back through nativeTranslationImported (null = done).
+    public static void importTranslation(String dest) {
+        final LasActivity a = (LasActivity) mSingleton;
+        if (a == null) { nativeTranslationImported("nofolder"); return; }
+        sTranslationDest = dest;
+        a.runOnUiThread(() -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try {
+                a.startActivityForResult(i, PICK_TRANSLATION);
+            } catch (Exception e) {
+                Log.e(TAG, "translation picker", e);
+                nativeTranslationImported("nofolder");
+            }
+        });
+    }
+
+    private void translationPicked(Uri tree) {
+        if (tree == null) { nativeTranslationImported("nofolder"); return; }
+        ContentResolver cr = getContentResolver();
+        new Thread(() -> {
+            try {
+                // the romfs/ folder: the one holding regionUS/ (an Atmosphère copy first when the release has several)
+                List<Doc> found = new ArrayList<>();
+                findRomfs(cr, tree, new Doc(DocumentsContract.getTreeDocumentId(tree), "", true, 0), "", 0, found);
+                if (found.isEmpty()) { nativeTranslationImported("notfound"); return; }
+                Doc romfs = found.get(0);
+                for (Doc d : found) if (d.rel.toLowerCase(Locale.ROOT).contains("atmosphere")) { romfs = d; break; }
+                List<Doc> files = new ArrayList<>();
+                listTree(cr, tree, romfs, "", files);
+                byte[] buf = new byte[1 << 16];
+                for (Doc f : files) {
+                    File out = new File(sTranslationDest, f.rel);
+                    File dir = out.getParentFile();
+                    if (dir != null && !dir.isDirectory() && !dir.mkdirs()) { nativeTranslationImported("copy:mkdir " + dir); return; }
+                    Uri u = DocumentsContract.buildDocumentUriUsingTree(tree, f.id);
+                    try (InputStream in = cr.openInputStream(u); OutputStream os = new FileOutputStream(out)) {
+                        if (in == null) { nativeTranslationImported("copy:" + f.rel); return; }
+                        int n;
+                        while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                    }
+                }
+                nativeTranslationImported(null);
+            } catch (Exception e) {
+                Log.e(TAG, "translation import", e);
+                nativeTranslationImported("copy:" + e.getMessage());
+            }
+        }).start();
+    }
+
+    private static List<Doc> childrenOf(ContentResolver cr, Uri tree, Doc d) {
+        List<Doc> out = new ArrayList<>();
+        Uri u = DocumentsContract.buildChildDocumentsUriUsingTree(tree, d.id);
+        String[] cols = {Document.COLUMN_DOCUMENT_ID, Document.COLUMN_DISPLAY_NAME, Document.COLUMN_MIME_TYPE,
+                         Document.COLUMN_SIZE};
+        try (Cursor c = cr.query(u, cols, null, null, null)) {
+            while (c != null && c.moveToNext()) {
+                boolean dir = Document.MIME_TYPE_DIR.equals(c.getString(2));
+                out.add(new Doc(c.getString(0), c.getString(1), dir, c.isNull(3) ? 0 : c.getLong(3)));
+            }
+        }
+        return out;
+    }
+
+    private static void findRomfs(ContentResolver cr, Uri tree, Doc d, String rel, int depth, List<Doc> found) {
+        if (depth > 6) return;
+        List<Doc> kids = childrenOf(cr, tree, d);
+        for (Doc k : kids)
+            if (k.dir && k.name.equals("regionUS")) { d.rel = rel; found.add(d); return; }
+        for (Doc k : kids)
+            if (k.dir && !k.name.startsWith(".")) findRomfs(cr, tree, k, rel + "/" + k.name, depth + 1, found);
+    }
+
+    private static void listTree(ContentResolver cr, Uri tree, Doc d, String rel, List<Doc> out) {
+        for (Doc k : childrenOf(cr, tree, d)) {
+            if (k.name.startsWith(".")) continue;
+            k.rel = rel.isEmpty() ? k.name : rel + "/" + k.name;
+            if (k.dir) listTree(cr, tree, k, k.rel, out);
+            else out.add(k);
         }
     }
 
@@ -309,4 +398,5 @@ public class LasActivity extends SDLActivity {
     public static native void nativeFolderPicked(String name);
     public static native void nativeImportProgress(long done, long total);
     public static native void nativeGpuDriverInstalled(String error);
+    public static native void nativeTranslationImported(String error);
 }

@@ -16,6 +16,7 @@
 #endif
 
 #include "imgui.h"
+#include "i18n.h"
 #include "option_rows.h"
 #include "imgui_internal.h"  // (NavCursorVisible)
 #include "osk.h"
@@ -424,7 +425,7 @@ static void drain_events(ImGuiIO &io) {
 // Section header in the big font.
 static void header(const char *t) {
     ImGui::PushFont(g_font_big);
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", t);
+    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", T(t));
     ImGui::PopFont();
     ImGui::Separator();
     ImGui::Spacing();
@@ -432,22 +433,24 @@ static void header(const char *t) {
 
 static void hint(const char *t) {
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("%s", t);
+    ImGui::TextDisabled("%s", T(t));
     ImGui::PopTextWrapPos();
 }
 
 // A row with a label on the left and a choice of options on the right (dpad left/right cycles).
-// reserve: room kept free right of the combo (a button on the same line)
+// reserve: room kept free right of the combo (a button on the same line). Label and names are shown through T().
 static bool choice(const char *label, int *value, const char *const *names, int n, float reserve = 0) {
     ImGui::PushID(label);
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(label);
+    ImGui::TextUnformatted(T(label));
     ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
     bool changed = false;
     ImGui::SetNextItemWidth(reserve > 0 ? -reserve : -1);
-    if (ImGui::BeginCombo("##c", names[*value])) {
+    if (ImGui::BeginCombo("##c", T(names[*value]))) {
         for (int i = 0; i < n; i++) {
-            if (ImGui::Selectable(names[i], i == *value)) { *value = i; changed = true; }
+            ImGui::PushID(i);
+            if (ImGui::Selectable(T(names[i]), i == *value)) { *value = i; changed = true; }
+            ImGui::PopID();
             if (i == *value) ImGui::SetItemDefaultFocus();
         }
         ImGui::EndCombo();
@@ -482,7 +485,7 @@ static std::string g_driver_msg;  // the last install's result
 static void driver_installed(const char *err) {  // (LasActivity's install thread)
     if (err && !err[0]) return;  // (cancelled)
     pthread_mutex_lock(&g_driver_lock);
-    g_driver_msg = err ? std::string("Not installed: ") + err : "Installed and selected: it's used from the next start.";
+    g_driver_msg = err ? std::string(T("Not installed: ")) + err : T("Installed and selected: it's used from the next start.");
     pthread_mutex_unlock(&g_driver_lock);
     g_driver_reread = true;
 }
@@ -504,23 +507,23 @@ static void gpu_driver_rows(void) {
     }
     const char *failed;
     bool active = vk_gpu_driver_custom(&failed);
-    std::string d = "The Vulkan driver the game renders with. System: your device's own. An installed driver (such as "
-                    "Mesa Turnip for Adreno) can be faster or fix glitches - or be slower; one that doesn't start is "
-                    "replaced by System at the next start.\n\nChanges apply at the next start of the app. Running now: ";
-    d += active ? (name.empty() ? "Turnip (built in)" : name) : "System";  // (no installed one: the APK's own runs)
-    if (failed) d += std::string(".\n\n") + failed + " didn't start: System runs instead";
+    std::string d = T("The Vulkan driver the game renders with. System: your device's own. An installed driver (such as "
+                      "Mesa Turnip for Adreno) can be faster or fix glitches - or be slower; one that doesn't start is "
+                      "replaced by System at the next start.\n\nChanges apply at the next start of the app. Running now: ");
+    d += active ? (name.empty() ? T("Turnip (built in)") : name) : T("System");  // (no installed one: the APK's own runs)
+    if (failed) d += std::string(".\n\n") + failed + T(" didn't start: System runs instead");
     d += ".";
-    std::string names[2] = {"System", name};
-    if (use != active) names[use] += " (next start)";
+    std::string names[2] = {T("System"), name};
+    if (use != active) names[use] += T(" (next start)");
     const char *np[2] = {names[0].c_str(), names[1].c_str()};
     int v = use;
     if (name.empty()) opt_disable_next(), opt_action("GPU driver", active ? "Turnip (built in)" : "System", d.c_str());
     else if (opt_choice("GPU driver", &v, np, 2, 0, d.c_str())) android_gpu_driver_select(use = v);
 
     pthread_mutex_lock(&g_driver_lock);
-    std::string id = "Installs a driver package from your files: a .zip as other emulators use them (meta.json and the "
-                     "driver's .so), replacing the one installed before, and selects it. It's used from the next start "
-                     "of the app.";
+    std::string id = T("Installs a driver package from your files: a .zip as other emulators use them (meta.json and the "
+                       "driver's .so), replacing the one installed before, and selects it. It's used from the next start "
+                       "of the app.");
     if (!g_driver_msg.empty()) id += "\n\n" + g_driver_msg;
     pthread_mutex_unlock(&g_driver_lock);
     if (opt_action("Install driver...", "", id.c_str())) android_gpu_driver_install(driver_installed);
@@ -560,12 +563,12 @@ static void tab_display(void) {
         float sx, sy;
         renderer_get_scale(&sx, &sy);
         char d[400];
-        int n = snprintf(d, sizeof d, "How sharp the 3D image is. Match display: your screen's own resolution. Dynamic: "
+        int n = snprintf(d, sizeof d, T("How sharp the 3D image is. Match display: your screen's own resolution. Dynamic: "
                                       "as sharp as your GPU keeps at full speed. 1x-4x: the Switch's 1080p times that. "
                                       "75%% / 50%% / 25%%: a share of the display, for slower machines.\n\nRendering at "
-                                      "%.0f x %.0f.", 1920.0 * sx, 1080.0 * sy);
+                                      "%.0f x %.0f."), 1920.0 * sx, 1080.0 * sy);
         if (g_settings.res_mode == RES_DYNAMIC)
-            snprintf(d + n, sizeof d - n, " Dynamic: %.0f%% of the display right now.", output_scale_dynamic_factor() * 100);
+            snprintf(d + n, sizeof d - n, T(" Dynamic: %.0f%% of the display right now."), output_scale_dynamic_factor() * 100);
         if (opt_choice("Internal resolution", &ri, res, NRES, RES_MATCH_AT, d, false)) g_settings.res_mode = res_mode[ri];
     }
     {   // each OS's own upscaler next to bilinear (UPSCALE_SHARP: MetalFX on macOS, AMD FSR 1 on Windows)
@@ -591,7 +594,7 @@ static void tab_display(void) {
 #endif
         char udm[512];
         if (g_settings.res_mode == RES_MATCH) {  // (renders at the window's size: nothing to scale up)
-            snprintf(udm, sizeof udm, "%s\n\nNot used at Match display: the game already renders at your display's resolution.", ud);
+            snprintf(udm, sizeof udm, T("%s\n\nNot used at Match display: the game already renders at your display's resolution."), T(ud));
             ud = udm;
             opt_disable_next();
         }
@@ -661,10 +664,10 @@ static void tab_quit(float scale, bool in_game) {
     static int ask;  // 0: the two choices; 1: start screen?; 2: desktop?
     if (ask && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
         ask = 0;
-    const char *lost = in_game ? "\n\nProgress since your last save is lost." : "";
-    char d1[200], d2[200];
-    snprintf(d1, sizeof d1, "Leaves the game and goes back to the LAS Recomp start screen.%s", lost);
-    snprintf(d2, sizeof d2, "Closes LAS Recomp.%s", lost);
+    const char *lost = in_game ? T("\n\nProgress since your last save is lost.") : "";
+    char d1[300], d2[300];
+    snprintf(d1, sizeof d1, T("Leaves the game and goes back to the LAS Recomp start screen.%s"), lost);
+    snprintf(d2, sizeof d2, T("Closes LAS Recomp.%s"), lost);
     opt_begin("##quit", scale);
     opt_section("Quit");
     if (!ask) {
@@ -689,6 +692,38 @@ static void tab_quit(float scale, bool in_game) {
     opt_end();
 }
 
+#ifdef __ANDROID__
+// ---- the Brazilian Portuguese fan translation: copied in from the folder the player picks (LasActivity's picker; its
+// romfs/ into translations/pt-BR/romfs). The answer comes on a Java thread and is handled here.
+static std::atomic<int> g_tr_state{0};  // 0 nothing new, 1 installed, 2 failed (g_tr_err)
+static char g_tr_err[256];
+static void translation_imported(const char *err) {  // (Java thread)
+    if (err && !strcmp(err, "nofolder")) return;  // (cancelled)
+    if (err) snprintf(g_tr_err, sizeof g_tr_err, "%s", err);
+    g_tr_state = err ? 2 : 1;
+}
+
+static void translation_rows(void) {
+    static std::string msg;
+    if (int st = g_tr_state.exchange(0)) {
+        if (st == 1) settings_translation_changed(), msg = T("Translation installed - restart the game to see it.");
+        else if (!strcmp(g_tr_err, "notfound"))
+            msg = T("No translation there: pick the folder extracted from the translation's zip (the one with romfs and "
+                    "regionUS inside).");
+        else msg = std::string(T("The translation couldn't be copied: ")) + (strncmp(g_tr_err, "copy:", 5) ? g_tr_err : g_tr_err + 5);
+    }
+    if (g_settings.language != LANG_PT_BR) return;
+    bool have = settings_translation_dir() != NULL;
+    if (!have) hint("Portuguese (Brazil) needs the fan translation: import the folder extracted from its zip. Until "
+                    "then the game's text stays in English.");
+    if (ImGui::Button(T(have ? "Reimport translation..." : "Import translation..."))) {
+        std::string dest = std::string(rt_data_root()) + "/translations/pt-BR/romfs";
+        android_import_translation(dest.c_str(), translation_imported);
+    }
+    if (!msg.empty()) hint(msg.c_str());
+}
+#endif
+
 static void tab_about(void) {
     header("Touch controls");
     {
@@ -696,12 +731,12 @@ static void tab_about(void) {
         if (choice("Show", &g_settings.touch_mode, modes, 3)) settings_save();
         float sz = roundf(g_settings.touch_size * 100), op = roundf(g_settings.touch_opacity * 100);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Size");
+        ImGui::TextUnformatted(T("Size"));
         ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
         ImGui::SetNextItemWidth(-1);
         if (ImGui::SliderFloat("##touch_size", &sz, 60, 160, "%.0f%%")) g_settings.touch_size = sz / 100, settings_save();
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Opacity");
+        ImGui::TextUnformatted(T("Opacity"));
         ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
         ImGui::SetNextItemWidth(-1);
         if (ImGui::SliderFloat("##touch_opacity", &op, 15, 100, "%.0f%%")) g_settings.touch_opacity = op / 100, settings_save();
@@ -717,7 +752,7 @@ static void tab_about(void) {
     {
         static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
         char autol[64];
-        snprintf(autol, sizeof autol, "Auto (%s)", fam[input_pad_family() % 3]);
+        snprintf(autol, sizeof autol, T("Auto (%s)"), fam[input_pad_family() % 3]);
         const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation"};
         choice("Button icons", &g_settings.prompts, names, 4);
     }
@@ -726,22 +761,32 @@ static void tab_about(void) {
     {
         // what the game is told the console's language is: its text follows this (runtime/settings.c)
         char autol[64];
-        snprintf(autol, sizeof autol, "Auto (%s)", settings_language_name());
+        snprintf(autol, sizeof autol, T("Auto (%s)"), T(settings_language_name()));
         const char *names[N_LANGUAGES];
         names[0] = autol;
         for (int i = 1; i < N_LANGUAGES; i++) names[i] = g_language_names[i];
         if (choice("Language", &g_settings.language, names, N_LANGUAGES)) settings_save();
+        // the app's own menus (i18n.h): at once
+        static const char *const ui_names[N_UI_LANGUAGES] = {"Auto", "English", "Português (Brasil)"};
+        if (choice("App language", &g_settings.ui_language, ui_names, N_UI_LANGUAGES)) settings_save();
     }
-    hint("The game's text language, as its own system setting. Applies when the game restarts: Quit -> Title "
-         "screen, then Play.");
+    hint("The game's text language, as its own system setting. Applies when the game restarts: Quit -> Quit to Start "
+         "Screen, then Play. App language: this menu and the start screen, at once.");
+#ifdef __ANDROID__
+    translation_rows();
+#else
+    if (g_settings.language == LANG_PT_BR && !settings_translation_dir())
+        hint("Portuguese (Brazil) needs the fan translation: copy its files to translations/pt-BR in the app's data "
+             "folder. Until then the game's text stays in English.");
+#endif
     ImGui::Spacing();
     header("Controls");
     controls_bindings_draw(ImGui::GetFontSize() / 34);
     ImGui::Spacing();
     header("Menu");
-    ImGui::TextUnformatted("Open / close this menu:  F1, Esc, the controller's Home / Xbox / PlayStation button, or Back + Start");
-    ImGui::TextUnformatted("Switch tabs:  L / R  (Q / E)        Back:  B  (Esc)");
-    ImGui::TextUnformatted("Fullscreen:  F11 / Alt+Enter");
+    ImGui::TextUnformatted(T("Open / close this menu:  F1, Esc, the controller's Home / Xbox / PlayStation button, or Back + Start"));
+    ImGui::TextUnformatted(T("Switch tabs:  L / R  (Q / E)        Back:  B  (Esc)"));
+    ImGui::TextUnformatted(T("Fullscreen:  F11 / Alt+Enter"));
 }
 
 extern "C" bool inventory_overlay_wanted(void);
@@ -771,7 +816,7 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::Begin("##kbd", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                                     ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::PushFont(g_font_big);
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Enter your name");
+    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", T("Enter your name"));
     ImGui::PopFont();
     static bool was_open, was_pad;
     bool pad = g_last_pad.load(), appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
@@ -785,7 +830,7 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
                          [](ImGuiInputTextCallbackData *d) -> int { return d->EventChar < 0x20 ? 1 : 0; });
         ImGui::PopFont();
         if ((int)strlen(g_kbd_text) > g_kbd_max) g_kbd_text[g_kbd_max] = 0;
-        ImGui::TextDisabled("Enter  confirm      Esc  cancel      (%d / %d)", (int)strlen(g_kbd_text), g_kbd_max);
+        ImGui::TextDisabled(T("Enter  confirm      Esc  cancel      (%d / %d)"), (int)strlen(g_kbd_text), g_kbd_max);
     } else {  // controller: on-screen keyboard (osk.mm, shared with our menus' text fields)
         int r = osk_keys(g_kbd_text, sizeof g_kbd_text, g_kbd_max, appearing, scale, g_font_big);
         if (r) g_kbd = r > 0 ? 2 : 3;  // (Start / + confirms in menu_handle_event too)
@@ -860,8 +905,8 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
         for (int k = 0; k < ntabs; k++) {
             const Tab &t = tabs[k];
             ImGuiTabItemFlags f = g_tab_request == t.id && t.on ? ImGuiTabItemFlags_SetSelected : 0;
-            char lbl[64];
-            snprintf(lbl, sizeof lbl, prelaunch ? " %s " : "  %s  ", t.name);  // (ten tabs: tighter, so none is cut short)
+            char lbl[96];  // (###: the same tab in either language)
+            snprintf(lbl, sizeof lbl, prelaunch ? " %s ###tab%d" : "  %s  ###tab%d", T(t.name), t.id);  // (ten tabs: tighter, so none is cut short)
             ImGui::BeginDisabled(!t.on);  // (out of the game: Save Editor, Warp, Cheats)
             // focus (controller / keyboard): the tab lights up a little with a gold bar along its bottom, instead of
             // ImGui's outline (it sits 4 px outside the tab and the tab bar's clipping could cut its top off on macOS)
@@ -917,7 +962,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 case 1: tab_audio(); break;
                 case 2:
                     if (game_in_play()) save_editor_draw(scale);
-                    else ImGui::TextDisabled("Load a save file and get into the game to edit it.");
+                    else ImGui::TextDisabled("%s", T("Load a save file and get into the game to edit it."));
                     break;
                 case 3: rando_tab_draw(scale); break;
                 case 4: if (warp_tab_draw(scale)) set_open(false); break;
@@ -1044,7 +1089,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         // header as on the start screen's Settings: the title, and a close X in the corner (B / Esc too). ("Title
         // screen" - rt_request_reboot(RT_REBOOT_TITLE) - is to find a new home; user 2026-10-11.)
         ImGui::PushFont(g_font_big);
-        ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Settings");
+        ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", T("Settings"));
         ImGui::PopFont();
         {
             float bx = 44 * scale;

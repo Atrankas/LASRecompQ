@@ -1210,6 +1210,8 @@ static void pg_report(void) {  // (present: the frame's GPU work is done a few f
     LOG("[passgpu] frame %llu: %d marks, %.2f ms first to last\n", (unsigned long long)pg_frame, pg_n, total);
     for (int i = 0; i < pg_n - 1 && i < 40; i++)
         LOG("[passgpu] %6.3f ms  #%d %s\n", (t[order[i] + 1] - t[order[i]]) * per, order[i], pg_what[order[i]]);
+    if (getenv("LARECOMP_VK_PASS_GPU_ALL"))  // (every mark in order: what each pass holds)
+        for (int i = 1; i < pg_n; i++) LOG("[passall] %6.3f ms  #%d %s\n", (t[i] - t[i - 1]) * per, i, pg_what[i]);
     if (pg_draws_on()) {  // (each draw mark closes the time since the mark before it: that draw's)
         LOG("[drawgpu] vertices drawn in the frame: %llu\n", (unsigned long long)pg_verts);
         static struct { char what[112]; double ms; int n; uint64_t v; } sum[256];
