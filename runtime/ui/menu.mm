@@ -612,9 +612,16 @@ static void tab_display(void) {
     static const char *fgn[] = {"Off", "60 fps (generated)"};
     opt_choice("Frame generation", &g_settings.frame_gen, fgn, 2, 0,
                "60 fps (generated): while the game runs at its own 30 frames a second, an in-between frame is made "
-               "after each one from the picture, the scene's depth and the camera's movement, and shown a refresh "
-               "later - camera movement looks like 60. Characters' own movement stays at 30. It pauses by itself when "
-               "the game can't hold its 30. Takes effect at the next start of the app.");
+               "after each one from the picture, the scene's depth, the camera's movement and what moves on its own, "
+               "and shown a refresh later. It pauses by itself when the game can't hold its 30. Takes effect at the "
+               "next start of the app.");
+#endif
+#ifdef __ANDROID__
+    static const char *pwr[] = {"Balanced", "Maximum performance"};
+    opt_choice("Power", &g_settings.power_mode, pwr, 2, 0,
+               "Rooted phones: Balanced keeps the GPU a step under its top clock and leaves the phone's temperature "
+               "limits alone - cooler and easier on the battery; the resolution adjusts. Maximum performance holds "
+               "every clock at the top, past the temperature limits: the sharpest picture, a hot phone.");
 #endif
 
     opt_section("Game");
