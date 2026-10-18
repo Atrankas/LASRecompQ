@@ -37,7 +37,9 @@ static const char kWarp[] =
     "layout(set = 0, binding = 0) uniform sampler2D comp;\n"   // the window picture
     "layout(set = 0, binding = 1) uniform sampler2D scene;\n"  // the presented picture before the HUD
     "layout(set = 0, binding = 2) uniform sampler2D fin;\n"    // the presented picture (with the HUD)
-    "layout(set = 0, binding = 3) uniform sampler2D depthT;\n" // the scene's depth
+    // the scene's view distance (1 / (1 - depth)) averaged over 8x8 pixels, bilinear (kDepthDown): a smooth movement -
+    // the exact depth tore thin layered things (tall grass, plants) into rows when the camera moved
+    "layout(set = 0, binding = 3) uniform sampler2D depthT;\n"
     "layout(location = 0) in vec2 uv;\n"
     "layout(location = 0) out vec4 o;\n"
     // m0..m3: rows of (generated view-projection) x inverse(this frame's); rect: the game picture in the window (uv);
@@ -52,7 +54,7 @@ static const char kWarp[] =
     // where the scene point at g lands in the generated picture
     "vec2 moved(vec2 g) {\n"
     "  vec2 n = g;\n"
-    "  float d = textureLod(depthT, n * p.b.zw, 0.0).r;\n"
+    "  float d = 1.0 - 1.0 / max(textureLod(depthT, n, 0.0).r, 1.0);\n"
     "  vec4 c = vec4(n.x * 2.0 - 1.0, p.a.x > 0.5 ? 1.0 - 2.0 * n.y : 2.0 * n.y - 1.0, p.a.y > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
     "  vec4 h = vec4(dot(p.m0, c), dot(p.m1, c), dot(p.m2, c), dot(p.m3, c));\n"
     "  if (h.w <= 1e-5) return g;\n"
@@ -68,11 +70,11 @@ static const char kWarp[] =
     "  if (p.b.x < 0.5) return vec2(0.0);\n"
     "  vec4 f = textureLod(flowT, g, 0.0);\n"
     "  if (f.w < 0.5) return vec2(0.0);\n"
-    "  float z = 1.0 / max(1.0 - textureLod(depthT, g * p.b.zw, 0.0).r, 1e-6);\n"
+    "  float z = textureLod(depthT, g, 0.0).r;\n"
     "  return abs(z - f.z) > 0.15 * f.z ? vec2(0.0) : f.xy * 0.5;\n"
     "}\n"
     "void main() {\n"
-    "  if (p.a.w > 1.5) { vec2 n = toGame(uv); float d = textureLod(depthT, n * p.b.zw, 0.0).r; o = vec4(vec3(clamp((1.0 - d) * 20.0, 0.0, 1.0)), 1.0); return; }\n"  // (LARECOMP_FRAMEGEN_DEBUG=depth)
+    "  if (p.a.w > 1.5) { vec2 n = toGame(uv); float d = 1.0 - 1.0 / max(textureLod(depthT, n, 0.0).r, 1.0); o = vec4(vec3(clamp((1.0 - d) * 20.0, 0.0, 1.0)), 1.0); return; }\n"  // (LARECOMP_FRAMEGEN_DEBUG=depth)
     "  if (p.a.w > 0.5) { o = textureLod(comp, uv, 0.0); return; }\n"  // (LARECOMP_FRAMEGEN_PLAIN: the cost without the warp)
     "  if (any(lessThan(uv, p.rect.xy)) || any(greaterThan(uv, p.rect.xy + p.rect.zw))) { o = textureLod(comp, uv, 0.0); return; }\n"
     "  vec2 g = toGame(uv);\n"
@@ -111,6 +113,22 @@ static const char kDown[] =
     "  vec3 c = vec3(0.0);\n"
     "  for (int i = 0; i < 4; i++) c += textureLod(scene, uv + t * vec2((i & 1) == 0 ? -1.0 : 1.0, (i & 2) == 0 ? -1.0 : 1.0), 0.0).rgb;\n"
     "  o = vec4(dot(c * 0.25, vec3(0.299, 0.587, 0.114)));\n"
+    "}\n";
+// the scene's view distance (1 / (1 - depth): up to a factor) averaged over each 8x8 pixels: 16 depth samples
+static const char kDepthDown[] =
+    "#version 450\n"
+    "layout(set = 0, binding = 0) uniform sampler2D depthT;\n"
+    "layout(location = 0) in vec2 uv;\n"
+    "layout(location = 0) out vec4 o;\n"
+    "layout(push_constant) uniform P { vec4 b; } p;\n"  // b.zw: the depth's content scale
+    "void main() {\n"
+    "  vec2 t = 1.0 / vec2(textureSize(depthT, 0)), h = 0.25 / p.b.xy;\n"  // (b.xy: this image's size)
+    "  float z = 0.0;\n"
+    "  for (int i = 0; i < 4; i++) {\n"
+    "    vec4 g = textureGather(depthT, (uv + h * vec2((i & 1) == 0 ? -1.0 : 1.0, (i & 2) == 0 ? -1.0 : 1.0)) * p.b.zw);\n"
+    "    z += dot(1.0 / max(vec4(1.0) - g, vec4(1e-6)), vec4(0.25));\n"
+    "  }\n"
+    "  o = vec4(min(z * 0.25, 60000.0));\n"
     "}\n";
 // Objects' own movement, one value per 16x16 block of the scene (from the WWHD port's reproj.cpp): the block of this
 // frame's quarter picture is looked for in the previous one around where the camera's movement alone puts it, and
@@ -190,6 +208,8 @@ static const char kFilter[] =
     "  }\n"
     "  if (n >= 2.0) o = vec4(sum / (n + 1.0), c.z, 1.0);\n"
     "}\n";
+static TexBackend g_zc;  // kDepthDown's image (this frame's)
+static bool g_zc_ok;
 static TexBackend g_q[2], g_flow_raw, g_flow;  // quarter pictures (this frame's: g_q[g_qi]), block movement
 static int g_qi;
 static bool g_q_prev, g_flow_ok;  // the previous frame's quarter picture is there; this frame's movement is
@@ -507,9 +527,28 @@ static bool run_pass(VkCommandBuffer cb, TexBackend *target, VkPipeline pipe, Vk
 static void build_flow(VkCommandBuffer cb) {
     static int on = -1;
     if (on < 0) on = !getenv("LARECOMP_FRAMEGEN_FLOW") || atoi(getenv("LARECOMP_FRAMEGEN_FLOW"));
-    g_flow_ok = false;
+    g_flow_ok = false, g_zc_ok = false;
     NvnTexture *dt = g_depth;
-    if (!on || !g_scene.image || !dt || !dt->backend) { g_q_prev = false; return; }
+    if (!g_scene.image || !dt || !dt->backend) { g_q_prev = false; return; }
+    {   // the smooth view distance for the warp
+        static VkDescriptorSetLayout zdsl;
+        static VkPipelineLayout zl;
+        static VkPipeline zp;
+        if (!zl) zl = set_layout(1, 16, &zdsl);
+        if (!zp) {
+            VkShaderModule m = vk_compile_glsl(kDepthDown, STAGE_FRAGMENT, "framegen_depth.frag");
+            zp = m ? fs_pipeline(m, VK_FORMAT_R16_SFLOAT, zl) : VK_NULL_HANDLE;
+        }
+        uint32_t zw = (g_scene.width + 7) / 8, zh = (g_scene.height + 7) / 8;
+        TexBackend *db = dt->backend;
+        VkComponentMapping ident = {0};
+        VkImageView dv = vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, ident, VK_IMAGE_ASPECT_DEPTH_BIT);
+        float zpc[4] = {(float)zw, (float)zh, g_depth_scale[0], g_depth_scale[1]};
+        static const bool nn[1] = {false};
+        g_zc_ok = zp && make_image(&g_zc, VK_FORMAT_R16_SFLOAT, zw, zh, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+                  run_pass(cb, &g_zc, zp, zl, zdsl, 1, &dv, nn, zpc, sizeof zpc);
+    }
+    if (!on) { g_q_prev = false; return; }
     static VkDescriptorSetLayout dsl1, dsl3;
     static VkPipelineLayout l1, l3;
     static VkPipeline pdown, pflow, pfilt;
@@ -577,8 +616,9 @@ bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBack
     if (!mat_inv(g_vp, inv)) return false;
     mat_mul(vpg, inv, m);
     VkComponentMapping ident = {0};
-    VkImageView v[6] = {color_view(&g_comp), color_view(&g_scene), color_view(fin),
-                        vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, ident, VK_IMAGE_ASPECT_DEPTH_BIT), color_view(&g_mask),
+    if (!g_zc_ok) return false;
+    (void)ident;
+    VkImageView v[6] = {color_view(&g_comp), color_view(&g_scene), color_view(fin), color_view(&g_zc), color_view(&g_mask),
                         g_flow_ok ? color_view(&g_flow) : color_view(&g_mask)};
     for (int i = 0; i < 6; i++) if (!v[i]) return false;
     struct { float m[16], rect[4], crop[4], a[4], b[4]; } pc;
@@ -599,7 +639,7 @@ bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBack
     pc.b[0] = g_flow_ok ? 1.0f : 0.0f, pc.b[1] = 0;
     pc.b[2] = g_depth_scale[0], pc.b[3] = g_depth_scale[1];
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-    static const bool lin[6] = {true, true, true, false, true, false};
+    static const bool lin[6] = {true, true, true, true, true, false};
     bind_images(cb, g_layout, g_dsl, 6, v, lin);
     vkCmdPushConstants(cb, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
     VkViewport vp = {0, 0, (float)ww, (float)wh, 0, 1};
