@@ -294,6 +294,7 @@ static void core_features(VkPhysicalDeviceFeatures *b, const VkPhysicalDeviceFea
     b->fragmentStoresAndAtomics = h->fragmentStoresAndAtomics;
     b->vertexPipelineStoresAndAtomics = h->vertexPipelineStoresAndAtomics;
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
+    maxwell_robust_cbuf = b->robustBufferAccess;      // (then translate.c leaves out its own index clamp)
     b->shaderClipDistance = h->shaderClipDistance;
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     if (!h->textureCompressionBC) LOG("[vk] no BC texture formats: decoded on upload\n");

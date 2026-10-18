@@ -31,6 +31,7 @@ int maxwell_half_native;
 int maxwell_precise_pos = 1;
 int maxwell_scalar_cbuf;
 int maxwell_ieee_minmax;
+int maxwell_robust_cbuf;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -100,6 +101,12 @@ typedef struct {
     uint8_t hstate[256];
     bool huse[256];
     bool in_guard;  // translating a predicated instruction: nothing may change state inside it
+    // an XMAD of a's low half by an immediate (cfull, C = RZ) waiting for the XMAD.PSL of the high half that completes
+    // the 32-bit product (emit_insn: one multiply instead of the two halves' expansions)
+    uint32_t xmad_lo_pc;  // its pc + 1, or 0
+    bool xmad_new;        // this instruction is one (registered after its writes are scanned)
+    int xmad_a, xmad_d;
+    uint32_t xmad_imm;
 } Ctx;
 
 static bool id_char(char ch);
@@ -232,6 +239,7 @@ static int tz_of_b(Ctx *c, uint64_t w) {
 // more, but for the tracked result; guarded, the old value may survive, so the weaker of the two. Its half shadow is
 // stale too - unless the line is the shadow being packed into it (hmat).
 static void writes_after_insn(Ctx *c, size_t text0, bool guarded) {
+    if (!c->body.buf) return;  // (nothing emitted yet)
     for (const char *p = c->body.buf + text0; (p = strstr(p, " = ")) != NULL; p += 3) {
         const char *q = p;
         while (q > c->body.buf + text0 && q[-1] >= '0' && q[-1] <= '9') q--;
@@ -241,6 +249,7 @@ static void writes_after_insn(Ctx *c, size_t text0, bool guarded) {
         int tz = r == c->tz_dst ? c->tz_val : 0;
         c->reg_tz[r] = (uint8_t)(guarded ? TZMIN((int)c->reg_tz[r], tz) : tz);
         if (strncmp(p + 3, "packFloat2x16(h", 15)) c->hstate[r] = 0;
+        if (c->xmad_lo_pc && (r == c->xmad_a || r == c->xmad_d)) c->xmad_lo_pc = 0;  // (the pair's operands changed)
     }
 }
 
@@ -1210,18 +1219,43 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                OPM(0x38a8000000000000ull, 0xfef8000000000000ull)) {  // F2F (formats: 1 F16, 2 F32; bit 41 = high half)
         int dfmt = (int)bits(w, 8, 2), sfmt = (int)bits(w, 10, 2);
         char srcv[512];
+        int mode = (int)((bits(w, 39, 2)) | (bits(w, 42, 1) << 2));
+        static const char *const rf[] = {"rint", "floor", "ceil", "trunc"};
+        static int f2f_on = -1;  // LARECOMP_VK_HALF_F2F=0: halves converted through the uint, as before (comparisons)
+        if (f2f_on < 0) f2f_on = getenv("LARECOMP_VK_HALF_F2F") ? atoi(getenv("LARECOMP_VK_HALF_F2F")) != 0 : 1;
+        if (f2f_on && hshadow_on(c) && !c->in_guard && b_form(w) == B_REG && (sfmt == 1 || dfmt == 1) && (sfmt == 1 || sfmt == 2) &&
+            (dfmt == 1 || dfmt == 2)) {
+            // A half in or out through the shadows: the operand's half (or the float, rounded then converted), rounded
+            // as float16_t, into h<d> with the high half zero as the instruction leaves it - no pack, unpack or
+            // conversion to f32 and back; an F32 result into the uint
+            int rb = (int)bits(w, 20, 8);
+            char sx[800], v[900];
+            if (sfmt == 1) {
+                sprintf(sx, "(%s).x", HS(RH(rb), bits(w, 41, 1) ? 3 : 2, bits(w, 45, 1), bits(w, 49, 1)));
+                if (mode >= 4) sprintf(v, "%s(%s)", rf[mode - 4], sx); else strcpy(v, sx);
+            } else {
+                const char *fx = NA(F(R(rb)), bits(w, 45, 1), bits(w, 49, 1));
+                if (mode >= 4) sprintf(sx, "%s(%s)", rf[mode - 4], fx); else strcpy(sx, fx);
+                sprintf(v, "float16_t(%s)", sx);
+            }
+            if (dfmt == 1) {
+                if (d != RZ) {
+                    c->reg_used[d] = 1, c->huse[d] = true;
+                    sp(&c->body, bits(w, 50, 1) ? "    h%d = saturate(f16vec2(%s, 0.0hf));\n" : "    h%d = f16vec2(%s, 0.0hf);\n", d, v);
+                    c->hstate[d] = 1;
+                }
+            } else {
+                sprintf(t, "float(%s)", v);
+                set_reg(c, d, FRES(t, bits(w, 50, 1)));
+            }
+            goto insn_done;
+        }
         if (sfmt == 1 && c->glsl) sprintf(srcv, "h2f((%s >> %du) & 0xFFFFu)", B(false), 16 * (int)bits(w, 41, 1));
         else if (sfmt == 1) sprintf(srcv, "float(as_type<half2>(%s)[%d])", B(false), (int)bits(w, 41, 1));
         else strcpy(srcv, F(B(true)));
         const char *x = NA(srcv, bits(w, 45, 1), bits(w, 49, 1));
-        int mode = (int)((bits(w, 39, 2)) | (bits(w, 42, 1) << 2));
-        switch (mode) {
-        case 4: sprintf(t, "rint(%s)", x); break;
-        case 5: sprintf(t, "floor(%s)", x); break;
-        case 6: sprintf(t, "ceil(%s)", x); break;
-        case 7: sprintf(t, "trunc(%s)", x); break;
-        default: sprintf(t, "%s", x);
-        }
+        if (mode >= 4) sprintf(t, "%s(%s)", rf[mode - 4], x);
+        else sprintf(t, "%s", x);
         if (dfmt == 1) {  // F16 result in the low half, high half zero
             char h[1100];
             snprintf(h, sizeof h, c->glsl ? "(packHalf2x16(vec2(%s, 0.0f)))" : "(uint(as_type<ushort>(half(%s))))",
@@ -1427,6 +1461,24 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         }
         bool sa = bits(w, 48, 1), sb = bits(w, 49, 1), wcc = bits(w, 47, 1);
         if (ext || wcc) c->uses_cc = true;
+        // a.lo16 * imm (cfull, C = RZ), then ((a.hi16 * imm) << 16) + that: a * imm mod 2^32 - one multiply (three
+        // instructions on Adreno) instead of the second half's expansion. Unsigned halves only (sign-extended ones
+        // give another sum), nothing merged, no carry, one block, no guard.
+        static int xmul_on = -1;  // LARECOMP_VK_XMAD_MUL=0: both halves expanded, as before (comparisons)
+        if (xmul_on < 0) xmul_on = getenv("LARECOMP_VK_XMAD_MUL") ? atoi(getenv("LARECOMP_VK_XMAD_MUL")) != 0 : 1;
+        if (xmul_on && c->glsl && (top & 0xfe) == 0x36 && !sa && !sb && !mrg && !ext && !wcc && !guarded && cmode == 0) {
+            uint32_t imm = (uint32_t)bits(w, 20, 16);
+            int cr = (int)bits(w, 39, 8);
+            if (!ha && !psl && cr == RZ) {
+                c->xmad_lo_pc = 0, c->xmad_new = true, c->xmad_a = a, c->xmad_d = d, c->xmad_imm = imm;
+            } else if (ha && psl && c->xmad_lo_pc && c->xmad_a == a && c->xmad_imm == imm && cr == c->xmad_d) {
+                c->xmad_lo_pc = 0;
+                sprintf(t, "(%s * 0x%xu)", R(a), imm);
+                set_reg(c, d, t);
+                tz_result(c, d, TZADD(TZR(a), ctz_u32(imm)));
+                goto insn_done;
+            }
+        }
         {   // trailing zeros of the result: the halves' add up in the product (sign extension keeps them; PSL adds 16),
             // the C term's per cmode; a merge or a carry in: nothing known
             int cr = top == 0x51 ? -1 : (int)bits(w, 39, 8);
@@ -1786,9 +1838,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else {
         fail(c, "unknown instruction %016llx at %#x", (unsigned long long)w, pc);
     }
+insn_done:
     (void)op13;
     if (guarded) sp(&c->body, "  }\n");
     if (c->glsl) writes_after_insn(c, text0, guarded);
+    if (c->xmad_new) c->xmad_lo_pc = pc + 1, c->xmad_new = false;
     c->in_guard = false;
 }
 
@@ -2280,8 +2334,6 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_shuffle : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
-    "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
-    "#define cbra(cb, row, k, comp) cb[min((row) + (k), uint(cb.length() - 1))][comp]\n"
     "uint as_u(float x) { return floatBitsToUint(x); }\n"
     "uint as_u(uint x) { return x; }\n"
     "uint as_u(int x) { return uint(x); }\n"
@@ -2316,6 +2368,16 @@ static const char glsl_prelude_minmax_ieee[] =
     "float fmin(float a, float b) { return min(a, b); }\n"
     "float fmax(float a, float b) { return max(a, b); }\n";
 static const char glsl_prelude_minmax2[] = "vec2 saturate(vec2 x) { return vec2(saturate(x.x), saturate(x.y)); }\n";
+// Run-time indexed constant buffers: cbr a word at a byte offset, cbra a word of a row from a 16-aligned register
+// (cbuf_ref_aligned). The index clamped to the block (an out-of-range guest index reads the last row). The variant
+// without the clamp, for a device that reads zeros past a buffer (maxwell_robust_cbuf), is an experiment that lost
+// (glsl_finish: LARECOMP_VK_ROBUST_CBUF).
+static const char glsl_prelude_cbr[] =
+    "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
+    "#define cbra(cb, row, k, comp) cb[min((row) + (k), uint(cb.length() - 1))][comp]\n";
+static const char glsl_prelude_cbr_robust[] =
+    "#define cbr(cb, off) cb[(off) >> 4][((off) >> 2) & 3u]\n"
+    "#define cbra(cb, row, k, comp) cb[(row) + (k)][comp]\n";
 static const char glsl_prelude_h2f_bits[] =
     // half -> float by bits, not unpackHalf2x16: NVIDIA's driver recognises unpacked halves and runs some of the
     // fp32 math after them in native fp16, differently per shader, so a depth pre-pass and its colour pass (EQUAL
@@ -2404,6 +2466,13 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->fail) { free(body.buf); free(c->body.buf); free(c); return info; }
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
+    // LARECOMP_VK_ROBUST_CBUF=1: no clamp where the device is robust. Off by default: the clamp's min() is what keeps
+    // the row * 16 + word shape the Adreno compiler's alignment analysis wants - without it `(r >> 4) << 4` folds to a
+    // mask, the loads go back to a vec4 and a chain of selects, and the Field's skinned grass needed 21 registers
+    // instead of 12 (801 instead of 714 instructions), the lit shaders 34 more each.
+    static int robust_env = -1;
+    if (robust_env < 0) robust_env = getenv("LARECOMP_VK_ROBUST_CBUF") ? atoi(getenv("LARECOMP_VK_ROBUST_CBUF")) != 0 : 0;
+    bool robust = maxwell_robust_cbuf && robust_env;
     {
         const char *rest = strchr(glsl_prelude, '\n') + 1;  // (after #version: the fp16 extension goes first)
         sp(&s, "%.*s", (int)(rest - glsl_prelude), glsl_prelude);
@@ -2412,7 +2481,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         static int exact = -1;
         if (exact < 0) exact = getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0;
         bool bits = exact || (maxwell_h2f_bits && stage != STAGE_FRAGMENT && stage != STAGE_COMPUTE);
-        sp(&s, "%s%s%s%s", rest, maxwell_ieee_minmax ? glsl_prelude_minmax_ieee : glsl_prelude_minmax, glsl_prelude_minmax2,
+        sp(&s, "%s%s%s%s%s", robust ? glsl_prelude_cbr_robust : glsl_prelude_cbr, rest,
+           maxwell_ieee_minmax ? glsl_prelude_minmax_ieee : glsl_prelude_minmax, glsl_prelude_minmax2,
            bits ? glsl_prelude_h2f_bits : glsl_prelude_h2f_native);
         if (maxwell_half_native) {
             const char *hp = strstr(glsl_prelude2, "uint prmt(");  // (the fp32 hx / hpack replaced)
@@ -2446,8 +2516,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(std140, set = %d, binding = %d) uniform CB%d { uvec4 cb%d[%u]; };\n", set, i, i, i, n);
     }
     if (maxwell_scalar_cbuf && info->cbuf_dynamic)  // (cbras: row * 4 + word, an offset the compiler sees as 16-aligned)
-        sp(&s, "#define cbrs(cb, off) cb[min((off) >> 2, uint(cb.length() - 1))]\n"
-               "#define cbras(cb, row, k, comp) cb[min((row) + (k), uint(cb.length() / 4 - 1)) * 4u + (comp)]\n");
+        sp(&s, robust ? "#define cbrs(cb, off) cb[(off) >> 2]\n#define cbras(cb, row, k, comp) cb[((row) + (k)) * 4u + (comp)]\n"
+                                   : "#define cbrs(cb, off) cb[min((off) >> 2, uint(cb.length() - 1))]\n"
+                                     "#define cbras(cb, row, k, comp) cb[min((row) + (k), uint(cb.length() / 4 - 1)) * 4u + (comp)]\n");
     if (info->uses_gmem && !maxwell_gmem_chunk_shift) {
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
@@ -2666,18 +2737,63 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
     c->branchy = any_branch;
     size_t *off0 = calloc(end + 1, sizeof(size_t)), *off1 = calloc(end + 1, sizeof(size_t));  // (each instruction's text)
+    // What is known of the registers at a block entry (reg_tz, hstate: emit_insn) is what holds on every path there:
+    // the fall-through and each branch to it, recorded as they are emitted (all earlier in the code), unless a later
+    // instruction may jump there too (a loop header: a BRA back, or a SYNC / BRK / CONT after a target pushed before
+    // it; BRX: anywhere) - those start from nothing. The light loop of the Field's lit shaders computes a light's
+    // cbuf base in one block and loads from it in the blocks its type branches to.
+    const uint64_t *cw = (const uint64_t *)code;
+    int *labno = malloc(sizeof(int) * (end + 4));
+    size_t nlab = 0, last_pop = 0;
+    bool brx = false;
+    for (size_t i = 0; i < end; i++) labno[i] = label[i] ? (int)nlab++ : -1;
+    for (size_t j = 1; j < end; j++) {
+        int k = j % 4 ? flow_kind(cw[j]) : FLOW_NONE;
+        if (k == FLOW_BRX) brx = true;
+        if (k == FLOW_SYNC || k == FLOW_BRK || k == FLOW_CONT) last_pop = j;
+    }
+    uint8_t *back = calloc(end + 4, 1);
+    for (size_t j = 1; j < end && !brx; j++) {
+        int k = j % 4 ? flow_kind(cw[j]) : FLOW_NONE;
+        if (k != FLOW_BRA && k != FLOW_SSY && k != FLOW_PBK && k != FLOW_PCNT) continue;
+        int64_t t = norm_target((int64_t)(j * 8) + 8 + sbits(cw[j], 20, 24)) / 8;
+        if (t < 0 || (size_t)t >= end) continue;
+        if (k == FLOW_BRA ? (size_t)t <= j : last_pop > j && last_pop >= (size_t)t) back[t] = 1;
+    }
+    if (brx) nlab = 0;
+    uint8_t *ltz = malloc(nlab * 256 + 1), *lh = malloc(nlab * 256 + 1);
+    memset(ltz, 32, nlab * 256), memset(lh, 2, nlab * 256);  // (nothing seen yet: everything holds)
+    uint32_t *pushed = malloc(sizeof(uint32_t) * (end + 1));
+    size_t npushed = 0;
+#define MEET(t) do { size_t t_ = (t); if (!brx && t_ < end && labno[t_] >= 0) for (int r_ = 0; r_ < 256; r_++) { \
+        uint8_t *z_ = ltz + (size_t)labno[t_] * 256 + r_, *h_ = lh + (size_t)labno[t_] * 256 + r_; \
+        if (c->reg_tz[r_] < *z_) *z_ = c->reg_tz[r_]; \
+        if (c->hstate[r_] != 2) *h_ = 0; } } while (0)
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
         uint32_t pc = (uint32_t)(i * 8);
-        if (label[i]) memset(c->reg_tz, 0, sizeof c->reg_tz), hreset_all(c);  // a block entry: nothing known of the registers
+        if (label[i]) {  // a block entry
+            if (brx || back[i]) memset(c->reg_tz, 0, sizeof c->reg_tz), hreset_all(c);
+            else memcpy(c->reg_tz, ltz + (size_t)labno[i] * 256, 256), memcpy(c->hstate, lh + (size_t)labno[i] * 256, 256);
+            c->xmad_lo_pc = 0;
+        }
         if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
         if (annotate) sp(&c->body, "    // pc %x: %016llx\n", pc, (unsigned long long)((const uint64_t *)code)[i]);
         off0[i] = c->body.len;
         emit_insn(c, ((const uint64_t *)code)[i], pc);
-        {   // the uints current before a block entry, a flow instruction (its text goes: structure_body) or the end
-            size_t nx = i + 1;
-            if (nx % 4 == 0) nx++;
-            if (nx >= end || label[nx] || flow_kind(((const uint64_t *)code)[nx]) != FLOW_NONE) hflush_all(c);
+        size_t nx = i + 1;
+        if (nx % 4 == 0) nx++;
+        int fk = flow_kind(cw[i]);
+        bool leaves = fk != FLOW_NONE && fk != FLOW_SSY && fk != FLOW_PBK && fk != FLOW_PCNT && bits(cw[i], 16, 4) == PT;
+        if (nx >= end || label[nx] || flow_kind(cw[nx]) != FLOW_NONE) hflush_all(c);  // the uints current before a block
+                                                                                        // entry, a flow instruction (its text goes: structure_body) or the end
+        {   // what this instruction's paths bring to the labels they reach
+            int64_t t = norm_target((int64_t)pc + 8 + sbits(cw[i], 20, 24)) / 8;
+            if (fk == FLOW_BRA && t >= 0) MEET((size_t)t);
+            if ((fk == FLOW_SSY || fk == FLOW_PBK || fk == FLOW_PCNT) && t >= 0) pushed[npushed++] = (uint32_t)t;
+            if (fk == FLOW_SYNC || fk == FLOW_BRK || fk == FLOW_CONT)
+                for (size_t k = 0; k < npushed; k++) MEET(pushed[k]);
+            if (nx < end && label[nx] && !leaves) MEET(nx);
         }
         off1[i] = c->body.len;
         if (dbg && pc == maxwell_dbg_pc) {
@@ -2699,6 +2815,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
             info->structured = true;
         }
     }
+#undef MEET
+    free(labno), free(back), free(ltz), free(lh), free(pushed);
     free(off0), free(off1);
     free(label);
     if (c->fail) { free(c->body.buf); free(c); return info; }
