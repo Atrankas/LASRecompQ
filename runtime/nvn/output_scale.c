@@ -30,7 +30,7 @@
 #define DYN_SLOW_MS 34.5   // (a 30 fps frame is 33.3 ms; one late frame is 50)
 #define DYN_SLOWER_MS 40.0
 #define DYN_GPU_SLOW (fg_on() ? 27.0 : 30.0)
-#define DYN_GPU_ROOM (fg_on() ? 21.0 : 23.0)  // (+0.05 near 1: ~10% more pixels)
+#define DYN_GPU_ROOM (fg_on() ? 20.0 : 23.0)  // (+0.05 near 1: ~10% more pixels)
 extern bool fg_enabled(void);
 static bool fg_on(void) { return fg_enabled(); }
 #else
@@ -61,7 +61,11 @@ static void dyn_update(double now, double gpu_ms) {
     double prev = g_dyn;
     bool slow = avg_dt > DYN_SLOW_MS || (avg_gpu >= 0 && avg_gpu > DYN_GPU_SLOW);
     if (slow) {
-        g_dyn = fmax(0.5, g_dyn - (avg_dt > DYN_SLOWER_MS ? 0.1 : 0.05));
+        // the step by how far over (GPU time ~ the square of the factor): entering the Field from a house it took
+        // ten seconds at 20 fps, 0.05 at a time, to get down to where it fits
+        double down = avg_dt > DYN_SLOWER_MS ? 0.1 : 0.05;
+        if (avg_gpu > DYN_GPU_SLOW) down = fmax(down, fmin(0.3, g_dyn * (1 - sqrt((DYN_GPU_SLOW - 2) / avg_gpu))));
+        g_dyn = fmax(0.5, g_dyn - down);
         g_dyn_good = 0;
         if (now - g_dyn_last_raise < 3.0) g_dyn_probe_wait = fmin(g_dyn_probe_wait * 2, 60.0);  // raised too eagerly
     } else if (g_dyn < DYN_MAX) {

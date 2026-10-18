@@ -177,8 +177,11 @@ void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
 // 3D) aren't made taller than it - above it they cost GPU time and are only scaled back down. At 1080p on a 1080-line
 // screen they were 3600x1620 (eight passes, ~10 ms of the Field's GPU time); the 3D still gets the whole scale.
 static float g_display_h = 0;
+static float shadow_scale(const NvnTexture *t);
 void renderer_set_display_height(float h) { g_display_h = h; }
 static void tex_scale(const NvnTexture *t, const TexBackend *b, float *sx, float *sy) {
+    float ss = shadow_scale(t);
+    if (ss < 1) { *sx = *sy = ss; return; }
     *sx = b->scalable ? g_rs_x : 1, *sy = b->scalable ? g_rs_y : 1;
     if (b->scalable && g_display_h > 0 && t->height >= 1000 && t->height * *sy > g_display_h * 1.01f) {
         float f = g_display_h / (t->height * *sy);
@@ -188,10 +191,25 @@ static void tex_scale(const NvnTexture *t, const TexBackend *b, float *sx, float
 }
 uint64_t renderer_present_count(void);
 
+// The sun's shadow map (a square depth target of 2048) at a share of its size: half on phones - the shadows look the
+// same on their screens (frames compared in the Field), and the pass took 3.3 ms of the Field's GPU time, 1.6 at half.
+// LARECOMP_SHADOW_SCALE=<f> (1: full size).
+static float shadow_scale(const NvnTexture *t) {
+    static float f = -1;
+#ifdef __ANDROID__
+    const float def = 0.5f;
+#else
+    const float def = 1.0f;
+#endif
+    if (f < 0) f = getenv("LARECOMP_SHADOW_SCALE") ? (float)atof(getenv("LARECOMP_SHADOW_SCALE")) : def;
+    return t->width == 2048 && t->height == 2048 && renderer_format_is_depth(t->format) && f > 0 && f < 1 ? f : 1;
+}
+
 static bool tex_scalable(const NvnTexture *t) {
     static int off = -1;  // (per texture lookup: cached)
     if (off < 0) off = getenv("LARECOMP_NO_SCALE") != NULL;
     if (off) return false;
+    if (shadow_scale(t) < 1) return true;
     if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return false;
     float a = (float)t->width / (float)t->height;
     return a > 1.74f && a < 1.81f;
