@@ -32,9 +32,11 @@
 #define DYN_SLOW_MS 34.5   // (a 30 fps frame is 33.3 ms; one late frame is 50)
 #define DYN_SLOWER_MS 40.0
 // (with frame generation the fence-measured time runs ~4 ms over the frame's own work, the in-between frame's share:
-// the Field held 30 real / 60 shown at 1.0 with 29 ms measured, and broke at 1.15)
-#define DYN_GPU_SLOW (fg_on() ? 30.0 : 30.0)
-#define DYN_GPU_ROOM (fg_on() ? 26.0 : 26.0)  // (+0.05 near 1: ~10% more pixels, ~1 ms in the Field)
+// the Field held 30 real / 60 shown at 1.0 with 29 ms measured, and broke at 1.15.) The Power setting's Balanced
+// keeps ~10% of the GPU spare: held at its limit, with frame generation on top, the phone drew so much for so long
+// that its worn battery couldn't keep up (hard resets); maximum performance goes to the limit.
+#define DYN_GPU_SLOW (g_settings.power_mode == 1 ? 30.0 : 27.0)
+#define DYN_GPU_ROOM (g_settings.power_mode == 1 ? 26.0 : 23.5)  // (+0.05 near 1: ~10% more pixels, ~1 ms in the Field)
 extern bool fg_enabled(void);
 static bool fg_on(void) { return fg_enabled(); }
 #else
