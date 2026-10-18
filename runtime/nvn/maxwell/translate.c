@@ -2586,9 +2586,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
         // depth pre-pass + EQUAL test needs identical positions from different shaders: invariant, and precise so no
         // compiler fuses or reorders the math feeding it (MSL gets this from preserveInvariance; without it foliage
-        // drawn twice flickered black). Phones (maxwell_precise_pos 0): invariant alone - the Adreno compiler places
-        // both passes alike, and precise kept it from fusing anything: the Field's tall grass (one draw, thousands of
-        // instances) took 5 ms of the frame's GPU time instead of 1.8. LARECOMP_VK_PRECISE_POS=0/1 overrides.
+        // drawn twice flickered black). Phones too: without precise, the sea's reflection pass (its own shader
+        // compares its depth with an earlier pass's) broke into blocks; with the leaner shaders precise costs ~0.3 ms
+        // (it was 3 ms on the tall grass before). LARECOMP_VK_PRECISE_POS=0/1 overrides.
         static int prec = -1;
         if (prec < 0) prec = getenv("LARECOMP_VK_PRECISE_POS") ? atoi(getenv("LARECOMP_VK_PRECISE_POS")) != 0 : maxwell_precise_pos;
         sp(&s, prec ? "invariant gl_Position;\nprecise gl_Position;\n" : "invariant gl_Position;\n");
