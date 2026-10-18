@@ -50,7 +50,10 @@ static int g_indoor_streak, g_outdoor_streak;
 RT_ON_RESET(widescreen_reset) { g_indoor = false; g_indoor_streak = g_outdoor_streak = 0; }
 
 void widescreen_frame_end(uint64_t frame) {
-    bool saw = g_site0_frame == frame;
+    // (within two presents either way: the game's thread notes the count while the render thread presents, one frame
+    // behind or ahead - an exact match missed often and the picture flipped between wide and 16:9 every few frames)
+    int64_t d = (int64_t)(frame - g_site0_frame);
+    bool saw = g_site0_frame != ~0ull && d >= -2 && d <= 2;
     if (saw) { g_outdoor_streak++; g_indoor_streak = 0; }
     else { g_indoor_streak++; g_outdoor_streak = 0; }
     bool was = g_indoor;
