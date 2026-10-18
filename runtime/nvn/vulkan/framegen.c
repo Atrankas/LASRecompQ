@@ -42,7 +42,7 @@ static const char kWarp[] =
     "layout(location = 0) out vec4 o;\n"
     // m0..m3: rows of (generated view-projection) x inverse(this frame's); rect: the game picture in the window (uv);
     // crop: the part of the presented picture shown there; a: y flip (game NDC up = image top), depth in [-1, 1],
-    // present flip, unused; b: the presented picture's content scale (xy), the depth's (zw)
+    // present flip, mode; b: objects' own movement on (x), the depth's content scale (zw)
     "layout(push_constant) uniform P { vec4 m0; vec4 m1; vec4 m2; vec4 m3; vec4 rect; vec4 crop; vec4 a; vec4 b; } p;\n"
     "vec2 toGame(vec2 w) { vec2 q = (w - p.rect.xy) / p.rect.zw; if (p.a.z > 0.5) q.y = 1.0 - q.y; return p.crop.xy + q * p.crop.zw; }\n"
     "vec2 toWin(vec2 g) { vec2 q = (g - p.crop.xy) / p.crop.zw; if (p.a.z > 0.5) q.y = 1.0 - q.y; return p.rect.xy + q * p.rect.zw; }\n"
@@ -51,24 +51,35 @@ static const char kWarp[] =
     "bool hudAt(vec2 g) { return textureLod(hudMask, g, 0.0).r > 0.01; }\n"
     // where the scene point at g lands in the generated picture
     "vec2 moved(vec2 g) {\n"
-    "  vec2 n = g / p.b.xy;\n"
+    "  vec2 n = g;\n"
     "  float d = textureLod(depthT, n * p.b.zw, 0.0).r;\n"
     "  vec4 c = vec4(n.x * 2.0 - 1.0, p.a.x > 0.5 ? 1.0 - 2.0 * n.y : 2.0 * n.y - 1.0, p.a.y > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
     "  vec4 h = vec4(dot(p.m0, c), dot(p.m1, c), dot(p.m2, c), dot(p.m3, c));\n"
     "  if (h.w <= 1e-5) return g;\n"
     "  vec2 e = h.xy / h.w;\n"
     "  vec2 n2 = vec2(e.x * 0.5 + 0.5, p.a.x > 0.5 ? 0.5 - e.y * 0.5 : e.y * 0.5 + 0.5);\n"
-    "  return n2 * p.b.xy;\n"
+    "  return n2;\n"
+    "}\n"
+    "layout(set = 0, binding = 5) uniform sampler2D flowT;\n"  // objects' own movement per 16x16 block (kFlow)
+    // half the movement of the object at g beyond the camera's, where g's depth is its block's (characters walking:
+    // with the camera's movement alone they stood still in the in-between frame, then jumped - and Link, whom the
+    // camera follows, was moved with the background and shook)
+    "vec2 objMove(vec2 g) {\n"
+    "  if (p.b.x < 0.5) return vec2(0.0);\n"
+    "  vec4 f = textureLod(flowT, g, 0.0);\n"
+    "  if (f.w < 0.5) return vec2(0.0);\n"
+    "  float z = 1.0 / max(1.0 - textureLod(depthT, g * p.b.zw, 0.0).r, 1e-6);\n"
+    "  return abs(z - f.z) > 0.15 * f.z ? vec2(0.0) : f.xy * 0.5;\n"
     "}\n"
     "void main() {\n"
-    "  if (p.a.w > 1.5) { vec2 n = toGame(uv) / p.b.xy; float d = textureLod(depthT, n * p.b.zw, 0.0).r; o = vec4(vec3(clamp((1.0 - d) * 20.0, 0.0, 1.0)), 1.0); return; }\n"  // (LARECOMP_FRAMEGEN_DEBUG=depth)
+    "  if (p.a.w > 1.5) { vec2 n = toGame(uv); float d = textureLod(depthT, n * p.b.zw, 0.0).r; o = vec4(vec3(clamp((1.0 - d) * 20.0, 0.0, 1.0)), 1.0); return; }\n"  // (LARECOMP_FRAMEGEN_DEBUG=depth)
     "  if (p.a.w > 0.5) { o = textureLod(comp, uv, 0.0); return; }\n"  // (LARECOMP_FRAMEGEN_PLAIN: the cost without the warp)
     "  if (any(lessThan(uv, p.rect.xy)) || any(greaterThan(uv, p.rect.xy + p.rect.zw))) { o = textureLod(comp, uv, 0.0); return; }\n"
     "  vec2 g = toGame(uv);\n"
     "  if (hudAt(g)) { o = textureLod(comp, uv, 0.0); return; }\n"
     "  vec2 lo = p.crop.xy, hi = p.crop.xy + p.crop.zw;\n"
     "  vec2 s = g;\n"
-    "  for (int i = 0; i < 2; i++) s = clamp(g - (moved(s) - s), lo, hi);\n"  // (the source pixel that lands here)
+    "  for (int i = 0; i < 2; i++) s = clamp(g - (moved(s) - s) - objMove(s), lo, hi);\n"  // (the source pixel that lands here)
     "  o = hudAt(s) ? vec4(textureLod(scene, s, 0.0).rgb, 1.0) : textureLod(comp, toWin(s), 0.0);\n"
     "}\n";
 
@@ -89,9 +100,103 @@ static const char kMask[] =
     "  }\n"
     "  o = vec4(m);\n"
     "}\n";
+// a quarter-size brightness picture of the scene (each texel the 4x4 pixels' average), for kFlow
+static const char kDown[] =
+    "#version 450\n"
+    "layout(set = 0, binding = 0) uniform sampler2D scene;\n"
+    "layout(location = 0) in vec2 uv;\n"
+    "layout(location = 0) out vec4 o;\n"
+    "void main() {\n"
+    "  vec2 t = 1.0 / vec2(textureSize(scene, 0));\n"
+    "  vec3 c = vec3(0.0);\n"
+    "  for (int i = 0; i < 4; i++) c += textureLod(scene, uv + t * vec2((i & 1) == 0 ? -1.0 : 1.0, (i & 2) == 0 ? -1.0 : 1.0), 0.0).rgb;\n"
+    "  o = vec4(dot(c * 0.25, vec3(0.299, 0.587, 0.114)));\n"
+    "}\n";
+// Objects' own movement, one value per 16x16 block of the scene (from the WWHD port's reproj.cpp): the block of this
+// frame's quarter picture is looked for in the previous one around where the camera's movement alone puts it, and
+// around the same place on the screen (what the camera follows: Link). Out: the movement beyond the camera's,
+// previous -> this frame (uv), the block's nearest depth (1 / (1 - d): view distance up to a factor), valid.
+// m0..m3: rows of previous view-projection x inverse(this one's); a: y flip, depth in [-1, 1]; b.zw: depth scale
+static const char kFlow[] =
+    "#version 450\n"
+    "layout(set = 0, binding = 0) uniform sampler2D curImg;\n"
+    "layout(set = 0, binding = 1) uniform sampler2D prevImg;\n"
+    "layout(set = 0, binding = 2) uniform sampler2D depthT;\n"
+    "layout(location = 0) in vec2 uv;\n"
+    "layout(location = 0) out vec4 o;\n"
+    "layout(push_constant) uniform P { vec4 m0; vec4 m1; vec4 m2; vec4 m3; vec4 a; vec4 b; } p;\n"
+    "void block(sampler2D img, vec2 at, vec2 ts, out vec4 b[4]) {\n"  // 4x4 quarter-size texels as four gathers
+    "  b[0] = textureGather(img, at + vec2(-1.0, -1.0) * ts, 0); b[1] = textureGather(img, at + vec2(1.0, -1.0) * ts, 0);\n"
+    "  b[2] = textureGather(img, at + vec2(-1.0, 1.0) * ts, 0); b[3] = textureGather(img, at + vec2(1.0, 1.0) * ts, 0);\n"
+    "}\n"
+    "float sad(vec4 a[4], vec4 b[4]) { vec4 d = abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) + abs(a[3] - b[3]); return d.x + d.y + d.z + d.w; }\n"
+    "void main() {\n"
+    "  o = vec4(0.0);\n"
+    "  vec2 ts = 1.0 / vec2(textureSize(curImg, 0));\n"
+    "  vec4 cur[4]; block(curImg, uv, ts, cur);\n"
+    "  vec4 m4 = (cur[0] + cur[1] + cur[2] + cur[3]) * 0.25; float mean = (m4.x + m4.y + m4.z + m4.w) * 0.25;\n"
+    "  vec4 dv = abs(cur[0] - mean) + abs(cur[1] - mean) + abs(cur[2] - mean) + abs(cur[3] - mean);\n"
+    "  vec2 dq = uv * p.b.zw, dt = 1.0 / vec2(textureSize(depthT, 0));\n"  // (the block's nearest depth)
+    "  vec4 g = min(min(textureGather(depthT, dq + vec2(-4.0, -4.0) * dt), textureGather(depthT, dq + vec2(4.0, -4.0) * dt)),\n"
+    "               min(textureGather(depthT, dq + vec2(-4.0, 4.0) * dt), textureGather(depthT, dq + vec2(4.0, 4.0) * dt)));\n"
+    "  float d = min(min(g.x, g.y), min(g.z, g.w));\n"
+    "  o.z = min(1.0 / max(1.0 - d, 1e-6), 60000.0);\n"
+    "  if (dv.x + dv.y + dv.z + dv.w < 0.12) return;\n"  // (little detail: no reliable match)
+    "  vec4 c = vec4(uv.x * 2.0 - 1.0, p.a.x > 0.5 ? 1.0 - 2.0 * uv.y : 2.0 * uv.y - 1.0, p.a.y > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
+    "  vec4 h = vec4(dot(p.m0, c), dot(p.m1, c), dot(p.m2, c), dot(p.m3, c));\n"
+    "  bool camOk = h.w > 1e-5;\n"
+    "  vec2 e = camOk ? h.xy / h.w : vec2(0.0);\n"
+    "  vec2 pp = camOk ? vec2(e.x * 0.5 + 0.5, p.a.x > 0.5 ? 0.5 - e.y * 0.5 : e.y * 0.5 + 0.5) : uv;\n"
+    "  camOk = camOk && all(greaterThan(pp, vec2(0.01))) && all(lessThan(pp, vec2(0.99)));\n"
+    "  float best = 1e9, atCam = 1e9; vec2 bp = uv; vec4 b[4];\n"
+    "  for (int k = 0; k < 2; k++) {\n"  // (around pp, and around the same place on the screen; +-6 texels, then refined)
+    "    vec2 c0 = k == 0 ? pp : uv;\n"
+    "    if (k == 0 && !camOk) continue;\n"
+    "    for (int oy = -6; oy <= 6; oy += 2) for (int ox = -6; ox <= 6; ox += 2) {\n"
+    "      vec2 at = c0 + vec2(ox, oy) * ts;\n"
+    "      if (any(lessThan(at, vec2(0.01))) || any(greaterThan(at, vec2(0.99)))) continue;\n"
+    "      block(prevImg, at, ts, b); float sd = sad(cur, b);\n"
+    "      if (k == 0 && ox == 0 && oy == 0) atCam = sd;\n"
+    "      if (sd < best) { best = sd; bp = at; }\n"
+    "    }\n"
+    "  }\n"
+    "  vec2 c1 = bp;\n"
+    "  for (int oy = -1; oy <= 1; oy++) for (int ox = -1; ox <= 1; ox++) {\n"
+    "    if (ox == 0 && oy == 0) continue;\n"
+    "    vec2 at = c1 + vec2(ox, oy) * ts;\n"
+    "    block(prevImg, at, ts, b); float sd = sad(cur, b);\n"
+    "    if (sd < best) { best = sd; bp = at; }\n"
+    "  }\n"
+    "  if (best > 1.2 || atCam <= best * 1.5 + 0.05) return;\n"  // (no clear match, or the camera explains it)
+    "  o = vec4(pp - bp, o.z, 1.0);\n"
+    "}\n";
+// a block keeps its movement only when at least 2 of its 8 neighbours moved the same way (their average); lone
+// blocks (water, flicker) are dropped
+static const char kFilter[] =
+    "#version 450\n"
+    "layout(set = 0, binding = 0) uniform sampler2D flowIn;\n"
+    "layout(location = 0) in vec2 uv;\n"
+    "layout(location = 0) out vec4 o;\n"
+    "void main() {\n"
+    "  vec4 c = textureLod(flowIn, uv, 0.0);\n"
+    "  o = vec4(0.0, 0.0, c.z, 0.0);\n"
+    "  if (c.w < 0.5) return;\n"
+    "  vec2 ts = 1.0 / vec2(textureSize(flowIn, 0));\n"
+    "  vec2 sum = c.xy; float n = 0.0;\n"
+    "  for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {\n"
+    "    if (i == 0 && j == 0) continue;\n"
+    "    vec4 q = textureLod(flowIn, uv + vec2(i, j) * ts, 0.0);\n"
+    "    if (q.w > 0.5 && all(lessThan(abs(q.xy - c.xy), ts * 0.25))) { sum += q.xy; n += 1.0; }\n"
+    "  }\n"
+    "  if (n >= 2.0) o = vec4(sum / (n + 1.0), c.z, 1.0);\n"
+    "}\n";
+static TexBackend g_q[2], g_flow_raw, g_flow;  // quarter pictures (this frame's: g_q[g_qi]), block movement
+static int g_qi;
+static bool g_q_prev, g_flow_ok;  // the previous frame's quarter picture is there; this frame's movement is
 static TexBackend g_mask;
 static TexBackend *g_fin;
 static bool build_mask(VkCommandBuffer cb);
+static void build_flow(VkCommandBuffer cb);
 static VkDescriptorSetLayout g_mdsl;
 static VkPipelineLayout g_mlayout;
 static VkPipeline g_mpipe;
@@ -262,6 +367,7 @@ void fg_copy_window(VkCommandBuffer cb, VkImage sc, VkFormat fmt, uint32_t w, ui
     b[1].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, b[1].dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
     vkCmdPipelineBarrier2(cb, &di);
     g_comp_ok = build_mask(cb);
+    if (g_comp_ok) build_flow(cb);
 }
 
 static VkPipeline fs_pipeline(VkShaderModule fs, VkFormat fmt, VkPipelineLayout layout) {
@@ -311,7 +417,7 @@ static VkPipelineLayout set_layout(int nbind, uint32_t push, VkDescriptorSetLayo
 
 static VkPipeline warp_pipeline(VkFormat fmt) {
     if (g_pipe && g_pipe_fmt == fmt) return g_pipe;
-    if (!g_layout) g_layout = set_layout(5, 128, &g_dsl);
+    if (!g_layout) g_layout = set_layout(6, 128, &g_dsl);
     static VkShaderModule fs;
     if (!fs) fs = vk_compile_glsl(kWarp, STAGE_FRAGMENT, "framegen.frag");
     VkPipeline p = fs ? fs_pipeline(fs, fmt, g_layout) : VK_NULL_HANDLE;
@@ -372,6 +478,84 @@ static bool build_mask(VkCommandBuffer cb) {
     return true;
 }
 
+// a fullscreen pass of fs into target (outside any rendering); pc: push constants (size 0: none)
+static bool run_pass(VkCommandBuffer cb, TexBackend *target, VkPipeline pipe, VkPipelineLayout layout, VkDescriptorSetLayout dsl,
+                     int n, VkImageView *v, const bool *linear, const void *pc, uint32_t pcsize) {
+    VkImageView tv = color_view(target);
+    if (!tv || !pipe) return false;
+    for (int i = 0; i < n; i++) if (!v[i]) return false;
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = tv, .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                    .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {target->width, target->height}}, .layerCount = 1,
+                          .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    vkCmdBeginRendering(cb, &ri);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    bind_images(cb, layout, dsl, n, v, linear);
+    if (pcsize) vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, pcsize, pc);
+    VkViewport vp = {0, 0, (float)target->width, (float)target->height, 0, 1};
+    VkRect2D sc = {{0, 0}, {target->width, target->height}};
+    vkCmdSetViewport(cb, 0, 1, &vp);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdEndRendering(cb);
+    vk_full_barrier(cb);
+    return true;
+}
+
+// objects' own movement (fg_copy_window, after the HUD mask): this frame's quarter picture, then - with the previous
+// frame's there - the block search and its neighbour filter. LARECOMP_FRAMEGEN_FLOW=0: off
+static void build_flow(VkCommandBuffer cb) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_FRAMEGEN_FLOW") || atoi(getenv("LARECOMP_FRAMEGEN_FLOW"));
+    g_flow_ok = false;
+    NvnTexture *dt = g_depth;
+    if (!on || !g_scene.image || !dt || !dt->backend) { g_q_prev = false; return; }
+    static VkDescriptorSetLayout dsl1, dsl3;
+    static VkPipelineLayout l1, l3;
+    static VkPipeline pdown, pflow, pfilt;
+    if (!l1) l1 = set_layout(1, 0, &dsl1), l3 = set_layout(3, 96, &dsl3);
+    if (!pdown) {
+        VkShaderModule a = vk_compile_glsl(kDown, STAGE_FRAGMENT, "framegen_down.frag"), b = vk_compile_glsl(kFlow, STAGE_FRAGMENT, "framegen_flow.frag"),
+                       c = vk_compile_glsl(kFilter, STAGE_FRAGMENT, "framegen_filter.frag");
+        if (!a || !b || !c) { on = 0; return; }
+        pdown = fs_pipeline(a, VK_FORMAT_R8_UNORM, l1);
+        pflow = fs_pipeline(b, VK_FORMAT_R16G16B16A16_SFLOAT, l3);
+        pfilt = fs_pipeline(c, VK_FORMAT_R16G16B16A16_SFLOAT, l1);
+        if (!pdown || !pflow || !pfilt) { on = 0; return; }
+    }
+    uint32_t qw = (g_scene.width + 3) / 4, qh = (g_scene.height + 3) / 4, fw = (qw + 3) / 4, fh = (qh + 3) / 4;
+    VkImageUsageFlags use = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    g_qi ^= 1;
+    TexBackend *cur = &g_q[g_qi], *prev = &g_q[g_qi ^ 1];
+    if (prev->width != qw || prev->height != qh) g_q_prev = false;
+    if (!make_image(cur, VK_FORMAT_R8_UNORM, qw, qh, use) || !make_image(&g_flow_raw, VK_FORMAT_R16G16B16A16_SFLOAT, fw, fh, use) ||
+        !make_image(&g_flow, VK_FORMAT_R16G16B16A16_SFLOAT, fw, fh, use)) { g_q_prev = false; return; }
+    static const bool lin1[1] = {true}, nearest1[1] = {false}, lin3[3] = {false, false, false};
+    VkImageView sv = color_view(&g_scene);
+    bool made = run_pass(cb, cur, pdown, l1, dsl1, 1, &sv, lin1, NULL, 0);
+    if (made && g_q_prev && g_have_prev) {
+        float inv[16], mp[16];
+        if (mat_inv(g_vp, inv)) {
+            mat_mul(g_vp_prev, inv, mp);
+            extern uint32_t nvn_window_origin(void);
+            extern uint32_t nvn_depth_mode(void);
+            TexBackend *db = dt->backend;
+            VkComponentMapping ident = {0};
+            struct { float m[16], a[4], b[4]; } pc = {{0}};
+            memcpy(pc.m, mp, sizeof mp);
+            pc.a[0] = nvn_window_origin() == 0 ? 1.0f : 0.0f;
+            pc.a[1] = nvn_depth_mode() == 0 ? 1.0f : 0.0f;
+            pc.b[2] = g_depth_scale[0], pc.b[3] = g_depth_scale[1];
+            VkImageView v[3] = {color_view(cur), color_view(prev),
+                                vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, ident, VK_IMAGE_ASPECT_DEPTH_BIT)};
+            VkImageView fv = color_view(&g_flow_raw);
+            g_flow_ok = run_pass(cb, &g_flow_raw, pflow, l3, dsl3, 3, v, lin3, &pc, sizeof pc) &&
+                        run_pass(cb, &g_flow, pfilt, l1, dsl1, 1, &fv, nearest1, NULL, 0);
+        }
+    }
+    g_q_prev = made;
+}
+
 // device.c, inside the in-between frame's rendering into the swapchain image: draws it. fin: the presented picture;
 // rect: where it lies in the window (pixels), crop: the part of it shown; flip_present: lower-left origin
 bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBackend *fin, const float rect[4], const float crop[4],
@@ -393,9 +577,10 @@ bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBack
     if (!mat_inv(g_vp, inv)) return false;
     mat_mul(vpg, inv, m);
     VkComponentMapping ident = {0};
-    VkImageView v[5] = {color_view(&g_comp), color_view(&g_scene), color_view(fin),
-                        vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, ident, VK_IMAGE_ASPECT_DEPTH_BIT), color_view(&g_mask)};
-    for (int i = 0; i < 5; i++) if (!v[i]) return false;
+    VkImageView v[6] = {color_view(&g_comp), color_view(&g_scene), color_view(fin),
+                        vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, ident, VK_IMAGE_ASPECT_DEPTH_BIT), color_view(&g_mask),
+                        g_flow_ok ? color_view(&g_flow) : color_view(&g_mask)};
+    for (int i = 0; i < 6; i++) if (!v[i]) return false;
     struct { float m[16], rect[4], crop[4], a[4], b[4]; } pc;
     memcpy(pc.m, m, sizeof m);
     pc.rect[0] = rect[0] / ww, pc.rect[1] = rect[1] / wh, pc.rect[2] = rect[2] / ww, pc.rect[3] = rect[3] / wh;
@@ -411,11 +596,11 @@ bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBack
     if (getenv("LARECOMP_FRAMEGEN_DEBUG") && nlog++ < 3)
         LOG("[framegen] depth %ux%u scale %.3f %.3f, picture %ux%u, rect %.0f %.0f %.0f %.0f crop %.3f %.3f %.3f %.3f\n", db->width, db->height,
             g_depth_scale[0], g_depth_scale[1], fin->width, fin->height, rect[0], rect[1], rect[2], rect[3], crop[0], crop[1], crop[2], crop[3]);
-    pc.b[0] = 1, pc.b[1] = 1;  // (scaled images are made at their scaled size: the content fills them)
+    pc.b[0] = g_flow_ok ? 1.0f : 0.0f, pc.b[1] = 0;
     pc.b[2] = g_depth_scale[0], pc.b[3] = g_depth_scale[1];
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-    static const bool lin[5] = {true, true, true, false, true};
-    bind_images(cb, g_layout, g_dsl, 5, v, lin);
+    static const bool lin[6] = {true, true, true, false, true, false};
+    bind_images(cb, g_layout, g_dsl, 6, v, lin);
     vkCmdPushConstants(cb, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
     VkViewport vp = {0, 0, (float)ww, (float)wh, 0, 1};
     VkRect2D sc = {{0, 0}, {ww, wh}};
