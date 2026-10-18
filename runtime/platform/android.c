@@ -429,3 +429,5 @@ void plat_frame_work(uint64_t busy_ns, uint64_t target_ns) {
     if ((int64_t)target_ns != target && p_update_target) p_update_target(g_hint_session, target = (int64_t)target_ns);
     if (busy_ns) p_report(g_hint_session, (int64_t)busy_ns);
 }
+
+void plat_thread_guest(int prio) { (void)prio; }  // (plat_thread_core places the threads on phones)

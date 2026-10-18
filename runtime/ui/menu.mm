@@ -39,7 +39,8 @@ void rando_tab_draw(float scale);
 bool warp_tab_draw(float scale);  // warp_tab.mm: true when a warp started
 extern "C" void cheats_draw(float scale);  // cheats.mm
 extern "C" void difficulty_draw(float scale);  // difficulty.mm
-void controls_bindings_draw(float scale);  // controls_ui.mm
+void controls_tab_draw(float scale);  // controls_ui.mm
+bool controls_ui_took_back(void);
 #include "../input_bind.h"
 #include "../paths.h"
 #ifdef __ANDROID__
@@ -710,7 +711,7 @@ static void translation_imported(const char *err) {  // (Java thread)
     g_tr_state = err ? 2 : 1;
 }
 
-static void translation_rows(void) {
+extern "C" void translation_rows(void) {  // (difficulty.mm: under the Language row)
     static std::string msg;
     if (int st = g_tr_state.exchange(0)) {
         if (st == 1) settings_translation_changed(), msg = T("Translation installed - restart the game to see it.");
@@ -730,71 +731,6 @@ static void translation_rows(void) {
     if (!msg.empty()) hint(msg.c_str());
 }
 #endif
-
-static void tab_about(void) {
-    header("Touch controls");
-    {
-        static const char *const modes[] = {"Auto (no controller)", "Always", "Off"};
-        if (choice("Show", &g_settings.touch_mode, modes, 3)) settings_save();
-        float sz = roundf(g_settings.touch_size * 100), op = roundf(g_settings.touch_opacity * 100);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(T("Size"));
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::SliderFloat("##touch_size", &sz, 60, 160, "%.0f%%")) g_settings.touch_size = sz / 100, settings_save();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(T("Opacity"));
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::SliderFloat("##touch_opacity", &op, 15, 100, "%.0f%%")) g_settings.touch_opacity = op / 100, settings_save();
-    }
-    hint("On-screen buttons for touch screens. The middle button at the top opens this menu.");
-    ImGui::Spacing();
-    header("Movement");
-    toggle("D-pad moves Link", &g_settings.dpad_move);
-    toggle("360-degree movement", &g_settings.move_360);
-    hint("Link walks in the exact direction of the stick instead of snapping to 8 directions.");
-    ImGui::Spacing();
-    header("Button prompts");
-    {
-        static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
-        char autol[64];
-        snprintf(autol, sizeof autol, T("Auto (%s)"), fam[input_pad_family() % 3]);
-        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation"};
-        choice("Button icons", &g_settings.prompts, names, 4);
-    }
-    ImGui::Spacing();
-    header("System language");
-    {
-        // what the game is told the console's language is: its text follows this (runtime/settings.c)
-        char autol[64];
-        snprintf(autol, sizeof autol, T("Auto (%s)"), T(settings_language_name()));
-        const char *names[N_LANGUAGES];
-        names[0] = autol;
-        for (int i = 1; i < N_LANGUAGES; i++) names[i] = g_language_names[i];
-        if (choice("Language", &g_settings.language, names, N_LANGUAGES)) settings_save();
-        // the app's own menus (i18n.h): at once
-        static const char *const ui_names[N_UI_LANGUAGES] = {"Auto", "English", "Português (Brasil)"};
-        if (choice("App language", &g_settings.ui_language, ui_names, N_UI_LANGUAGES)) settings_save();
-    }
-    hint("The game's text language, as its own system setting. Applies when the game restarts: Quit -> Quit to Start "
-         "Screen, then Play. App language: this menu and the start screen, at once.");
-#ifdef __ANDROID__
-    translation_rows();
-#else
-    if (g_settings.language == LANG_PT_BR && !settings_translation_dir())
-        hint("Portuguese (Brazil) needs the fan translation: copy its files to translations/pt-BR in the app's data "
-             "folder. Until then the game's text stays in English.");
-#endif
-    ImGui::Spacing();
-    header("Controls");
-    controls_bindings_draw(ImGui::GetFontSize() / 34);
-    ImGui::Spacing();
-    header("Menu");
-    ImGui::TextUnformatted(T("Open / close this menu:  F1, Esc, the controller's Home / Xbox / PlayStation button, or Back + Start"));
-    ImGui::TextUnformatted(T("Switch tabs:  L / R  (Q / E)        Back:  B  (Esc)"));
-    ImGui::TextUnformatted(T("Fullscreen:  F11 / Alt+Enter"));
-}
 
 extern "C" bool inventory_overlay_wanted(void);
 extern "C" bool tracker_overlay_wanted(void);
@@ -949,16 +885,9 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 ImGui::Spacing();
                 ImGui::BeginChild("##page", ImVec2(0, 0), ImGuiChildFlags_None,  // (the rest of the window: no hint line)
                                   ImGuiWindowFlags_NavFlattened);
-                // Down from the tab bar, pages that aren't option rows (Prelaunch, Controls, Warp): their first control
+                // Down from the tab bar, pages that aren't option rows (Prelaunch, Warp): their first control
                 // (option-row pages: opt_focus_first)
-                if (down_from_tab && (t.id == -1 || t.id == 8 || t.id == 4)) {
-                    opt_focus_first(false);
-                    ImGui::SetKeyboardFocusHere();
-                    ImGui::SetNavCursorVisible(true);
-                }
-                // Down from the tab bar, pages that aren't option rows (Prelaunch, Controls, Warp): their first control
-                // (option-row pages: opt_focus_first)
-                if (down_from_tab && (t.id == -1 || t.id == 8 || t.id == 4)) {
+                if (down_from_tab && (t.id == -1 || t.id == 4)) {
                     opt_focus_first(false);
                     ImGui::SetKeyboardFocusHere();
                     ImGui::SetNavCursorVisible(true);
@@ -976,7 +905,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 case 5: cheats_draw(scale); break;
                 case 6: difficulty_draw(scale); break;
                 case 7: tab_cosmetics(); break;
-                case 8: tab_about(); break;
+                case 8: controls_tab_draw(scale); break;
                 case 9: tab_quit(scale, in_game); break;
                 }
                 static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
@@ -1118,7 +1047,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         tabs_body(scale, true, NULL);                                                                          //  pages run)
         // B with nothing focused-deeper closes the menu (not the Esc / B that ends typing: typing is from the frame
         // before, so it's still true the frame a field lets go)
-        if (!any_popup && !typing && !ui_text_busy() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        if (!any_popup && !typing && !ui_text_busy() && !controls_ui_took_back() &&
+            ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
             (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
             set_open(false);
         ImGui::PopFont();

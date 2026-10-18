@@ -37,6 +37,16 @@
 #define GA_MAIN_IMAGE_SCAN_END              UINT64_C(0x7002000000)
 #define GA_SDK_SYSTEM_OBJECT                UINT64_C(0x7004cf9e38)
 #define GA_LANMOLA_START                    UINT64_C(0x7000487ce0)
+// Event requests (runtime/hle/hint_sheet.c, as the game requests GameOver from event/Common.bfevfl at main+0xdaaf6c)
+#define GA_EVENT_RES_MGR                    UINT64_C(0x7001cc6db8)
+#define GA_EVENT_RES_LOAD                   UINT64_C(0x7000fbbd80)
+#define GA_EVENT_RES_WAIT                   UINT64_C(0x700003dc20)
+#define GA_EVENT_FLOW_HANDLE                UINT64_C(0x700003d9f0)
+#define GA_EVENT_REQUEST_NEW                UINT64_C(0x700080c290)
+#define GA_EVENT_REQUEST_PREPARE            UINT64_C(0x700080db00)
+#define GA_EVENT_MGR                        UINT64_C(0x7001cb24d8)
+#define GA_EVENT_SUBMIT                     UINT64_C(0x700081f2e0)
+#define GA_STRING_COMMON_FLOW               UINT64_C(0x70016c2ca8)
 
 // Mini-boss classes
 #define GA_HINOX_VTABLE                     UINT64_C(0x7001b80e90)
@@ -57,6 +67,11 @@
 #define GA_LANMOLA_CHANGE_STATE             UINT64_C(0x700047db50)
 #define GA_MASTER_STALFOS_VTABLE            UINT64_C(0x7001b8ea08)
 #define GA_MASTER_STALFOS_CHANGE_STATE      UINT64_C(0x70004b9be0)
+#define GA_SHADOW_LINK_VTABLE              UINT64_C(0x7001c16730)
+#define GA_TAILOR_PREPARE                  UINT64_C(0x70010d4e10)
+#define GA_TAILOR_PLAY                     UINT64_C(0x70010d4340)
+#define GA_STRING_OTHER                    UINT64_C(0x70016dc7b9)
+#define GA_STRING_SIGN                     UINT64_C(0x70016e6ef9)
 
 #define GA_MAIN_CODE_SIZE                  UINT64_C(0x16a0000)
 #define GA_DELEGATE_JOB_VTABLE_LIVE         UINT64_C(0x7001c51308)

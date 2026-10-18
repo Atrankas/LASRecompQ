@@ -43,6 +43,7 @@ void plat_thread_core(int role);
 // Frame work report (phones: Android's performance hints, so the fastest core and clocks come when the game needs
 // them): the game thread's busy time of the frame against the frame's target; a no-op elsewhere
 void plat_frame_work(uint64_t busy_ns, uint64_t target_ns);
+void plat_thread_guest(int prio);  // a guest thread's host scheduling class from its Switch priority (lower = more urgent)
 
 // ---- process
 void plat_init(void);                                // first thing in main()

@@ -53,17 +53,24 @@ add_custom_command(OUTPUT ${SMAA_INC}
   COMMAND sh -c "LC_ALL=C tr -d '\\r' < '${ROOT}/third_party/smaa/SMAA.hlsl' | LC_ALL=C tr '\\200-\\377' '?' | sed -e 's/\\\\/\\\\\\\\/g' -e 's/\"/\\\\\"/g' -e 's/^/\"/' -e 's/$/\\\\n\"/' > '${SMAA_INC}'"
   DEPENDS ${ROOT}/third_party/smaa/SMAA.hlsl VERBATIM)
 
+# ---- the shader preparation's variant list as a C string (as the Makefile; runtime/nvn/shader_prep.c)
+set(VARIANTS_INC ${CMAKE_BINARY_DIR}/inc/shader_variants.inc)
+add_custom_command(OUTPUT ${VARIANTS_INC}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/inc
+  COMMAND sh -c "(LC_ALL=C tr -d '\\r' < '${ROOT}/runtime/nvn/shader_variants.txt' | sed -e 's/\\\\/\\\\\\\\/g' -e 's/\"/\\\\\"/g' -e 's/^/\"/' -e 's/$/\\\\n\"/'; echo '\"\"') > '${VARIANTS_INC}'"
+  DEPENDS ${ROOT}/runtime/nvn/shader_variants.txt VERBATIM)
+
 # ---- the runtime
 file(GLOB RT_SRC CONFIGURE_DEPENDS ${ROOT}/runtime/*.c ${ROOT}/runtime/hle/*.c ${ROOT}/runtime/services/*.c ${ROOT}/runtime/nvn/*.c
      ${ROOT}/runtime/nvn/maxwell/*.c ${ROOT}/runtime/nvn/vulkan/*.c)
-file(GLOB RT_CXX CONFIGURE_DEPENDS ${ROOT}/runtime/nvn/vulkan/*.cpp)
+file(GLOB RT_CXX CONFIGURE_DEPENDS ${ROOT}/runtime/*.cpp ${ROOT}/runtime/nvn/vulkan/*.cpp)
 file(GLOB UI_SRC CONFIGURE_DEPENDS ${ROOT}/runtime/ui/*.mm)
 set(IMGUI ${ROOT}/third_party/imgui)
 set(IMGUI_SRC ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.cpp ${IMGUI}/imgui_widgets.cpp
               ${IMGUI}/backends/imgui_impl_sdl3.cpp ${IMGUI}/backends/imgui_impl_vulkan.cpp)
 
 add_library(main SHARED ${RT_SRC} ${ROOT}/runtime/platform/android.c ${ROOT}/runtime/platform/android_jni.c ${RT_CXX} ${UI_SRC} ${IMGUI_SRC}
-                        ${DEPS}/include/volk/volk.c ${SMAA_INC})
+                        ${DEPS}/include/volk/volk.c ${SMAA_INC} ${VARIANTS_INC})
 # the start screen / menu sources are plain C++ apart from their __APPLE__ blocks (as the Makefile's UIFLAGS)
 set_source_files_properties(${UI_SRC} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-x;c++")
 target_include_directories(main PRIVATE ${ROOT}/runtime ${ROOT}/runtime/nvn ${IMGUI} ${IMGUI}/backends ${DEPS}/include

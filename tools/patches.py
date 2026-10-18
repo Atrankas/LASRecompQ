@@ -397,18 +397,42 @@ def _bottle3_use(gen, a):
 PATCHES[BOTTLE3_USE_SITE] = _bottle3_use
 
 
+# Hint Book (runtime/hle/hintbook.c): the same predicate of the FIRST bottle (slot 0xd, main+0xd510c0: owned =
+# PlayerStatus+0xa9 bit 5, empty = +0xc0 bit 0). In randomizer seeds that bottle is the Hint Book: used, the runtime
+# shows the next hint in the game's message box and the answer is no (no swing).
+BOTTLE1_USE_SITE = A.BOTTLE1_USE_SITE
+
+
+def _bottle1_use(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x1a9f17e0, hex(w)  # cset w0, eq
+    return ('{ extern int rt_bottle1_use(void); c->x[0] = COND_NE(c) ? 0 : 1; if (c->x[0] && rt_bottle1_use()) c->x[0] = 0; }'
+            f'  /* {a:#x}: cset w0, eq (first bottle used: Hint Book) */')
+
+
+PATCHES[BOTTLE1_USE_SITE] = _bottle1_use
+
+
 # Boss souls (runtime/hle/souls.c): the actor factory f_70008f5ea0 (x2 = spawn info, type u16 at +8) takes the type's
 # create function from the actor table (main+0x1bcc898, 0x58 bytes per type, +0 create fn, +0x50 name); a null fn is
 # its "no such actor" path (the caller gets an empty handle). A dungeon boss whose soul isn't found yet gets that path.
 BOSS_SPAWN_SITE = A.BOSS_SPAWN_SITE
 
 
+# Enemy randomizer, mode Random (runtime/hle/enemy_random.c): the same spot first lets the runtime re-roll a randomized
+# enemy in the spawn info (type +8, the eight parameters +0x10, as in its room file's record), then takes the type
+# again (x23) and its table entry (x8 = x27 + type * 0x58, x27 = the table: main+0x1bcc898).
 def _boss_spawn(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
     assert w == 0xf9400118, hex(w)  # ldr x24, [x8]
+    if a - 4 >= gen.base:  # (the address table test gives this one word only)
+        w = struct.unpack_from('<I', gen.nso.image, a - 4 - gen.base)[0]
+        assert w == 0x9b086ee8, hex(w)  # madd x8, x23, x8, x27
     return ('{ extern uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info); '
+            'extern void rt_enemy_spawn(uint64_t info); rt_enemy_spawn(c->x[2]); '
+            'c->x[23] = LD16(c->x[2] + 8); c->x[8] = c->x[27] + c->x[23] * 0x58ull; '
             'c->x[24] = rt_actor_create_fn(LD64(c->x[8]), (uint32_t)c->x[23], c->x[2]); }'
-            f'  /* {a:#x}: ldr x24, [x8] (actor create fn: boss souls) */')
+            f'  /* {a:#x}: ldr x24, [x8] (actor create fn: boss souls, enemy mode Random) */')
 
 
 PATCHES[BOSS_SPAWN_SITE] = _boss_spawn
@@ -629,6 +653,24 @@ def _prompt_pos(gen, a):
 PATCHES[PROMPT_POS_SITE] = _prompt_pos
 
 
+# Issue #45: setting up a font, the game looks up the glyph of "□" (U+25A1, its box for a missing character) and
+# marks it (main+0x111dfc0: the lookup at main+0x111dffc, then `ldrb w8, [x0, #0x38]` at main+0x111e000) without
+# checking for none - its second lookup in the same function does check. With a substitute font that has no such
+# glyph for the game (a Yu Gothic on one Windows PC, although its cmap lists it) that read crashed at 0x38. Now no
+# glyph skips the marking as the second lookup's check does (to the function's end).
+FONT_BOX_GLYPH_SITE = A.FONT_BOX_GLYPH_SITE
+
+
+def _font_box_glyph(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x3940e008, hex(w)  # ldrb w8, [x0, #0x38]
+    return (addr_text('if (c->x[0] == 0) goto L_@FONT_BOX_GLYPH_SKIP@; c->x[8] = LD8(c->x[0] + 0x38);') +
+            f'  /* {a:#x}: ldrb w8, [x0, #0x38] (font box glyph: none skips the marking) */')
+
+
+PATCHES[FONT_BOX_GLYPH_SITE] = _font_box_glyph
+
+
 # Issue #19: [this+0x10] is the delegate of a recycled "action" object (the class whose vtable is 0x7001c51358, and
 # the ~100 siblings sharing these forwarders). Its slot +0x28 (main+0x10cce50) and +0x30 (main+0x10cce30) forward to
 # that delegate without checking it, while the class's own slot +0x38 (main+0x10cce80) checks *its* delegate (+0x18)
@@ -658,6 +700,23 @@ for _a in DELEGATE_FORWARDER_SITES:
 # with Warp tab jumps; same family as NO_HANDLER_SITES (the action dispatcher's).
 EMPTY_HANDLER_SITE = A.EMPTY_HANDLER_SITE  # bl main+0x108dfc0
 
+# Issue #19 (the hang): the per-frame kick-off (main+0x15730, four inlined copies, one per owner X) rebuilds X's frame
+# job J (X+0xc8) in place. The job worker (main+0x13c21e0) runs J (main+0x10cceb0: sets X's done flag, wakes the main
+# thread, unlocks) and only then calls J's finish (main+0x10ccfa0 -> slot +0x00: base vtable, delegate cleared). A
+# worker preempted between the two lets the main thread kick off the next frame first; the late finish then wipes the
+# new J, whose release is dropped and the main thread waits for X's done flag forever. The kick-off hooks wait for the
+# previous run's finish (runtime/hle/delegate_null.c); the finish hook only serves a debug delay to force the race.
+FRAME_JOB_KICKOFF_SITES = [A.FRAME_JOB_KICKOFF_SITES_0, A.FRAME_JOB_KICKOFF_SITES_1, A.FRAME_JOB_KICKOFF_SITES_2,
+                           A.FRAME_JOB_KICKOFF_SITES_3]
+FRAME_JOB_FINISH_SITE = A.FRAME_JOB_FINISH_SITE
+
+
+# Shadow Link's Appear event (main+0xd157f0: requested once Link is within 3 units, ShadowLink.bfevfl) stops Link and
+# turns the camera to him; on the Field (seeds) the request is skipped and runtime/hle/miniboss.c plays his appearance
+# (Sign glow, then he pops up) without an event. The site is right after the function's already-requested check; the
+# skip goes to its return.
+SHADOW_LINK_APPEAR_SITE = A.SHADOW_LINK_APPEAR_SITE
+
 
 # ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
 # what to do - 0 run it, 1 the hook did it all, 2.. jump to the site's first.. target (each a label in its function).
@@ -672,9 +731,15 @@ HOOKS = {
     GOHMA_ARRIVED_SITE: (0x3dc58260, (A.GOHMA_ARRIVED_SKIP,), 'ldr q0, [x19, #0x1600]: Gohma, no track end on the Field'),
     MSTALFOS_BODY_SITE: (0x320003e8, (), 'mov w8, #1: Master Stalfos body collision flag, off on the Field'),
     MSTALFOS_JUMP_SITE: (0x1e213800, (), 'fsub s0, s0, s1: Master Stalfos jump arc from his takeoff height'),
+    SHADOW_LINK_APPEAR_SITE: (0xf9411809, (A.SHADOW_LINK_APPEAR_SKIP,), 'ldr x9, [x0, #0x230]: Shadow Link, no Appear event on the Field'),
     MCHIEF_STORY_SITE: (0x37380148, (A.MCHIEF_STORY_SKIP,), 'tbnz w8, #7: Moblin Chief, no story check on the Field'),
     DIG_HOLE_SITE: (0xf94007f6, (), 'ldr x22, [sp, #8]: a hole was dug (digs.c)'),
     HOLE_CAP_SITES[0]: (0xf101451f, (), 'cmp x8, #0x51: dug-hole limit (digs.c)'),
     HOLE_CAP_SITES[1]: (0xf101411f, (), 'cmp x8, #0x50: dug-hole limit (digs.c)'),
     EMPTY_HANDLER_SITE: (0x9400005e, (A.EMPTY_HANDLER_CATCH,), 'bl std::function call: an empty event handler, as its catch'),
+    FRAME_JOB_KICKOFF_SITES[0]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_KICKOFF_SITES[1]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_KICKOFF_SITES[2]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_KICKOFF_SITES[3]: (0x910782b3, (), 'add x19, x21, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_FINISH_SITE: (0xf9400008, (), 'ldr x8, [x0]: frame job finish (debug delay)'),
 }

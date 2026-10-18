@@ -49,9 +49,32 @@ extern "C" int32_t rt_damage(int32_t dmg, int32_t shift) {
 extern "C" void difficulty_frame(void) {}
 
 // Plain levers, each at the game's own value by default (Default, off), as option rows (option_rows.h).
+#ifdef __ANDROID__
+extern "C" void translation_rows(void);  // (menu.mm: the fan translation's import)
+#endif
+
 extern "C" void difficulty_draw(float scale) {
     opt_begin("##gameplay", scale);
     opt_section("General");
+    {
+        // what the game is told the console's language is: its text follows this (runtime/settings.c)
+        char autol[64];
+        snprintf(autol, sizeof autol, "Auto (%s)", settings_language_name());
+        const char *names[N_LANGUAGES];
+        names[0] = autol;
+        for (int i = 1; i < N_LANGUAGES; i++) names[i] = g_language_names[i];
+        if (opt_choice("Language", &g_settings.language, names, N_LANGUAGES, LANG_AUTO,
+                       "The game's text language, as its own system setting. Applies when the game restarts."))
+            settings_save();
+        // the app's own menus (i18n.h): at once
+        static const char *const ui_names[N_UI_LANGUAGES] = {"Auto", "English", "Português (Brasil)"};
+        if (opt_choice("App language", &g_settings.ui_language, ui_names, N_UI_LANGUAGES, UI_LANG_AUTO,
+                       "This menu and the start screen, at once. Auto: the system's language."))
+            settings_save();
+#ifdef __ANDROID__
+        translation_rows();
+#endif
+    }
     if (rt_hookshot_seed_forced()) {  // (the seed's logic counts on it: always on, the toggle greyed out)
         bool on = true;
         opt_disable_next();

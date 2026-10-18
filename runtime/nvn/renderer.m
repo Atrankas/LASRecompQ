@@ -14,6 +14,8 @@
 #include "maxwell/shader.h"
 #include "nvn.h"
 #include "renderer.h"
+#include "pace.h"
+#include "shader_prep.h"
 
 static id<MTLDevice> dev;
 static id<MTLCommandBuffer> cmdbuf;
@@ -22,6 +24,7 @@ static id<MTLRenderPipelineState> clear_pipes[64];
 static NSMutableDictionary<NSString *, id> *cache;
 // (stats) GPU wait time by cause: 0 = guest fence (nvnSyncWait), 1 = full flush (CPU reads GPU results / ring), 2 = sync all
 static uint64_t stat_wait_by[3], stat_wait_n[3];
+static uint64_t stat_clears_as_load, stat_clear_passes;  // (deferred clears)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static double stat_gpu_s;
 uint64_t g_gpu_total_ns;  // GPU time of all completed command buffers (dynamic resolution: output_scale.c)
@@ -49,6 +52,17 @@ typedef struct {
 } RtState;
 
 typedef struct { uint64_t addr, size; } Range;
+
+// Same targets and views (field by field: the views come from guest records, their padding is not ours to compare).
+static bool rt_same(const RtState *a, const RtState *b) {
+    if (a->ncolor != b->ncolor || a->depth != b->depth || a->has_dview != b->has_dview) return false;
+    if (a->has_dview && memcmp(&a->dview, &b->dview, sizeof a->dview)) return false;
+    for (int i = 0; i < a->ncolor; i++) {
+        if (a->color[i] != b->color[i] || a->has_cview[i] != b->has_cview[i]) return false;
+        if (a->has_cview[i] && memcmp(&a->cview[i], &b->cview[i], sizeof a->cview[i])) return false;
+    }
+    return true;
+}
 
 static struct {
     RtState rt;
@@ -84,6 +98,7 @@ static int stat_compiles;
 static inline double now_ms(void) { return (double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e6; }
 #define TIMED_COMPILE(expr) ({ double t0_ = now_ms(); __auto_type r_ = (expr); stat_compile_ms += now_ms() - t0_; stat_compiles++; r_; })
 
+static uint64_t stat_counters_gpu;  // timing counters given the GPU's time (the game's 30 / 60 fps choice)
 const char *renderer_stats(void) {
     static int dumps;
     if (dumps++ < 3) {
@@ -96,15 +111,18 @@ const char *renderer_stats(void) {
     struct task_vm_info vmi;
     mach_msg_type_number_t vn = TASK_VM_INFO_COUNT;
     uint64_t foot = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &vn) == KERN_SUCCESS ? vmi.phys_footprint : 0;
-    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, gpu %.0fms, wait %.0fms, compile %d/%.0fms, fbcopy %llu | tex %d (%.0f MB) views %d snaps %lu mem %.0f MB | waits fence %.0fms/%llu flush %.0fms/%llu all %.0fms/%llu", stat_draws, stat_skipped,
+    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, gpu %.0fms, wait %.0fms, compile %d/%.0fms, fbcopy %llu | tex %d (%.0f MB) views %d snaps %lu mem %.0f MB | waits fence %.0fms/%llu flush %.0fms/%llu all %.0fms/%llu | deferred: clears as load %llu, clear passes %llu | counters gpu %llu | pace %s, %llu frames over", stat_draws, stat_skipped,
              stat_passes, stat_dispatches, stat_flushes, stat_gpu_s * 1000.0, (double)stat_wait_ns / 1e6 * 125.0 / 3.0, stat_compiles, stat_compile_ms, stat_feedback_copies,
-             g_tex_live, g_tex_live_bytes / 1048576.0, g_views_live, (unsigned long)(g_snap_copies ? g_snap_copies.count : 0), foot / 1048576.0, stat_wait_by[0] / 24e3, (unsigned long long)stat_wait_n[0], stat_wait_by[1] / 24e3, (unsigned long long)stat_wait_n[1], stat_wait_by[2] / 24e3, (unsigned long long)stat_wait_n[2]);
+             g_tex_live, g_tex_live_bytes / 1048576.0, g_views_live, (unsigned long)(g_snap_copies ? g_snap_copies.count : 0), foot / 1048576.0, stat_wait_by[0] / 24e3, (unsigned long long)stat_wait_n[0], stat_wait_by[1] / 24e3, (unsigned long long)stat_wait_n[1], stat_wait_by[2] / 24e3, (unsigned long long)stat_wait_n[2], (unsigned long long)stat_clears_as_load, (unsigned long long)stat_clear_passes,
+             (unsigned long long)stat_counters_gpu, pace_is_slow() ? "30" : "60", (unsigned long long)pace_frames_over());
+    stat_counters_gpu = 0;
     stat_compiles = 0;
     stat_feedback_copies = 0;
     stat_compile_ms = 0;
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
     memset(stat_wait_by, 0, sizeof stat_wait_by); memset(stat_wait_n, 0, sizeof stat_wait_n);
     stat_gpu_s = 0;
+    stat_clears_as_load = stat_clear_passes = 0;
     return stats_text;
 }
 
@@ -125,7 +143,7 @@ static void st_defaults(void) {
 
 void renderer_init(id<MTLDevice> d) {
     dev = d;
-    cache = [NSMutableDictionary new];
+    if (!cache) cache = [NSMutableDictionary new];  // (kept: shader preparation may have run on the start screen)
     st_defaults();
 }
 
@@ -150,7 +168,106 @@ static bool draw_item_cursor;           // a fragment texture is the Items page'
 #define RSCALE_BUFFER_INDEX 18
 
 static int debug_pass_no;
+// Attachment traffic. A tile GPU loads and stores every attachment of every pass, and the game clears each target
+// with a full clear before drawing it: 13 of the 45 passes of a Field_11C frame were clear quads alone, and the game
+// also re-sets the targets it already has between draw groups, which ended the pass (store + load of everything,
+// 3840x2160 depth, stencil and colour at 2x). Measured, Field_11C: 488 -> 343 MB of attachment traffic per frame at 1x,
+// 1701 -> 1297 MB at 2x, 45 -> 42 passes, picture unchanged. ~2 ms a frame on a 68 GB/s M1 Air.
+// - A full clear is recorded on its texture and becomes the load action of the next pass that binds the texture as a
+//   target (no load, no clear quad), whatever comes in between (other targets, dispatches, submits: the clear stays
+//   with the texture). It gets a pass of its own, which only stores, only if the texture is read first (sampled,
+//   copied, presented). That took the remaining 12 clear-only passes of the frame (65 MB at 1x). LARECOMP_MTL_LOAD_CLEAR=0:
+//   clears are quads again; LARECOMP_MTL_DEFER_CLEAR=0: a recorded clear is flushed as soon as its targets change.
+// - SetRenderTargets with the targets already bound keeps the pass open. LARECOMP_MTL_RT_DEDUP=0: ends it as before.
+// (Don't-care depth / stencil stores were tried here too: the next pass loads the depth in nearly every case, only ~2
+// of the ~8 stores a frame precede a clear of the texture, and a guess learned from the previous frame read stale
+// depth at scene changes. Not worth a wrong frame.)
+typedef struct {
+    NvnTexture *t;
+    void *backend;  // (the texture's TexBackend: a new texture at a reused address isn't this one)
+    bool clear_on, clear_color, clear_depth, clear_stencil;  // a recorded clear (full target, every channel)
+    double cc[4], dval;
+    uint32_t sval;
+} TexDefer;
+#define TD_TAB 2048
+static TexDefer td_tab[TD_TAB];
+static int td_pending;  // textures with a recorded clear
+static bool opening_pass;  // begin_pass is ending the previous pass (end_pass must not open one)
+static void begin_pass(void);
+static void end_pass(void);
+static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_);
+
+static int td_defer_on(void) { static int v = -1; if (v < 0) { const char *e = ENV("LARECOMP_MTL_DEFER_CLEAR"); v = !e || atoi(e); } return v; }
+
+static TexDefer *td_get(NvnTexture *t, bool create) {
+    if (!t) return NULL;
+    uint32_t h = (uint32_t)(((uintptr_t)t >> 4) * 0x9E3779B1u) & (TD_TAB - 1);
+    for (int probe = 0; probe < TD_TAB; probe++, h = (h + 1) & (TD_TAB - 1)) {
+        TexDefer *e = &td_tab[h];
+        if (e->t == t) {
+            // (the Metal object may not exist yet when a clear is recorded: adopt it; a different one means a new
+            // texture at a reused address)
+            if (!e->backend) e->backend = t->backend;
+            else if (t->backend && e->backend != t->backend) { if (e->clear_on) td_pending--; memset(e, 0, sizeof *e); e->t = t; e->backend = t->backend; }
+            return e;
+        }
+        if (!e->t) {
+            if (!create) return NULL;
+            memset(e, 0, sizeof *e);
+            e->t = t; e->backend = t->backend;
+            return e;
+        }
+    }
+    return NULL;
+}
+
+static void td_forget(NvnTexture *t) {  // (the texture is gone: drain_gone)
+    TexDefer *e = td_get(t, false);
+    if (!e) return;
+    if (e->clear_on) td_pending--;
+    e->t = NULL;  // (a tombstone keeps the probe chains intact: the slot stays unusable until a reset)
+    e->backend = (void *)1;
+}
+
+// The recorded clear of a texture that is about to be read: a pass of its own on that texture (load action clear,
+// store, nothing drawn), like a clear-only pass used to be.
+static bool td_flushing;
+static void td_flush(NvnTexture *t) {
+    TexDefer *e = t ? td_get(t, false) : NULL;
+    if (!e || !e->clear_on || td_flushing) return;
+    td_flushing = true;
+    RtState saved = st.rt;
+    bool dirty = st.rt_dirty;
+    end_pass();
+    memset(&st.rt, 0, sizeof st.rt);
+    if (renderer_format_is_depth(t->format)) st.rt.depth = t;
+    else { st.rt.ncolor = 1; st.rt.color[0] = t; }
+    st.rt_dirty = true;
+    begin_pass();  // (consumes the recorded clear)
+    end_pass();
+    stat_clear_passes++;
+    st.rt = saved;
+    st.rt_dirty = true;
+    td_flushing = false;
+    (void)dirty;
+}
+
+// The shaders' textures of a draw / dispatch that have a recorded clear get it applied before the pass opens.
+static void td_flush_shader_textures(int stage, ShaderInfo *si) {
+    if (!td_pending || !si) return;
+    for (int i = 0; i < si->ntex; i++) td_flush(shader_texture_object(stage, &si->tex[i]));
+}
+
+// Off mode (LARECOMP_MTL_DEFER_CLEAR=0): the recorded clears of the current targets become passes now.
+static void td_flush_targets(const RtState *rt) {
+    if (!td_pending) return;
+    for (int i = 0; i < rt->ncolor; i++) td_flush(rt->color[i]);
+    td_flush(rt->depth);
+}
+
+void renderer_texture_will_read(NvnTexture *t) { td_flush(t); }  // (metal.m: the presented image)
 static void end_pass(void) {
+    if (!td_defer_on() && !opening_pass) td_flush_targets(&st.rt);  // (off mode: as before, the clear gets its pass now)
     if (enc) {
         [enc endEncoding];
         enc = nil;
@@ -182,6 +299,60 @@ static pthread_mutex_t cb_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t submit_seq;
 static id<MTLCommandBuffer> cb_hist[CB_HIST];
 
+// ---- the game's GPU timing counters (nvnCommandBufferReportCounter, two per frame)
+// The game times its GPU work with these and takes its 30 fps mode when frames look slow (pace.c). They used to get
+// the host clock at translation time: our command translation (~2 ms however long the GPU took), so a Mac that
+// couldn't hold 60 kept the game in its 60 fps mode - slow motion at 30. Now the command buffer is split at each
+// counter (Apple GPUs have no timestamps inside a buffer), and once that's done the counter gets the GPU's time
+// there: the end of the buffer before it, or the start of the one after it if the GPU sat idle in between. Until
+// then the host clock (the game waits on its fence before reading them; resolved after each wait). As vulkan/exec.c.
+// LARECOMP_MTL_COUNTER=cpu: the host clock only.
+#define CTR_MAX 64
+static struct { uint64_t *out; const uint64_t *start; uint64_t before, after; } ctr_pend[CTR_MAX];
+static int nctr;
+static pthread_mutex_t ctr_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t ns_to_gpu_ticks(uint64_t ns) { return (uint64_t)((unsigned __int128)ns * 384 / 625); }  // (614.4 MHz)
+
+static void counters_resolve(void) {
+    pthread_mutex_lock(&ctr_lock);
+    pthread_mutex_lock(&cb_lock);
+    int k = 0;
+    for (int i = 0; i < nctr; i++) {
+        uint64_t bs = ctr_pend[i].before, as = ctr_pend[i].after;
+        if (submit_seq - bs >= CB_HIST || (as <= submit_seq && submit_seq - as >= CB_HIST)) continue;  // (gone)
+        id<MTLCommandBuffer> b = bs ? cb_hist[bs % CB_HIST] : nil;
+        id<MTLCommandBuffer> a = as <= submit_seq ? cb_hist[as % CB_HIST] : nil;
+        // both sides done: a buffer not committed yet (a frame's first chunk still being translated) would leave a
+        // start counter at the previous frame's end - backend_execute commits one at the end of each list
+        bool done = as <= submit_seq && (!b || b.status >= MTLCommandBufferStatusCompleted) &&
+                    (!a || a.status >= MTLCommandBufferStatusCompleted);
+        if (!done) {
+            ctr_pend[k++] = ctr_pend[i];
+            continue;
+        }
+        double t = b ? b.GPUEndTime : 0;
+        if (a && a.GPUStartTime > t) t = a.GPUStartTime;
+        if (t > 0) {
+            uint64_t *out = ctr_pend[i].out;
+            out[1] = pace_end_counter(ctr_pend[i].start, out, ns_to_gpu_ticks((uint64_t)(t * 1e9)));  // (host time base)
+            stat_counters_gpu++;
+        }
+    }
+    nctr = k;
+    pthread_mutex_unlock(&cb_lock);
+    pthread_mutex_unlock(&ctr_lock);
+}
+
+// A counter waits for the buffer after it: true when one ended the list just translated (backend_execute commits
+// one then, empty, so the counter isn't held until the next list).
+static bool counters_want_next(void) {
+    pthread_mutex_lock(&ctr_lock);
+    bool want = false;
+    for (int i = 0; i < nctr && !want; i++) want = ctr_pend[i].after > submit_seq;
+    pthread_mutex_unlock(&ctr_lock);
+    return want;
+}
+
 static int g_wait_kind;
 static void wait_cb(id<MTLCommandBuffer> c) {
     if (!c) return;
@@ -191,6 +362,7 @@ static void wait_cb(id<MTLCommandBuffer> c) {
     stat_wait_ns += d;
     stat_wait_by[g_wait_kind] += d;
     if (d > 24000) stat_wait_n[g_wait_kind]++;  // (> ~1 ms counts as a real wait)
+    counters_resolve();
 }
 
 // Textures the game destroyed (any thread): their cached views and snapshot copies are dropped on the render thread.
@@ -212,6 +384,7 @@ static void drain_gone(void) {
     for (int i = 0; i < n; i++) {
         if (local[i].mtl) views_forget(local[i].mtl);
         if (local[i].nvn) {
+            td_forget(local[i].nvn);
             if (g_snap_copies) [g_snap_copies removeObjectForKey:[NSValue valueWithPointer:local[i].nvn]];
             for (int k = 0; k < 8; k++) if (snap_tex[k] == local[i].nvn) { snap_tex[k] = NULL; snap_ok[k] = false; }
         }
@@ -238,6 +411,7 @@ void renderer_submit(void) {
         cb_hist[submit_seq % CB_HIST] = c;
         pthread_mutex_unlock(&cb_lock);
         stat_flushes++;
+        counters_resolve();  // (also without fence waits: a movie, loading - the table doesn't fill)
     }
 }
 
@@ -397,6 +571,7 @@ static __unsafe_unretained id last_bias_enc;  // encoder the depth bias was last
 
 static void begin_pass(void) {
     if (enc && !st.rt_dirty) return;
+    opening_pass = true;  // (the chunk submit's end_pass below must not flush anything into this pass)
     end_pass();
     st.rt_dirty = false;
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -417,6 +592,14 @@ static void begin_pass(void) {
             rp.colorAttachments[i].loadAction = MTLLoadActionClear;
             rp.colorAttachments[i].clearColor = MTLClearColorMake(0, 0, 0, fresh ? 0 : 1);
         }
+        TexDefer *e = td_pending ? td_get(t, false) : NULL;
+        if (e && e->clear_on && e->clear_color) {
+            rp.colorAttachments[i].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[i].clearColor = MTLClearColorMake(e->cc[0], e->cc[1], e->cc[2], e->cc[3]);
+            e->clear_on = false;
+            td_pending--;
+            stat_clears_as_load++;
+        }
         rp.colorAttachments[i].storeAction = MTLStoreActionStore;
         if (!w) renderer_texture_scale(t, &pass_sx, &pass_sy);
         w = (int)tex.width; h = (int)tex.height;
@@ -424,16 +607,23 @@ static void begin_pass(void) {
     if (st.rt.depth) {
         renderer_mark_gpu_owned(st.rt.depth);
         id<MTLTexture> tex = view_texture(st.rt.depth, &st.rt.dview, st.rt.has_dview, true, nil);
-        if (renderer_format_is_depth(st.rt.depth->format) && st.rt.depth->format != 0x31) {
+        TexDefer *e = td_pending ? td_get(st.rt.depth, false) : NULL;
+        bool has_d = renderer_format_is_depth(st.rt.depth->format) && st.rt.depth->format != 0x31;
+        bool has_s = renderer_format_has_stencil(st.rt.depth->format);
+        bool clr_d = e && e->clear_on && e->clear_depth, clr_s = e && e->clear_on && e->clear_stencil;
+        if (has_d) {
             rp.depthAttachment.texture = tex;
-            rp.depthAttachment.loadAction = MTLLoadActionLoad;
+            rp.depthAttachment.loadAction = clr_d ? MTLLoadActionClear : MTLLoadActionLoad;
+            rp.depthAttachment.clearDepth = clr_d ? e->dval : 1.0;
             rp.depthAttachment.storeAction = MTLStoreActionStore;
         }
-        if (renderer_format_has_stencil(st.rt.depth->format)) {
+        if (has_s) {
             rp.stencilAttachment.texture = tex;
-            rp.stencilAttachment.loadAction = MTLLoadActionLoad;
+            rp.stencilAttachment.loadAction = clr_s ? MTLLoadActionClear : MTLLoadActionLoad;
+            rp.stencilAttachment.clearStencil = clr_s ? e->sval : 0;
             rp.stencilAttachment.storeAction = MTLStoreActionStore;
         }
+        if (e && e->clear_on) { e->clear_on = false; td_pending--; stat_clears_as_load++; }
         if (!w) { renderer_texture_scale(st.rt.depth, &pass_sx, &pass_sy); w = (int)tex.width; h = (int)tex.height; }
     }
     if (!w) {
@@ -449,6 +639,7 @@ static void begin_pass(void) {
     if (chunk < 0) { const char *e = ENV("LARECOMP_CHUNK_PASSES"); chunk = e ? atoi(e) : 8; }
     if (chunk > 0 && cmdbuf && ++g_passes_in_cb >= chunk) renderer_submit();
     enc = [cb() renderCommandEncoderWithDescriptor:rp];
+    opening_pass = false;
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;
 }
@@ -524,8 +715,58 @@ static void attachment_formats(MTLRenderPipelineDescriptor *pd) {
         if (st.rt.color[i] && st.rt.color[i]->samples > 1) pd.rasterSampleCount = st.rt.color[i]->samples;
 }
 
+// A full clear of texture t recorded for its next pass (an earlier one still recorded is replaced: it never ran).
+static void td_record(NvnTexture *t, bool is_color, int kind, const void *color, bool depth, float dval, bool stencil, uint32_t sval) {
+    renderer_mark_gpu_owned(t);  // (as the pass would: the guest copy is stale from here on)
+    TexDefer *e = td_get(t, true);
+    if (!e) return;
+    if (!e->clear_on) { td_pending++; e->clear_color = e->clear_depth = e->clear_stencil = false; }
+    e->clear_on = true;
+    if (is_color) {
+        e->clear_color = true;
+        for (int k = 0; k < 4; k++) e->cc[k] = kind == 0 ? ((const float *)color)[k] : kind == 1 ? ((const int32_t *)color)[k] : ((const uint32_t *)color)[k];
+    } else {
+        if (depth) { e->clear_depth = true; e->dval = dval; }
+        if (stencil) { e->clear_stencil = true; e->sval = sval; }
+    }
+}
+
+// (shader preparation) attachment_formats from a variant record: the formats the draw's targets would have
+static void attachment_formats_rec(MTLRenderPipelineDescriptor *pd, const ShaderRec *r) {
+    bool any = false;
+    for (int i = 0; i < r->ncolor && i < 8; i++)
+        if (r->color[i]) { pd.colorAttachments[i].pixelFormat = renderer_pixel_format(r->cview[i] ? r->cview[i] : r->color[i]); any = true; }
+    if (r->depth) {
+        MTLPixelFormat pf = renderer_pixel_format(r->depth);
+        if (renderer_format_is_depth(r->depth) && r->depth != 0x31) pd.depthAttachmentPixelFormat = pf;
+        if (renderer_format_has_stencil(r->depth)) pd.stencilAttachmentPixelFormat = pf;
+    }
+    if (any && r->samples > 1) pd.rasterSampleCount = r->samples;
+}
+
+// A full clear (whole target, every channel) while no pass is open on the current targets: recorded on the texture for
+// its next pass (see TexDefer). Partial clears, view clears and clears into an open pass stay quads.
+static bool record_clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil,
+                         uint32_t sval, uint32_t smask) {
+    static int on = -1;
+    if (on < 0) { const char *e = ENV("LARECOMP_MTL_LOAD_CLEAR"); on = !e || atoi(e); }
+    if (!on || (enc && !st.rt_dirty)) return false;
+    NvnTexture *t = index >= 0 ? (index < st.rt.ncolor ? st.rt.color[index] : NULL) : st.rt.depth;
+    if (!t) return false;
+    const int32_t *sc = st.scissor[0];
+    if (sc[0] != 0 || sc[1] != 0 || sc[2] < (int32_t)t->width || sc[3] < (int32_t)t->height) return false;
+    if (index >= 0 ? mask != 0xF : (!depth && !stencil) || (stencil && smask != 0xFF)) return false;
+    // (a view of one level or layer: the quad clears just that; a format view covers the whole texture)
+    const NvnTextureView *v = index >= 0 ? (st.rt.has_cview[index] ? &st.rt.cview[index] : NULL) : (st.rt.has_dview ? &st.rt.dview : NULL);
+    if (v && (((v->setmask & 1) && v->base_level) || ((v->setmask & 2) && v->min_layer))) return false;
+    td_record(t, index >= 0, kind, color, depth, dval, stencil, sval);
+    if (g_debug_frame) LOG("[clear] recorded idx %d depth %d (%g) stencil %d on texture %p\n", index, depth, dval, stencil, (void *)t);
+    return true;
+}
+
 static void clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil,
                   uint32_t sval, uint32_t smask) {
+    if (record_clear(index, kind, color, mask, depth, dval, stencil, sval, smask)) return;
     begin_pass();
     if (g_debug_frame) {
         int pw, ph;
@@ -802,51 +1043,194 @@ static int rt_kind(uint32_t f) {
 #define PROG_TAB 4096
 static struct { uint64_t key; void *prog; } prog_tab[PROG_TAB];
 
-// Shader warm-up cache: every translated shader's MSL is kept in cache/shaders/ (v_/f_<hash>.metal). At startup
-// they're all compiled once on a background queue, which fills Metal's own on-disk shader cache so that a later
-// first use in-game costs ~0.1 ms instead of ~40 ms. Delete cache/ to reset it.
-static uint64_t fnv64(const char *t) {
-    uint64_t h = 0xcbf29ce484222325ull;
-    for (; *t; t++) { h ^= (uint8_t)*t; h *= 0x100000001B3ull; }
-    return h;
+// ------------------------------------------------------------------ binary archive (off; LARECOMP_METAL_ARCHIVE=1: on)
+// Off by default (#52): on macOS 26 Metal's archive writer can crash in serializeToURL (dispatch_retain(NULL) in
+// materializeAirNTFromOnlineForSlice, seen on an M4) when an entry it queued lacks a part. The preparation keeps macOS's
+// own shader cache warm, so the archive only helped when that cache was cleared without a macOS update. Off, a file
+// left by an earlier build is removed. (A check of Metal's queued entries before saving: branch metal-archive-crash.)
+// cache/shaders.metalarchive: the GPU code of every pipeline built here (prepared or at first use), kept across runs
+// (MTLBinaryArchive), used only with a matching cache/shaders.metalarchive.tag (shader_cache_tag: this build, the
+// translator, the GPU and the macOS build; another one, or an archive that doesn't load: a new one, silently). Saved
+// (temp file + rename) when the preparation ends and 10 s after the last pipeline added at first use.
+// What it holds is the cheap half (pipelines from compiled functions: ~1 s of CPU for all 895 variants on an M3 Max);
+// compiling the MSL source into functions (~300 s of CPU when macOS's shader cache lost them) still goes through
+// macOS's cache. It loads in the background (3-6 s for 43 MB).
+// The MSL text cache (cache/shaders/*.metal + a boot warm-up compile) is gone: the preparation on every start keeps
+// macOS's cache warm for the listed variants; that folder is removed.
+#define ARCHIVE_FILE "cache/shaders.metalarchive"
+#define ARCHIVE_TAG ARCHIVE_FILE ".tag"
+static id<MTLBinaryArchive> g_archive;
+static _Atomic bool g_archive_ready;  // (loaded in the background: archive_open)
+static id<MTLBinaryArchive> archive_get(void) { return g_archive_ready ? g_archive : nil; }
+static pthread_rwlock_t g_archive_lock = PTHREAD_RWLOCK_INITIALIZER;  // adds: read side (any number); save: write side
+static _Atomic int g_archive_dirty, g_archive_hits, g_archive_adds;
+static _Atomic uint64_t g_pipe_us, g_lib_us, g_archive_open_us;  // (preparation's log: time in pipeline builds, library
+                                                                  // compiles - summed over threads - and the archive's load)
+static _Atomic uint64_t g_archive_gen;
+
+static void archive_tag(char *out, size_t n) {
+    char gpu[400];
+    snprintf(gpu, sizeof gpu, "%s, %s", dev.name.UTF8String, NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
+    shader_cache_tag(out, n, gpu);
 }
 
-static void shader_cache_note(const char *vs, const char *fs) {
-    static int made;
-    if (!made) { made = 1; mkdir("cache", 0755); mkdir("cache/shaders", 0755); }
-    const char *src[2] = {vs, fs};
-    for (int i = 0; i < 2; i++) {
-        char path[96];
-        snprintf(path, sizeof path, "cache/shaders/%c_%016llx.metal", i ? 'f' : 'v', (unsigned long long)fnv64(src[i]));
-        if (access(path, F_OK) == 0) continue;
-        FILE *f = fopen(path, "w");
-        if (f) { fputs(src[i], f); fclose(f); }
+static void remove_old_text_cache(void) {  // (cache/shaders/*.metal: up to ~130 MB on players' machines)
+    DIR *d = opendir("cache/shaders");
+    if (!d) return;
+    struct dirent *e;
+    int n = 0;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char path[300];
+        snprintf(path, sizeof path, "cache/shaders/%s", e->d_name);
+        n += unlink(path) == 0;
     }
+    closedir(d);
+    rmdir("cache/shaders");
+    LOG("[metal] removed the old shader text cache (%d files)\n", n);
 }
 
-void shader_cache_warm(void) {
-    static int started;
-    if (started++ || getenv("LARECOMP_NO_SHADER_WARM")) return;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        DIR *d = opendir("cache/shaders");
-        if (!d) return;
-        MTLCompileOptions *vopts = [MTLCompileOptions new];
-        vopts.preserveInvariance = YES;
+static void archive_save(bool at_exit) {
+    if (!archive_get() || !g_archive_dirty) return;
+    if (at_exit ? pthread_rwlock_trywrlock(&g_archive_lock) : pthread_rwlock_wrlock(&g_archive_lock)) return;
+    int adds = g_archive_dirty;
+    g_archive_dirty = 0;
+    double t0 = now_ms();
+    NSError *err = nil;
+    mkdir("cache", 0755);
+    remove(ARCHIVE_FILE ".tmp");
+    bool ok = [g_archive serializeToURL:[NSURL fileURLWithPath:@(ARCHIVE_FILE ".tmp")] error:&err];
+    pthread_rwlock_unlock(&g_archive_lock);
+    if (ok) ok = rename(ARCHIVE_FILE ".tmp", ARCHIVE_FILE) == 0;
+    if (!ok) { LOG("[metal] shader archive not saved: %s\n", err ? err.localizedDescription.UTF8String : "rename"); return; }
+    char tag[700];
+    archive_tag(tag, sizeof tag);
+    if (!shader_cache_tag_ok(ARCHIVE_TAG, tag)) shader_cache_tag_write(ARCHIVE_TAG, tag);
+    struct stat sb;
+    LOG("[metal] shader archive saved: %d new pipelines, %.1f MB, %.0f ms\n", adds,
+        stat(ARCHIVE_FILE, &sb) == 0 ? sb.st_size / 1048576.0 : 0.0, now_ms() - t0);
+}
+
+static void archive_exit(void) { archive_save(true); }
+
+// Loading a large archive takes seconds (3-5 s for ~900 pipelines, 43 MB, on an M3 Max) while macOS's own shader
+// cache usually still has them (~0.5 s for all): it loads in the background, and pipelines built before it's there
+// go through macOS's cache alone (the archive is for when that cache dropped them, ~20 s then).
+
+static void archive_publish(id<MTLBinaryArchive> a, double t0, bool loaded) {
+    g_archive = a;
+    g_archive_ready = a != nil;
+    g_archive_open_us = (uint64_t)((now_ms() - t0) * 1000);
+    struct stat sb;
+    if (loaded) LOG("[metal] shader archive loaded: %.1f MB in %.0f ms\n", stat(ARCHIVE_FILE, &sb) == 0 ? sb.st_size / 1048576.0 : 0.0,
+                    g_archive_open_us / 1e3);
+}
+
+static id<MTLBinaryArchive> archive_new(void) {
+    remove(ARCHIVE_FILE);
+    remove(ARCHIVE_TAG);
+    NSError *err = nil;
+    id<MTLBinaryArchive> a = [dev newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&err];
+    if (!a) LOG("[metal] no shader archive: %s\n", err.localizedDescription.UTF8String);
+    return a;
+}
+
+static void archive_open(void) {  // (at the first pipeline / preparation)
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
         double t0 = now_ms();
-        int n = 0;
-        struct dirent *e;
-        while ((e = readdir(d))) {
-            if (e->d_name[0] != 'v' && e->d_name[0] != 'f') continue;
-            char path[300];
-            snprintf(path, sizeof path, "cache/shaders/%s", e->d_name);
-            NSString *src = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
-            if (!src) continue;
-            @autoreleasepool { (void)[dev newLibraryWithSource:src options:e->d_name[0] == 'v' ? vopts : nil error:nil]; }
-            n++;
+        remove_old_text_cache();
+        remove(ARCHIVE_FILE ".tmp");  // (a save cut short: what it left - Metal writes <uuid>.metallib files beside it)
+        DIR *cd = opendir("cache");
+        if (cd) {
+            struct dirent *e;
+            while ((e = readdir(cd))) {
+                size_t l = strlen(e->d_name);
+                if (l == 36 + 9 && !strcmp(e->d_name + 36, ".metallib")) {
+                    char path[300];
+                    snprintf(path, sizeof path, "cache/%s", e->d_name);
+                    unlink(path);
+                }
+            }
+            closedir(cd);
         }
-        closedir(d);
-        LOG("[shader] warm-up: %d cached shaders compiled in %.0f ms\n", n, now_ms() - t0);
+        const char *on = getenv("LARECOMP_METAL_ARCHIVE");
+        if (!on || !atoi(on)) {
+            if (remove(ARCHIVE_FILE) == 0) LOG("[metal] removed the shader archive (off)\n");
+            remove(ARCHIVE_TAG);
+            return;
+        }
+        atexit(archive_exit);
+        char tag[700];
+        archive_tag(tag, sizeof tag);
+        bool have = access(ARCHIVE_FILE, F_OK) == 0;
+        if (!have || !shader_cache_tag_ok(ARCHIVE_TAG, tag)) {
+            if (have) LOG("[metal] shader archive from another build / GPU / macOS: a new one\n");
+            archive_publish(archive_new(), t0, false);
+            return;
+        }
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            MTLBinaryArchiveDescriptor *d = [MTLBinaryArchiveDescriptor new];
+            d.url = [NSURL fileURLWithPath:@(ARCHIVE_FILE)];
+            NSError *err = nil;
+            id<MTLBinaryArchive> a = [dev newBinaryArchiveWithDescriptor:d error:&err];
+            if (!a) LOG("[metal] shader archive unreadable (%s): a new one\n", err.localizedDescription.UTF8String);
+            archive_publish(a ? a : archive_new(), t0, a != nil);
+        });
     });
+}
+
+static void archive_added(void) {  // saved 10 s after the last add (first-use builds come in bursts)
+    g_archive_dirty++, g_archive_adds++;
+    uint64_t my = ++g_archive_gen;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (g_archive_gen == my) archive_save(false);
+    });
+}
+
+// A render / compute pipeline through the archive: loaded from it when it's there, else compiled into it (saved
+// later) and loaded. Any thread.
+static id<MTLRenderPipelineState> archive_render_pipeline_(MTLRenderPipelineDescriptor *pd, NSError **err) {
+    archive_open();
+    id<MTLBinaryArchive> archive = archive_get();
+    if (!archive) return [dev newRenderPipelineStateWithDescriptor:pd error:err];
+    pd.binaryArchives = @[archive];
+    id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithDescriptor:pd options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                                    reflection:nil error:nil];
+    if (ps) { g_archive_hits++; return ps; }
+    bool added = false;  // (not while a save runs: it can take a while - this one goes in a later run)
+    if (!pthread_rwlock_tryrdlock(&g_archive_lock)) {
+        added = [archive addRenderPipelineFunctionsWithDescriptor:pd error:nil];
+        pthread_rwlock_unlock(&g_archive_lock);
+    }
+    if (added) archive_added();
+    return [dev newRenderPipelineStateWithDescriptor:pd error:err];
+}
+
+static id<MTLRenderPipelineState> archive_render_pipeline(MTLRenderPipelineDescriptor *pd, NSError **err) {
+    double t0 = now_ms();
+    id<MTLRenderPipelineState> ps = archive_render_pipeline_(pd, err);
+    g_pipe_us += (uint64_t)((now_ms() - t0) * 1000);
+    return ps;
+}
+
+static id<MTLComputePipelineState> archive_compute_pipeline(id<MTLFunction> f, NSError **err) {
+    archive_open();
+    MTLComputePipelineDescriptor *cd = [MTLComputePipelineDescriptor new];
+    cd.computeFunction = f;
+    id<MTLBinaryArchive> archive = archive_get();
+    if (!archive) return [dev newComputePipelineStateWithDescriptor:cd options:MTLPipelineOptionNone reflection:nil error:err];
+    cd.binaryArchives = @[archive];
+    id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithDescriptor:cd options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                                      reflection:nil error:nil];
+    if (ps) { g_archive_hits++; return ps; }
+    bool added = false;  // (not while a save runs: it can take a while - this one goes in a later run)
+    if (!pthread_rwlock_tryrdlock(&g_archive_lock)) {
+        added = [archive addComputePipelineFunctionsWithDescriptor:cd error:nil];
+        pthread_rwlock_unlock(&g_archive_lock);
+    }
+    if (added) archive_added();
+    return [dev newComputePipelineStateWithDescriptor:cd options:MTLPipelineOptionNone reflection:nil error:err];
 }
 
 static bool sync_shaders(void) {  // LARECOMP_SYNC_SHADERS: compile on first use, blocking (deterministic tests)
@@ -867,6 +1251,7 @@ static void compile_program(Prog *pr) {
     if (!vl) { LOG("[shader] VS compile failed: %s\n%s\n", err.localizedDescription.UTF8String, pr->vi->msl); pr->failed = true; return; }
     id<MTLLibrary> fl = [dev newLibraryWithSource:[@(pr->fi->msl) stringByAppendingString:salt] options:nil error:&err];
     if (!fl) { LOG("[shader] FS compile failed: %s\n%s\n", err.localizedDescription.UTF8String, pr->fi->msl); pr->failed = true; return; }
+    g_lib_us += (uint64_t)((now_ms() - t0) * 1000);
     pr->vs = [vl newFunctionWithName:@"main0"];
     pr->fs = [fl newFunctionWithName:@"main0"];
     __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
@@ -875,8 +1260,68 @@ static void compile_program(Prog *pr) {
     pr->ready = true;
 }
 
+// Translates a program's two stages into pr (false: failed, logged). vaddr / faddr: the code's guest addresses
+// (debug names; 0 when preparing from the game files)
+static bool translate_program(Prog *pr, const uint8_t *vcode, size_t vmax, const uint8_t *fcode, size_t fmax,
+                              ShaderKey *vkey, ShaderKey *fkey, uint64_t vaddr, uint64_t faddr) {
+    maxwell_gmem_base = HEAP_BASE;
+    maxwell_gmem_size = HEAP_MAX;
+    pr->vi = maxwell_translate(vcode, vmax, STAGE_VERTEX, vkey);
+    if (!pr->vi->msl) {
+        LOG("[shader] VS translate failed: %s (code %llx)\n", pr->vi->error, vaddr);
+        if (vaddr) {
+            char path[128];
+            snprintf(path, sizeof path, "build/shaders/fail_%llx_s0_code.bin", vaddr);
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(vcode, 1, 0x4000, f); fclose(f); }
+        }
+        pr->failed = true;
+        return false;
+    }
+    fkey->vs_out_mask = pr->vi->out_mask;
+    pr->fi = maxwell_translate(fcode, fmax, STAGE_FRAGMENT, fkey);
+    if (!pr->fi->msl) { LOG("[shader] FS translate failed: %s\n", pr->fi->error); pr->failed = true; return false; }
+    if (getenv("LARECOMP_SAVE_MSL") && vaddr) {
+        mkdir("build/msl", 0755);
+        char path[256];
+        snprintf(path, sizeof path, "build/msl/%llx_vs.metal", vaddr);
+        FILE *f = fopen(path, "w"); fputs(pr->vi->msl, f); fclose(f);
+        snprintf(path, sizeof path, "build/msl/%llx_fs.metal", faddr);
+        f = fopen(path, "w"); fputs(pr->fi->msl, f); fclose(f);
+    }
+    return true;
+}
+
+// ------------------------------------------------------------------ prepared objects (shader_prep.h)
+// Built before the game from the shipped variant list; found by content (code hashes + keys) at first use, as code
+// addresses differ from run to run. Kept for the whole process (reboots included). g_prep_lock guards the tables.
+static pthread_mutex_t g_prep_lock = PTHREAD_MUTEX_INITIALIZER;
+static NSMutableDictionary<NSNumber *, Prog *> *g_prep_progs;  // program content key -> Prog
+static NSMutableDictionary<NSString *, id> *g_prep_pipes;       // pipeline key (pipeline_key) -> pipeline state
+static NSMutableDictionary<NSNumber *, NSValue *> *g_prep_cs;   // compute content key -> CsProg
+static _Atomic int g_prep_pending;                              // builds still running
+static dispatch_queue_t g_prep_queue;
+
+static uint64_t prog_content_key(uint64_t vh, uint64_t fh, const ShaderKey *vkey, const ShaderKey *fkey) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    const uint64_t c[2] = {vh, fh};
+    const uint8_t *b = (const uint8_t *)c;
+    for (size_t i = 0; i < sizeof c; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
+    b = (const uint8_t *)vkey;
+    for (size_t i = 0; i < sizeof *vkey; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
+    for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    return h;
+}
+
+static Prog *prep_find_prog(uint64_t k) {
+    if (!g_prep_progs) return nil;
+    pthread_mutex_lock(&g_prep_lock);
+    Prog *pr = g_prep_progs[@(k)];
+    pthread_mutex_unlock(&g_prep_lock);
+    return pr;
+}
+
 static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
-    shader_cache_warm();
     if (!(p->stage_mask & 1) || !(p->stage_mask & 2)) return nil;
     // fast path: hash of the code addresses and keys
     uint64_t h = 0xcbf29ce484222325ull;
@@ -888,10 +1333,20 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
     if (prog_tab[slot].key) { Prog *fp = (__bridge Prog *)prog_tab[slot].prog; return fp->failed ? nil : fp; }
-    NSString *key = [NSString stringWithFormat:@"%llx/%llx/%@/%@%s", p->stages[0].code_addr, p->stages[1].code_addr,
-                     [NSData dataWithBytes:vkey length:sizeof *vkey], [NSData dataWithBytes:fkey->rt_kind length:8],
-                     vkey->flip_x ? "/mirror" : ""];  // (NSData's description elides the middle of the key's bytes)
+    // (every byte of the keys, in hex: NSData's description shows only the first 16 and last 8 bytes of the 52-byte
+    // key, so variants differing in attr_kind[16..], depth_minus_one, flip_y or a later field shared one entry -
+    // whichever variant came first served the others)
+    char kb[2 * (sizeof *vkey + 8) + 1], *kp = kb;
+    for (size_t i = 0; i < sizeof *vkey; i++) kp += snprintf(kp, 3, "%02x", vb[i]);
+    for (int i = 0; i < 8; i++) kp += snprintf(kp, 3, "%02x", fkey->rt_kind[i]);
+    NSString *key = [NSString stringWithFormat:@"%llx/%llx/%s", p->stages[0].code_addr, p->stages[1].code_addr, kb];
     Prog *pr = cache[key];
+    if (!pr) {  // prepared before the game (the same code and keys)
+        uint64_t vh = shader_stage_hash(&p->stages[0]), fh = shader_stage_hash(&p->stages[1]), ck = prog_content_key(vh, fh, vkey, fkey);
+        pr = vh && fh ? prep_find_prog(ck) : nil;
+        if (pr) cache[key] = pr;
+        else shader_first_visit("program", vh, fh, ck);
+    }
     if (pr) {
         prog_tab[slot].key = h;
         prog_tab[slot].prog = (__bridge void *)pr;
@@ -902,8 +1357,6 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     prog_tab[slot].key = h;
     prog_tab[slot].prog = (__bridge void *)pr;  // retained by the cache dictionary
     dump_program(p);
-    maxwell_gmem_base = HEAP_BASE;
-    maxwell_gmem_size = HEAP_MAX;
     {
         // LARECOMP_DBG_FS=<fs code addr hex>:<pc hex>:<reg>
         static int parsed;
@@ -922,28 +1375,10 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     // the compiler constants follow the code, so they bound the instruction scan
     size_t vmax = p->stages[0].const_offset ? p->stages[0].const_offset : 0x10000;
     size_t fmax = p->stages[1].const_offset ? p->stages[1].const_offset : 0x10000;
-    pr->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->stages[0].code_addr, vmax, STAGE_VERTEX, vkey);
-    if (!pr->vi->msl) {
-        LOG("[shader] VS translate failed: %s (code %llx)\n", pr->vi->error, p->stages[0].code_addr);
-        char path[128];
-        snprintf(path, sizeof path, "build/shaders/fail_%llx_s0_code.bin", p->stages[0].code_addr);
-        FILE *f = fopen(path, "wb");
-        if (f) { fwrite((void *)(uintptr_t)p->stages[0].code_addr, 1, 0x4000, f); fclose(f); }
-        pr->failed = true;
+    if (!translate_program(pr, (const uint8_t *)(uintptr_t)p->stages[0].code_addr, vmax,
+                           (const uint8_t *)(uintptr_t)p->stages[1].code_addr, fmax, vkey, fkey,
+                           p->stages[0].code_addr, p->stages[1].code_addr))
         return nil;
-    }
-    fkey->vs_out_mask = pr->vi->out_mask;
-    pr->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->stages[1].code_addr, fmax, STAGE_FRAGMENT, fkey);
-    if (!pr->fi->msl) { LOG("[shader] FS translate failed: %s\n", pr->fi->error); pr->failed = true; return nil; }
-    if (getenv("LARECOMP_SAVE_MSL")) {
-        mkdir("build/msl", 0755);
-        char path[256];
-        snprintf(path, sizeof path, "build/msl/%llx_vs.metal", p->stages[0].code_addr);
-        FILE *f = fopen(path, "w"); fputs(pr->vi->msl, f); fclose(f);
-        snprintf(path, sizeof path, "build/msl/%llx_fs.metal", p->stages[1].code_addr);
-        f = fopen(path, "w"); fputs(pr->fi->msl, f); fclose(f);
-    }
-    shader_cache_note(pr->vi->msl, pr->fi->msl);
     if (sync_shaders()) {
         compile_program(pr);
         return pr->failed ? nil : pr;
@@ -1194,6 +1629,16 @@ static void bind_textures(int stage, ShaderInfo *si) {
                 extern bool texpatch_is_item_cursor(int id);
                 int id = renderer_texpatch_of(e->tex);
                 if (!draw_bottle) draw_bottle = texpatch_bottle_kind(id);
+                if (texpatch_bottle_kind(id) == 1) {  // the Hint Sheet: the dungeon map's icon in place (hint_sheet.c)
+                    extern bool hint_sheet_icon_draw(const float *ui, uint32_t ui_size);
+                    extern NvnTexture *texpatch_hint_icon(void);
+                    NvnTexture *ht;
+                    if (hint_sheet_icon_draw((const float *)(uintptr_t)st.ubuf[0][0].addr, (uint32_t)st.ubuf[0][0].size) &&
+                        (ht = texpatch_hint_icon())) {
+                        static NvnTextureView none;
+                        tex = sampled_texture(ht, &none, false, st_->type);
+                    }
+                }
                 if (!draw_heart) draw_heart = texpatch_heart_kind(id);
                 draw_item_cursor |= texpatch_is_item_cursor(id);
             }
@@ -1324,8 +1769,50 @@ static void bind_cbufs(int stage, ShaderInfo *si) {
 // Compute driver constants (c0): 0x200 work group counts, 0x210 + 16*i uniform buffers (compute has
 // few hardware cbuf slots, so the compiler reads the rest through global memory), 0x310 + 16*i
 // storage buffers; each table entry is {addr_lo, addr_hi, size, 0}.
-typedef struct { id<MTLComputePipelineState> pipe; ShaderInfo *si; uint32_t local[3]; bool failed; } CsProg;
+typedef struct {
+    id<MTLComputePipelineState> pipe;
+    ShaderInfo *si;
+    uint32_t local[3];
+    uint64_t code_addr;
+    bool failed;
+    _Atomic bool ready;  // pipeline built (async compile: dispatches are skipped until then, as draws are)
+} CsProg;
 static NSMutableDictionary *g_cs_progs;  // code address -> CsProg
+
+static void compile_compute(CsProg *cp) {
+    NSError *err = nil;
+    double t0 = now_ms();
+    NSString *salt = getenv("LARECOMP_SHADER_SALT") ? [NSString stringWithFormat:@"\n// %s\n", getenv("LARECOMP_SHADER_SALT")] : @"";
+    id<MTLLibrary> lib = [dev newLibraryWithSource:[@(cp->si->msl) stringByAppendingString:salt] options:nil error:&err];
+    id<MTLFunction> f = lib ? [lib newFunctionWithName:@"main0"] : nil;
+    id<MTLComputePipelineState> pipe = f ? archive_compute_pipeline(f, &err) : nil;
+    @synchronized(cache) { stat_compile_ms += now_ms() - t0; }
+    __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
+    if (!pipe) {
+        LOG("[compute] compile failed: %s\n%s\n", err.localizedDescription.UTF8String, cp->si->msl);
+        cp->failed = true;
+        return;
+    }
+    cp->pipe = pipe;
+    if (cp->code_addr) LOG("[compute] program %llx: local size %ux%ux%u, cbufs mask %#x\n", cp->code_addr, cp->local[0], cp->local[1],
+        cp->local[2], cp->si->cbuf_mask);
+    cp->ready = true;
+}
+
+static uint64_t cs_content_key(uint64_t code_hash, const uint32_t local[3]) {
+    uint64_t h = code_hash;
+    for (int i = 0; i < 3; i++) { h ^= local[i]; h *= 0x100000001B3ull; }
+    return h;
+}
+
+static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max) {
+    maxwell_gmem_base = HEAP_BASE;
+    maxwell_gmem_size = HEAP_MAX;
+    ShaderKey k = {0};
+    cp->si = maxwell_translate(code, max, STAGE_COMPUTE, &k);
+    if (!cp->si->msl) { LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, cp->code_addr); cp->failed = true; return false; }
+    return true;
+}
 
 static CsProg *compute_program(NvnProgram *p) {
     NvnShaderStage *ss = &p->stages[5];
@@ -1335,28 +1822,39 @@ static CsProg *compute_program(NvnProgram *p) {
     if (!progs) progs = g_cs_progs = [NSMutableDictionary new];
     NSValue *v = progs[key];
     if (v) { CsProg *cp = v.pointerValue; return cp->failed ? NULL : cp; }
+    uint32_t local[3];
+    for (int i = 0; i < 3; i++) {
+        local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
+        if (!local[i]) local[i] = 1;
+    }
+    if (shader_rec_recording()) {
+        ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {local[0], local[1], local[2]}};
+        shader_rec_note(&rec);
+    }
+    {   // prepared before the game (the same code and local size)
+        uint64_t ch = shader_stage_hash(ss);
+        CsProg *pc = NULL;
+        if (ch && g_prep_cs) {
+            pthread_mutex_lock(&g_prep_lock);
+            pc = [g_prep_cs[@(cs_content_key(ch, local))] pointerValue];
+            pthread_mutex_unlock(&g_prep_lock);
+        }
+        if (pc) { progs[key] = [NSValue valueWithPointer:pc]; return pc->failed ? NULL : pc; }
+        shader_first_visit("compute", ch, 0, cs_content_key(ch, local));
+    }
     CsProg *cp = calloc(1, sizeof *cp);
     progs[key] = [NSValue valueWithPointer:cp];
-    maxwell_gmem_base = HEAP_BASE;
-    maxwell_gmem_size = HEAP_MAX;
-    ShaderKey k = {0};
-    cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
-    if (!cp->si->msl) { LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, ss->code_addr); cp->failed = true; return NULL; }
-    for (int i = 0; i < 3; i++) {
-        cp->local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
-        if (!cp->local[i]) cp->local[i] = 1;
+    cp->code_addr = ss->code_addr;
+    memcpy(cp->local, local, sizeof local);
+    if (!translate_compute(cp, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000)) return NULL;
+    if (sync_shaders()) {
+        compile_compute(cp);
+        return cp->failed ? NULL : cp;
     }
-    NSError *err = nil;
-    id<MTLLibrary> lib = TIMED_COMPILE([dev newLibraryWithSource:@(cp->si->msl) options:nil error:&err]);
-    id<MTLFunction> f = lib ? [lib newFunctionWithName:@"main0"] : nil;
-    cp->pipe = f ? TIMED_COMPILE([dev newComputePipelineStateWithFunction:f error:&err]) : nil;
-    if (!cp->pipe) {
-        LOG("[compute] compile failed: %s\n%s\n", err.localizedDescription.UTF8String, cp->si->msl);
-        cp->failed = true;
-        return NULL;
-    }
-    LOG("[compute] program %llx: local size %ux%ux%u, %d cbufs mask %#x\n", ss->code_addr, cp->local[0], cp->local[1],
-        cp->local[2], 0, cp->si->cbuf_mask);
+    // compiled off the render thread, as graphics programs are (get_program): the first dispatches are skipped
+    static dispatch_queue_t q;
+    if (!q) q = dispatch_queue_create("larecomp.compute", DISPATCH_QUEUE_CONCURRENT);
+    dispatch_async(q, ^{ compile_compute(cp); });
     return cp;
 }
 
@@ -1365,11 +1863,13 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
     if (!cp) return;
+    if (!cp->ready) { stat_skipped++; return; }
     static int trace = -1;
     if (trace < 0) trace = getenv("LARECOMP_TRACE_CS") != NULL;
 #define CST(x) do { if (trace) { fprintf(stderr, "[cs] %s\n", x); fflush(stderr); } } while (0)
     CST("end_pass");
     end_pass();
+    td_flush_shader_textures(5, cp->si);
     CST("encoder");
     id<MTLComputeCommandEncoder> ce = [cb() computeCommandEncoder];
     CST("pipeline");
@@ -1610,6 +2110,127 @@ static uint64_t pipeline_state_hash(Prog *pr) {
     return h ? h : 1;
 }
 
+// The draw's state as a variant record (shader_prep.h): what its program and pipeline depend on, in NVN terms
+static void rec_from_state(ShaderRec *r, bool flip_x, uint32_t mode) {
+    memset(r, 0, sizeof *r);
+    r->kind = 'G';
+    r->vs = shader_stage_hash(&st.program->stages[0]);
+    r->fs = shader_stage_hash(&st.program->stages[1]);
+    r->flags = (nvn_window_origin() == 0 ? SR_FLIP_Y : 0) | (nvn_depth_mode() == 0 ? SR_DEPTH_MINUS_ONE : 0) | (flip_x ? SR_FLIP_X : 0);
+    r->nattrib = (uint8_t)(st.nattrib < 16 ? st.nattrib : 16);
+    memcpy(r->attrib, st.attrib, sizeof r->attrib[0] * r->nattrib);
+    r->nstream = (uint8_t)(st.nstream < 16 ? st.nstream : 16);
+    memcpy(r->stream, st.stream, sizeof r->stream[0] * r->nstream);
+    r->ncolor = (uint8_t)(st.rt.ncolor < 8 ? st.rt.ncolor : 8);
+    r->samples = 1;
+    for (int i = 0; i < r->ncolor; i++) {
+        NvnTexture *t = st.rt.color[i];
+        if (!t) continue;
+        r->color[i] = t->format;
+        if (st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4)) r->cview[i] = st.rt.cview[i].format;
+        if (t->samples > 1) r->samples = t->samples;
+        r->channel_mask |= st.channel_mask & (0xFu << (i * 4));
+        if (((st.color_state[0] >> i) & 1) && !rt_kind(t->format)) {
+            r->blend_on |= (uint8_t)(1u << i);
+            memcpy(r->blend[i], st.blend[i], 8);
+        }
+    }
+    if (st.rt.depth) {
+        r->depth = st.rt.depth->format;
+        if (!r->ncolor && st.rt.depth->samples > 1) r->samples = st.rt.depth->samples;
+    }
+    r->a2c = st.ms[0xC] != 0;
+    r->topo = shader_topo_class(mode);
+    r->poly_fill = st.poly[2] != 1;
+}
+
+// The pipeline a draw needs: everything but the attachment formats (attachment_formats / attachment_formats_rec),
+// from the variant record of the draw's state (rec_from_state) or of the shipped list (renderer_prepare)
+static void pipeline_desc(MTLRenderPipelineDescriptor *pd, Prog *pr, const ShaderRec *r) {
+    pd.vertexFunction = pr->vs;
+    pd.fragmentFunction = pr->fs;
+    MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
+    uint32_t used_streams = 0;
+    for (int i = 0; i < 32; i++) {
+        if (!(pr->vi->attr_mask & (1u << i))) continue;
+        uint32_t a = i < r->nattrib ? r->attrib[i] : 0x2E;
+        uint32_t fmt = a & 0xFF, stream = (a >> 8) & 0x1F, off = a >> 13;
+        if (i >= r->nattrib || fmt == 0) {
+            // unbound attribute: read zeros from a constant stream
+            vd.attributes[i].format = MTLVertexFormatFloat4;
+            vd.attributes[i].offset = 0;
+            vd.attributes[i].bufferIndex = 30;
+            vd.layouts[30].stepFunction = MTLVertexStepFunctionConstant;
+            vd.layouts[30].stepRate = 0;
+            vd.layouts[30].stride = 16;
+            used_streams |= 1u << 31;
+            continue;
+        }
+        vd.attributes[i].format = vertex_format(fmt);
+        vd.attributes[i].offset = off;
+        vd.attributes[i].bufferIndex = 18 + stream;
+        used_streams |= 1u << stream;
+    }
+    for (int s = 0; s < 12; s++) {
+        if (!(used_streams & (1u << s))) continue;
+        uint32_t stride = s < r->nstream ? r->stream[s][0] : 0, div = s < r->nstream ? r->stream[s][1] : 0;
+        if (stride == 0) { vd.layouts[18 + s].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[18 + s].stepRate = 0; vd.layouts[18 + s].stride = 16; }
+        else {
+            vd.layouts[18 + s].stride = (stride + 3) & ~3u;
+            if (div) { vd.layouts[18 + s].stepFunction = MTLVertexStepFunctionPerInstance; vd.layouts[18 + s].stepRate = div; }
+        }
+    }
+    pd.vertexDescriptor = vd;
+    for (int i = 0; i < r->ncolor; i++) {
+        if (!r->color[i]) continue;
+        MTLRenderPipelineColorAttachmentDescriptor *ca = pd.colorAttachments[i];
+        uint32_t m = (r->channel_mask >> (i * 4)) & 0xF;
+        ca.writeMask = (m & 1 ? MTLColorWriteMaskRed : 0) | (m & 2 ? MTLColorWriteMaskGreen : 0) |
+                       (m & 4 ? MTLColorWriteMaskBlue : 0) | (m & 8 ? MTLColorWriteMaskAlpha : 0);
+        if ((r->blend_on >> i) & 1) {  // (the record leaves out blending on integer targets)
+            const uint8_t *b = r->blend[i];
+            ca.blendingEnabled = YES;
+            ca.sourceRGBBlendFactor = blend_factor(b[1]);
+            ca.destinationRGBBlendFactor = blend_factor(b[2]);
+            ca.sourceAlphaBlendFactor = blend_factor(b[3]);
+            ca.destinationAlphaBlendFactor = blend_factor(b[4]);
+            ca.rgbBlendOperation = blend_op(b[5]);
+            ca.alphaBlendOperation = blend_op(b[6]);
+        }
+    }
+    pd.alphaToCoverageEnabled = r->a2c != 0;
+}
+
+// What makes a pipeline (the descriptor's contents): the key of the pipeline caches. (Without the boot generation:
+// draws prefix it, prepared pipelines' functions live as long as the process.)
+static NSString *pipeline_key(MTLRenderPipelineDescriptor *pd, Prog *pr) {
+    NSMutableString *pk = [NSMutableString stringWithFormat:@"%p %p %lu %lu", pr->vs, pr->fs,
+                           (unsigned long)pd.depthAttachmentPixelFormat, (unsigned long)pd.stencilAttachmentPixelFormat];
+    for (int i = 0; i < 8; i++) {
+        MTLRenderPipelineColorAttachmentDescriptor *ca = pd.colorAttachments[i];
+        [pk appendFormat:@" %lu/%lu/%d/%lu/%lu/%lu/%lu/%lu/%lu", (unsigned long)ca.pixelFormat, (unsigned long)ca.writeMask,
+                         ca.blendingEnabled, (unsigned long)ca.sourceRGBBlendFactor, (unsigned long)ca.destinationRGBBlendFactor,
+                         (unsigned long)ca.sourceAlphaBlendFactor, (unsigned long)ca.destinationAlphaBlendFactor,
+                         (unsigned long)ca.rgbBlendOperation, (unsigned long)ca.alphaBlendOperation];
+    }
+    MTLVertexDescriptor *vd = pd.vertexDescriptor;
+    for (int i = 0; i < 32; i++)
+        if (pr->vi->attr_mask & (1u << i))
+            [pk appendFormat:@" a%d:%lu/%lu/%lu", i, (unsigned long)vd.attributes[i].format, (unsigned long)vd.attributes[i].offset, (unsigned long)vd.attributes[i].bufferIndex];
+    for (int s = 18; s < 31; s++)
+        [pk appendFormat:@" l%lu/%lu/%lu", (unsigned long)vd.layouts[s].stride, (unsigned long)vd.layouts[s].stepFunction, (unsigned long)vd.layouts[s].stepRate];
+    [pk appendFormat:@" s%lu a%d", (unsigned long)pd.rasterSampleCount, pd.alphaToCoverageEnabled];
+    return pk;
+}
+
+static id prep_find_pipe(NSString *body) {
+    if (!g_prep_pipes) return nil;
+    pthread_mutex_lock(&g_prep_lock);
+    id p = g_prep_pipes[body];
+    pthread_mutex_unlock(&g_prep_lock);
+    return p;
+}
+
 static void draw(CmdRec *r, bool indexed) {
     if (!st.program) { stat_skipped++; return; }
     static bool logged_modes;
@@ -1697,6 +2318,7 @@ static void draw(CmdRec *r, bool indexed) {
     if (g_debug_frame || addr_hit || (log_rt_w && st.rt.ncolor && st.rt.color[0] && (int)st.rt.color[0]->width == log_rt_w &&
                           (int)st.rt.color[0]->height == log_rt_h))
         debug_draw(pr, r, indexed);
+    if (td_pending) { td_flush_shader_textures(0, pr->vi); td_flush_shader_textures(1, pr->fi); }
     resolve_feedback(pr);
     // this draw's writes make snapshots of its attachments stale
     snap_reason = "draw-depthwrite";
@@ -1720,76 +2342,13 @@ static void draw(CmdRec *r, bool indexed) {
     while (pipe_tab[pslot].key && pipe_tab[pslot].key != phash) pslot = (pslot + 1) & (PIPE_TAB - 1);
     id<MTLRenderPipelineState> pipe = pipe_tab[pslot].key ? (__bridge id<MTLRenderPipelineState>)pipe_tab[pslot].pipe : nil;
     if (!pipe) {
+    ShaderRec rec;
+    rec_from_state(&rec, vkey.flip_x, (uint32_t)r->x[0]);
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-    pd.vertexFunction = pr->vs;
-    pd.fragmentFunction = pr->fs;
     attachment_formats(pd);
-    MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
-    for (int i = 0; i < 32; i++) {
-        if (!(pr->vi->attr_mask & (1u << i))) continue;
-        uint32_t a = i < st.nattrib ? st.attrib[i] : 0x2E;
-        uint32_t fmt = a & 0xFF, stream = (a >> 8) & 0x1F, off = a >> 13;
-        if (i >= st.nattrib || fmt == 0) {
-            // unbound attribute: read zeros from a constant stream
-            vd.attributes[i].format = MTLVertexFormatFloat4;
-            vd.attributes[i].offset = 0;
-            vd.attributes[i].bufferIndex = 30;
-            vd.layouts[30].stepFunction = MTLVertexStepFunctionConstant;
-            vd.layouts[30].stepRate = 0;
-            vd.layouts[30].stride = 16;
-            used_streams |= 1u << 31;
-            continue;
-        }
-        vd.attributes[i].format = vertex_format(fmt);
-        vd.attributes[i].offset = off;
-        vd.attributes[i].bufferIndex = 18 + stream;
-        used_streams |= 1u << stream;
-        (void)is_int_format;
-    }
-    for (int s = 0; s < 12; s++) {
-        if (!(used_streams & (1u << s))) continue;
-        uint32_t stride = s < st.nstream ? st.stream[s][0] : 0, div = s < st.nstream ? st.stream[s][1] : 0;
-        if (stride == 0) { vd.layouts[18 + s].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[18 + s].stepRate = 0; vd.layouts[18 + s].stride = 16; }
-        else {
-            vd.layouts[18 + s].stride = (stride + 3) & ~3u;
-            if (div) { vd.layouts[18 + s].stepFunction = MTLVertexStepFunctionPerInstance; vd.layouts[18 + s].stepRate = div; }
-        }
-    }
-    pd.vertexDescriptor = vd;
-    for (int i = 0; i < st.rt.ncolor && i < 8; i++) {
-        if (!st.rt.color[i]) continue;
-        MTLRenderPipelineColorAttachmentDescriptor *ca = pd.colorAttachments[i];
-        uint32_t m = (st.channel_mask >> (i * 4)) & 0xF;
-        ca.writeMask = (m & 1 ? MTLColorWriteMaskRed : 0) | (m & 2 ? MTLColorWriteMaskGreen : 0) |
-                       (m & 4 ? MTLColorWriteMaskBlue : 0) | (m & 8 ? MTLColorWriteMaskAlpha : 0);
-        bool blend_on = (st.color_state[0] >> i) & 1;
-        if (blend_on && !rt_kind(st.rt.color[i]->format)) {
-            uint8_t *b = st.blend[i];
-            ca.blendingEnabled = YES;
-            ca.sourceRGBBlendFactor = blend_factor(b[1]);
-            ca.destinationRGBBlendFactor = blend_factor(b[2]);
-            ca.sourceAlphaBlendFactor = blend_factor(b[3]);
-            ca.destinationAlphaBlendFactor = blend_factor(b[4]);
-            ca.rgbBlendOperation = blend_op(b[5]);
-            ca.alphaBlendOperation = blend_op(b[6]);
-        }
-    }
-    pd.alphaToCoverageEnabled = st.ms[0xC] != 0;
-    NSMutableString *pk = [NSMutableString stringWithFormat:@"%u %p %p %lu %lu", g_boot_gen, pr->vs, pr->fs,
-                           (unsigned long)pd.depthAttachmentPixelFormat, (unsigned long)pd.stencilAttachmentPixelFormat];
-    for (int i = 0; i < 8; i++) {
-        MTLRenderPipelineColorAttachmentDescriptor *ca = pd.colorAttachments[i];
-        [pk appendFormat:@" %lu/%lu/%d/%lu/%lu/%lu/%lu/%lu/%lu", (unsigned long)ca.pixelFormat, (unsigned long)ca.writeMask,
-                         ca.blendingEnabled, (unsigned long)ca.sourceRGBBlendFactor, (unsigned long)ca.destinationRGBBlendFactor,
-                         (unsigned long)ca.sourceAlphaBlendFactor, (unsigned long)ca.destinationAlphaBlendFactor,
-                         (unsigned long)ca.rgbBlendOperation, (unsigned long)ca.alphaBlendOperation];
-    }
-    for (int i = 0; i < 32; i++)
-        if (pr->vi->attr_mask & (1u << i))
-            [pk appendFormat:@" a%d:%lu/%lu/%lu", i, (unsigned long)vd.attributes[i].format, (unsigned long)vd.attributes[i].offset, (unsigned long)vd.attributes[i].bufferIndex];
-    for (int s = 18; s < 31; s++)
-        [pk appendFormat:@" l%lu/%lu/%lu", (unsigned long)vd.layouts[s].stride, (unsigned long)vd.layouts[s].stepFunction, (unsigned long)vd.layouts[s].stepRate];
-    [pk appendFormat:@" s%lu a%d", (unsigned long)pd.rasterSampleCount, pd.alphaToCoverageEnabled];
+    pipeline_desc(pd, pr, &rec);
+    NSString *body = pipeline_key(pd, pr);
+    NSString *pk = [NSString stringWithFormat:@"%u %@", g_boot_gen, body];
     id pobj = cache[pk];
     NSMutableDictionary *ready_pipes = g_ready_pipes;  // async pipeline builds finished on Metal's threads
     static id pending;
@@ -1802,9 +2361,15 @@ static void draw(CmdRec *r, bool indexed) {
         if (pobj == pending) { stat_skipped++; return; }
     }
     if (!pobj) {
+        if (shader_rec_recording()) shader_rec_note(&rec);
+        pobj = prep_find_pipe(body);  // prepared before the game
+        if (pobj) cache[pk] = pobj;
+        else shader_first_visit("pipeline", rec.vs, rec.fs, shader_code_hash((const uint8_t *)body.UTF8String, body.length));
+    }
+    if (!pobj) {
         if (sync_shaders()) {
             NSError *err;
-            pobj = TIMED_COMPILE([dev newRenderPipelineStateWithDescriptor:pd error:&err]);
+            pobj = TIMED_COMPILE(archive_render_pipeline(pd, &err));
             if (!pobj) {
                 static int n;
                 if (n++ < 10) LOG("[metal] pipeline failed: %s\n", err.localizedDescription.UTF8String);
@@ -1815,12 +2380,16 @@ static void draw(CmdRec *r, bool indexed) {
             cache[pk] = pending;
             NSString *k = [pk copy];
             double t0 = now_ms();
-            [dev newRenderPipelineStateWithDescriptor:pd completionHandler:^(id<MTLRenderPipelineState> ps, NSError *e) {
+            static dispatch_queue_t pq;  // (off the render thread; through the binary archive)
+            if (!pq) pq = dispatch_queue_create("larecomp.pipelines", DISPATCH_QUEUE_CONCURRENT);
+            dispatch_async(pq, ^{
+                NSError *e = nil;
+                id<MTLRenderPipelineState> ps = archive_render_pipeline(pd, &e);
                 if (!ps) { static int n; if (n++ < 10) LOG("[metal] pipeline failed: %s\n", e.localizedDescription.UTF8String); }
                 @synchronized(ready_pipes) { ready_pipes[k] = ps ? (id)ps : (id)[NSNull null]; }
                 @synchronized(cache) { stat_compile_ms += now_ms() - t0; }
                 __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
-            }];
+            });
             stat_skipped++;
             return;
         }
@@ -1832,22 +2401,42 @@ static void draw(CmdRec *r, bool indexed) {
     }
     [enc setRenderPipelineState:pipe];
 
+    // Decal colour passes (issue #52): the game draws floor decals twice with the same negative polygon offset - a
+    // depth pre-pass, then the colour pass with depth test EQUAL and no depth writes. An M4 (macOS 26.4) lands the two
+    // passes' biased depths a hair apart, so EQUAL failed: black decals. Those colour passes run as LESS_EQUAL with
+    // LARECOMP_BIAS_HW_SCALE times the game's offset (default 2) plus LARECOMP_BIAS_HW_EPS units (default 4): on or in
+    // front of their pre-pass. The margin is what the decal's colour may show through: anything in front of the decal
+    // by less than it. Key Cavern's entrance threshold (a slab just above the floor's border decal) showed it from
+    // 64 units / 4x the offset on; 256 units (the first try) drew the border over the slab. SCALE=1 EPS=0: as before.
+    static int nobias = -1;  // LARECOMP_NO_DEPTH_BIAS: ignore the game's polygon offset (A/B tests)
+    if (nobias < 0) nobias = getenv("LARECOMP_NO_DEPTH_BIAS") != NULL;
+    static float hw_scale = -1, hw_eps;
+    if (hw_scale < 0) {
+        hw_scale = getenv("LARECOMP_BIAS_HW_SCALE") ? fmaxf(1, (float)atof(getenv("LARECOMP_BIAS_HW_SCALE"))) : 2;
+        hw_eps = getenv("LARECOMP_BIAS_HW_EPS") ? fmaxf(0, (float)atof(getenv("LARECOMP_BIAS_HW_EPS"))) : 4;
+    }
+    bool decal_le = (hw_scale > 1 || hw_eps > 0) && (st.poly[3] & 4) && !nobias &&
+                    (st.poly_offset[0] < 0 || st.poly_offset[1] < 0) && st.ds[0] && !st.ds[1] && st.ds[2] == 3;
     // depth / stencil
     static uint64_t last_dsk;
     static id<MTLDepthStencilState> last_dss;
-    uint64_t dsk = hmix(hmix(hmix(0xcbf29ce484222325ull, st.ds, 8), st.stencil_mask, sizeof st.stencil_mask), st.stencil_vmask, sizeof st.stencil_vmask);
+    uint64_t dsk = hmix(hmix(hmix(0xcbf29ce484222325ull, st.ds, 8), st.stencil_mask, sizeof st.stencil_mask), st.stencil_vmask, sizeof st.stencil_vmask) ^ decal_le;
     id<MTLDepthStencilState> dss = dsk == last_dsk ? last_dss : nil;
     NSString *dk = nil;
     if (!dss) {
-        dk = [NSString stringWithFormat:@"ds %02x%02x%02x%02x%02x%02x%02x%02x %x %x %x %x", st.ds[0], st.ds[1], st.ds[2], st.ds[3],
-                    st.ds[4], st.ds[5], st.ds[6], st.ds[7], st.stencil_mask[0], st.stencil_vmask[0], st.stencil_mask[1], st.stencil_vmask[1]];
+        dk = [NSString stringWithFormat:@"ds %02x%02x%02x%02x%02x%02x%02x%02x %x %x %x %x%s", st.ds[0], st.ds[1], st.ds[2], st.ds[3],
+                    st.ds[4], st.ds[5], st.ds[6], st.ds[7], st.stencil_mask[0], st.stencil_vmask[0], st.stencil_mask[1], st.stencil_vmask[1],
+                    decal_le ? " le" : ""];
         dss = cache[dk];
     }
     if (!dss) {
         MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
         static int nodt = -1;
         if (nodt < 0) nodt = getenv("LARECOMP_NO_DEPTH_TEST") != NULL;
-        if (st.ds[0] && !nodt) { dd.depthCompareFunction = compare_fn(st.ds[2]); dd.depthWriteEnabled = st.ds[1] != 0; }
+        if (st.ds[0] && !nodt) {
+            dd.depthCompareFunction = decal_le ? MTLCompareFunctionLessEqual : compare_fn(st.ds[2]);
+            dd.depthWriteEnabled = st.ds[1] != 0;
+        }
         else { dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = NO; }
         if (st.ds[3]) {
             uint32_t ops = st.ds[5] | st.ds[6] << 8 | st.ds[7] << 16;
@@ -1882,9 +2471,12 @@ static void draw(CmdRec *r, bool indexed) {
     {   // polygon offset (decals on floors: without it they z-fight). Enables: bit 2 = fill (NVN PolygonOffsetEnable)
         static float last[3] = {0, 0, 0};
         float f[3] = {0, 0, 0};
-        static int off = -1;  // LARECOMP_NO_DEPTH_BIAS: ignore the game's polygon offset (A/B tests)
-        if (off < 0) off = getenv("LARECOMP_NO_DEPTH_BIAS") != NULL;
-        if ((st.poly[3] & 4) && !off) memcpy(f, st.poly_offset, sizeof f);
+        if ((st.poly[3] & 4) && !nobias) memcpy(f, st.poly_offset, sizeof f);
+        if (decal_le) {  // (EPS in float units, 2^-24 at depth 0.5..1; a D16 buffer's unit is 2^-16)
+            f[0] *= hw_scale;
+            f[1] = f[1] * hw_scale - (st.rt.depth && st.rt.depth->format == 0x32 ? hw_eps / 256 : hw_eps);
+            f[2] *= hw_scale;
+        }
         static int nlog;
         if ((st.poly[3] & 4) && nlog < 3 && getenv("LARECOMP_LOG_BIAS")) { nlog++; LOG("[bias] factor %g units %g clamp %g\n", st.poly_offset[0], st.poly_offset[1], st.poly_offset[2]); }
         if (memcmp(f, last, sizeof f) || enc != last_bias_enc) {
@@ -2179,6 +2771,7 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
     snap_reason = "buf2tex"; snapshots_invalidate(NULL);
     NvnTexture *t = (NvnTexture *)(uintptr_t)dst->tex;
     if (!t || !src) return;
+    td_flush(t);  // (a recorded clear happens before the upload)
     end_pass();
     const FormatInfo *fi;
     int32_t rg[6];
@@ -2271,6 +2864,7 @@ static void draw_copy(id<MTLTexture> s, int sx0, int sy0, int sw, int sh, id<MTL
 static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     NvnTexture *t = (NvnTexture *)(uintptr_t)src->tex;
     if (!t || !dst || dst < HEAP_BASE) return;
+    td_flush(t);
     end_pass();
     const FormatInfo *fi;
     int32_t rg[6];
@@ -2313,6 +2907,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     snap_reason = "tex2tex"; snapshots_invalidate(NULL);
     NvnTexture *st_ = (NvnTexture *)(uintptr_t)src->tex, *dt = (NvnTexture *)(uintptr_t)dst->tex;
     if (!st_ || !dt) return;
+    td_flush(st_); td_flush(dt);  // (recorded clears happen before the copy)
     end_pass();
     id<MTLTexture> s = sampled_texture(st_, &src->view, src->has_view, TEXTYPE_2D);
     renderer_mark_gpu_owned(dt);
@@ -2490,6 +3085,7 @@ static void exec_list(uint64_t handle, int depth) {
             }
             const struct { uint64_t tex[8]; NvnTextureView views[8]; uint8_t has_view[8]; uint64_t depth;
                            NvnTextureView dview; uint8_t has_dview; } *rt = x;
+            RtState old = st.rt;
             memset(&st.rt, 0, sizeof st.rt);
             st.rt.ncolor = (int)r->x[0];
             for (int i = 0; i < st.rt.ncolor; i++) {
@@ -2500,6 +3096,16 @@ static void exec_list(uint64_t handle, int depth) {
             st.rt.depth = (NvnTexture *)(uintptr_t)rt->depth;
             st.rt.dview = rt->dview;
             st.rt.has_dview = rt->has_dview;
+            bool same = rt_same(&old, &st.rt);
+            static int dedup = -1;
+            if (dedup < 0) { const char *e = ENV("LARECOMP_MTL_RT_DEDUP"); dedup = !e || atoi(e); }
+            if (dedup && same && enc && !st.rt_dirty) break;  // the targets already bound: the pass goes on
+            if (!td_defer_on() && !(dedup && same)) {  // (off mode: the old targets' recorded clears become passes now)
+                RtState new = st.rt;
+                st.rt = old;
+                td_flush_targets(&old);
+                st.rt = new;
+            }
             st.rt_dirty = true;
             break;
         }
@@ -2548,6 +3154,20 @@ static void exec_list(uint64_t handle, int depth) {
             NvnTexture *t = (NvnTexture *)(uintptr_t)ct->tex;
             if (!t) break;
             snap_reason = "clear-texture"; snapshots_invalidate(NULL);
+            {   // the whole texture, every channel, not a target of the open pass: recorded for its next pass
+                static int on = -1;
+                if (on < 0) { const char *e = ENV("LARECOMP_MTL_LOAD_CLEAR"); on = !e || atoi(e); }
+                const int32_t *rg = ct->region;
+                bool whole = rg[3] <= 0 || rg[4] <= 0 || (rg[0] == 0 && rg[1] == 0 && rg[3] >= (int32_t)t->width && rg[4] >= (int32_t)t->height);
+                bool open_here = enc && !st.rt_dirty && (st.rt.depth == t || (st.rt.ncolor > 0 && st.rt.color[0] == t) || (st.rt.ncolor > 1 && st.rt.color[1] == t) ||
+                                                        (st.rt.ncolor > 2 && st.rt.color[2] == t) || (st.rt.ncolor > 3 && st.rt.color[3] == t));
+                uint32_t mask = (uint32_t)r->x[4] ? (uint32_t)r->x[4] : 0xF;
+                if (on && whole && !ct->has_view && !open_here && mask == 0xF && !renderer_format_is_depth(t->format)) {
+                    td_record(t, true, (int)r->x[6], ct->color, false, 0, false, 0);
+                    if (!td_defer_on()) td_flush(t);
+                    break;
+                }
+            }
             RtState saved = st.rt;
             int32_t sc[4];
             memcpy(sc, st.scissor[0], sizeof sc);
@@ -2641,7 +3261,26 @@ static void exec_list(uint64_t handle, int depth) {
             uint32_t type = (uint32_t)r->x[0];
             if (type < 32 && !(seen & (1u << type))) { seen |= 1u << type; LOG("[nvn] ReportCounter type %u\n", type); }
             // (Switch GPU ticks, 614.4 MHz: the game converts the difference to ns itself - see the Vulkan exec.c)
-            if (out) { out[0] = 0; out[1] = (uint64_t)((unsigned __int128)plat_now_ns() * 384 / 625); }
+            if (!out) break;
+            static int gpu = -1;
+            if (gpu < 0) gpu = !(getenv("LARECOMP_MTL_COUNTER") && !strcmp(getenv("LARECOMP_MTL_COUNTER"), "cpu"));
+            static uint64_t *prev_out;  // (frame pacing: the pair's start)
+            out[0] = 0;
+            out[1] = pace_end_counter(prev_out, out, ns_to_gpu_ticks(plat_now_ns()));
+            if (gpu && type == 0) {  // (type 0: timestamp) the GPU's time at this point, once it's done
+                renderer_submit();
+                pthread_mutex_lock(&ctr_lock);
+                if (nctr < CTR_MAX) {
+                    ctr_pend[nctr].out = out, ctr_pend[nctr].start = prev_out;
+                    ctr_pend[nctr].before = submit_seq, ctr_pend[nctr].after = submit_seq + 1;
+                    nctr++;
+                } else {
+                    static int warned;
+                    if (!warned++) LOG("[metal] timing counters: %d pending, this one keeps the host clock\n", CTR_MAX);
+                }
+                pthread_mutex_unlock(&ctr_lock);
+            }
+            prev_out = out;
             break;
         }
         case CMD_COPY_TEXTURE_TO_TEXTURE: {
@@ -2669,7 +3308,107 @@ static void exec_list(uint64_t handle, int depth) {
 // In-place reboot (runtime/nvn/metal.m backend_reset; GPU idle, the game's textures already destroyed): drop
 // everything keyed by guest addresses or guest-owned objects - programs (by code address), pipelines (by program),
 // views, snapshots, bound state - so the next boot can't hit a stale entry. Metal's own shader cache stays warm.
+// ------------------------------------------------------------------ shader preparation (shader_prep.h)
+// Each record: translated here (the translator isn't re-entrant), compiled and built on a few worker threads (at most
+// one build per core so the start screen stays smooth), kept in the g_prep_* tables for the game.
+static dispatch_semaphore_t g_prep_slots;
+
+bool renderer_prepare_begin(void) {
+    if (!dev) {
+        extern void *ui_metal_device(void);
+        dev = (__bridge id<MTLDevice>)ui_metal_device();
+        if (!dev) return false;
+    }
+    if (!cache) cache = [NSMutableDictionary new];
+    pthread_mutex_lock(&g_prep_lock);
+    if (!g_prep_progs) {
+        g_prep_progs = [NSMutableDictionary new];
+        g_prep_pipes = [NSMutableDictionary new];
+        g_prep_cs = [NSMutableDictionary new];
+    }
+    pthread_mutex_unlock(&g_prep_lock);
+    if (!g_prep_queue) {
+        g_prep_queue = dispatch_queue_create("larecomp.prepare", DISPATCH_QUEUE_CONCURRENT);
+        long n = (long)NSProcessInfo.processInfo.activeProcessorCount - 2;
+        g_prep_slots = dispatch_semaphore_create(n < 2 ? 2 : n > 12 ? 12 : n);
+    }
+    return true;
+}
+
+int renderer_prepare_pending(void) { return g_prep_pending; }
+void renderer_prepare_end(void) {  // (the binary archive: saved now, off this thread - a PLAY waiting on the
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ archive_save(false); });  // preparation doesn't wait for it)
+    LOG("[metal] shader archive: %d pipelines loaded from it, %d added; ready after %.0f ms; library compiles %.0f ms, "
+        "pipeline builds %.0f ms (summed over threads)\n", (int)g_archive_hits, (int)g_archive_adds, g_archive_open_us / 1e3,
+        g_lib_us / 1e3, g_pipe_us / 1e3);
+}
+
+static void prep_run(void (^job)(void)) {
+    dispatch_semaphore_wait(g_prep_slots, DISPATCH_TIME_FOREVER);
+    g_prep_pending++;
+    dispatch_async(g_prep_queue, ^{
+        @autoreleasepool { job(); }
+        g_prep_pending--;
+        dispatch_semaphore_signal(g_prep_slots);
+    });
+}
+
+bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlob *fsb) {
+    if (r->kind == 'C') {
+        uint64_t ck = cs_content_key(r->vs, r->local);
+        pthread_mutex_lock(&g_prep_lock);
+        bool have = g_prep_cs[@(ck)] != nil;
+        pthread_mutex_unlock(&g_prep_lock);
+        if (have) return true;
+        CsProg *cp = calloc(1, sizeof *cp);
+        memcpy(cp->local, r->local, sizeof cp->local);
+        if (!translate_compute(cp, vsb->code, vsb->const_offset ? vsb->const_offset : 0x10000)) return false;
+        pthread_mutex_lock(&g_prep_lock);
+        g_prep_cs[@(ck)] = [NSValue valueWithPointer:cp];
+        pthread_mutex_unlock(&g_prep_lock);
+        prep_run(^{ compile_compute(cp); });
+        return true;
+    }
+    // the keys the draw path makes for this state (draw)
+    ShaderKey vkey = {0}, fkey = {0};
+    vkey.flip_y = fkey.flip_y = (r->flags & SR_FLIP_Y) != 0;
+    vkey.depth_minus_one = (r->flags & SR_DEPTH_MINUS_ONE) != 0;
+    vkey.flip_x = fkey.flip_x = (r->flags & SR_FLIP_X) != 0;
+    for (int i = 0; i < r->nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(r->attrib[i] & 0xFF);
+    for (int i = 0; i < r->ncolor && i < 8; i++) if (r->color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(r->color[i]);
+    uint64_t ck = prog_content_key(r->vs, r->fs, &vkey, &fkey);
+    Prog *pr = prep_find_prog(ck);
+    if (!pr) {
+        pr = [Prog new];
+        translate_program(pr, vsb->code, vsb->const_offset ? vsb->const_offset : 0x10000, fsb->code,
+                          fsb->const_offset ? fsb->const_offset : 0x10000, &vkey, &fkey, 0, 0);
+        pthread_mutex_lock(&g_prep_lock);
+        g_prep_progs[@(ck)] = pr;  // (failed ones too: the game then skips them as it would its own)
+        pthread_mutex_unlock(&g_prep_lock);
+    }
+    if (pr->failed) return false;
+    ShaderRec rec = *r;
+    prep_run(^{
+        @synchronized(pr) { if (!pr->ready && !pr->failed) compile_program(pr); }
+        if (!pr->ready) return;
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        attachment_formats_rec(pd, &rec);
+        pipeline_desc(pd, pr, &rec);
+        NSString *body = pipeline_key(pd, pr);
+        if (prep_find_pipe(body)) return;
+        NSError *err = nil;
+        id<MTLRenderPipelineState> ps = archive_render_pipeline(pd, &err);
+        if (!ps) { static int n; if (n++ < 10) LOG("[shader] prepared pipeline failed: %s\n", err.localizedDescription.UTF8String); return; }
+        pthread_mutex_lock(&g_prep_lock);
+        g_prep_pipes[body] = ps;
+        pthread_mutex_unlock(&g_prep_lock);
+    });
+    return true;
+}
+
 void renderer_reset(void) {
+    memset(td_tab, 0, sizeof td_tab);  // (recorded clears and depth guesses of the old boot's textures)
+    td_pending = 0;
     renderer_flush();
     pthread_mutex_lock(&gone_lock);
     ngone = 0;
@@ -2693,6 +3432,9 @@ void renderer_reset(void) {
     nfeedback = 0;
     g_cur_fs_hash = 0;
     last_bias_enc = nil;
+    pthread_mutex_lock(&ctr_lock);
+    nctr = 0;  // (pending timing counters point into the old boot's memory)
+    pthread_mutex_unlock(&ctr_lock);
     pthread_mutex_lock(&cb_lock);
     last_cb = nil;
     for (int i = 0; i < CB_HIST; i++) cb_hist[i] = nil;  // (they retain the old guest heap buffer)
@@ -2707,5 +3449,9 @@ void backend_execute(uint64_t handle) {
         if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
         if (sync_submit) renderer_flush();  // old behaviour: finish the GPU work before returning
         else renderer_submit();  // the guest fences (nvnSyncWait) before reusing memory the GPU reads
+        if (counters_want_next()) {  // (a timing counter ended the list: its buffer after it, empty)
+            (void)cb();
+            renderer_submit();
+        }
     }
 }

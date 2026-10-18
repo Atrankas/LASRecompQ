@@ -66,7 +66,7 @@ uint32_t rt_frame_steps(uint32_t interval) {
 
 // The game's next swap interval (less one: 0 = its 60 fps mode), as its governor chose it (tools/patches.py
 // INTERVAL_CHOICE_SITE: from the vsyncs the last frame took, one fewer when its CPU and GPU times were short).
-// g_pace_slow: the renderer's pacer found our frames don't fit 60 (exec.c vk_pace_frame) - then its tries at 60 are
+// g_pace_slow: the renderer's pacer found our frames don't fit 60 (nvn/pace.c) - then its tries at 60 are
 // declined: each would be a frame of slow motion (one world step in two vsyncs).
 // LARECOMP_LOG_INTERVAL=1: each change, with its inputs.
 volatile bool g_pace_slow;

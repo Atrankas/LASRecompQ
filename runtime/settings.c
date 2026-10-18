@@ -5,8 +5,6 @@
 #include <string.h>
 #include <ctype.h>
 #include <sys/stat.h>
-#include <SDL3/SDL_locale.h>
-#include <SDL3/SDL_stdinc.h>
 
 #include "hle.h"
 #include "input_bind.h"
@@ -25,6 +23,8 @@ Settings g_settings = {
     .volume = 1.0f,
     .reverb = true,
     .movie_audio = true,
+    .rumble = true,
+    .rumble_strength = 100,
     .show_fps = false,
     .inv_keys = true,
     .tracker = true,
@@ -33,6 +33,9 @@ Settings g_settings = {
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
     .touch_opacity = 0.6f,
     .touch_size = 1.0f,
+#ifndef __APPLE__
+    .bg_input = true,  // (as before the setting; on macOS it needs Input Monitoring permission, so Off there)
+#endif
 #ifdef __ANDROID__
     .res_mode = RES_DYNAMIC,  // (phones: the display's resolution, down to 50% while the GPU can't hold 30 fps)
     .frame_gen = 1,           // (phones: 60 on the screen from the game's 30)
@@ -119,18 +122,6 @@ const char *settings_translation_dir(void) {
     return g_tr_found ? g_tr_dir : NULL;
 }
 
-bool settings_ui_portuguese(void) {
-    if (g_settings.ui_language != UI_LANG_AUTO) return g_settings.ui_language == UI_LANG_PT_BR;
-    static int sys = -1;
-    if (sys < 0) {
-        sys = 0;
-        int n = 0;
-        SDL_Locale **l = SDL_GetPreferredLocales(&n);
-        if (l && n > 0 && l[0]->language && !strcmp(l[0]->language, "pt")) sys = 1;
-        SDL_free(l);
-    }
-    return sys;
-}
 
 void settings_load(void) {
     static bool loaded;
@@ -176,6 +167,9 @@ void settings_load(void) {
         else if (!strcmp(key, "antialias")) g_settings.antialias = !strcmp(val, "off") ? AA_OFF : AA_SMAA;  // ("fxaa": SMAA now)
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
+        else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
+        else if (!strcmp(key, "rumble_strength")) g_settings.rumble_strength = atoi(val);
+        else if (!strcmp(key, "background_input")) g_settings.bg_input = atoi(val) != 0;
         else if (!strcmp(key, "move_360")) g_settings.move_360 = atoi(val) != 0;
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
@@ -214,6 +208,7 @@ void settings_load(void) {
     if (!aspect_key) g_settings.aspect_asked = true;  // (likewise: the aspect ratio was chosen already)
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
+    if (g_settings.rumble_strength < 25 || g_settings.rumble_strength > 100) g_settings.rumble_strength = 100;
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
 }
 
@@ -241,6 +236,9 @@ void settings_save(void) {
     else fprintf(f, "resolution = match\n");
     fprintf(f, "inv_keys = %d\n", g_settings.inv_keys);
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);
+    fprintf(f, "rumble = %d\n", g_settings.rumble);
+    fprintf(f, "rumble_strength = %d\n", g_settings.rumble_strength);
+    fprintf(f, "background_input = %d\n", g_settings.bg_input);
     fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\nframe_gen = %d\n", g_settings.move_360, g_settings.blur_removal,
             g_settings.hide_hero_icon, g_settings.frame_gen);
     fprintf(f, "ui_language = %d\npower_mode = %d\n", g_settings.ui_language, g_settings.power_mode);

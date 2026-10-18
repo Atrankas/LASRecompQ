@@ -58,7 +58,7 @@ static bool in_gpu_driver(uint64_t pc) {
 }
 
 void rt_crash_explain(char *out, size_t n, const char *log_path) {
-    static const char *const report = "Please report it (GitHub issues or Discord) and attach the log file below. "
+    static const char *const report = "Please report it as a GitHub issue and attach the log file below. "
                                       "Your progress up to your last save or autosave is safe.";
     char head[160], what[400];
     if (rt_romfs_files >= 0 && rt_romfs_files < ROMFS_FILES) {
@@ -74,7 +74,8 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
         snprintf(head, sizeof head, "No font for the game's text");
         snprintf(what, sizeof what, "Import the Switch fonts in Settings (Game font), or reinstall LAS Recomp - it "
                  "comes with a font of its own.");
-    } else if (has("get_terminate")) {  // (an uncaught C++ exception in the game: recompiled code can't unwind)
+    } else if (has("get_terminate") || has("uncaught C++ exception")) {  // (the game threw: recompiled code can't
+                                                                         // unwind; runtime/hle/warp.c rt_cxa_throw)
         snprintf(head, sizeof head, "The game ran into an error it couldn't recover from");
         snprintf(what, sizeof what, "This is a bug in LAS Recomp, not a problem with your game files or PC. %s", report);
     } else if (in_gpu_driver(g_pc)) {

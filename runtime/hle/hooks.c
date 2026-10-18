@@ -12,17 +12,22 @@
 #include "../rt.h"
 
 void rt_mb_seen(uint64_t o);  // miniboss.c
+int rt_shadow_link_appear(uint64_t o);
 int rt_gohma_free(void);
 uint32_t rt_gohma_heading(uint64_t gohma, uint32_t track);
 int rt_crashout_skip(void);
 void rt_dig_hole(Cpu *c);  // digs.c
 uint64_t rt_hole_cap(void);
+void rt_frame_job_kickoff(uint64_t owner);  // delegate_null.c
+void rt_frame_job_finish(uint64_t job);
 
 int rt_hook(Cpu *c, uint64_t site) {
     switch (site) {
     case GUEST(GA_MB_SEEN_SITE):  // MB_SEEN_SITE - ldr x8, [x21]: an actor seen
         rt_mb_seen(c->x[21]);
         return 0;
+    case GUEST(GA_SHADOW_LINK_APPEAR_SITE):  // SHADOW_LINK_APPEAR_SITE - ldr x9, [x0, #0x230]: his Appear event, none on the Field
+        return rt_shadow_link_appear(c->x[0]) ? 2 : 0;
     case GUEST(GA_CRASHOUT_SITE):  // CRASHOUT_SITE - str wzr, [x0, #0xb8]: Blaino's knock-out, no crash-out on the Field
         if (!rt_crashout_skip()) return 0;
         ST32(c->x[0] + 0xb8, 0);
@@ -63,6 +68,17 @@ int rt_hook(Cpu *c, uint64_t site) {
         if (c->x[0]) return 0;
         LOG("[event] empty handler skipped (issue #41)\n");
         return 2;  // (the dispatcher's catch: returns 0)
+    case GUEST(GA_FRAME_JOB_KICKOFF_SITES_0):  // FRAME_JOB_KICKOFF_SITES - a frame job's rebuild waits for its last finish (#19)
+    case GUEST(GA_FRAME_JOB_KICKOFF_SITES_1):
+    case GUEST(GA_FRAME_JOB_KICKOFF_SITES_2):
+        rt_frame_job_kickoff(c->x[22]);
+        return 0;
+    case GUEST(GA_FRAME_JOB_KICKOFF_SITES_3):
+        rt_frame_job_kickoff(c->x[21]);
+        return 0;
+    case GUEST(GA_FRAME_JOB_FINISH_SITE):  // FRAME_JOB_FINISH_SITE - ldr x8, [x0]: a frame job's finish (debug delay)
+        rt_frame_job_finish(c->x[0]);
+        return 0;
     }
     return 0;
 }

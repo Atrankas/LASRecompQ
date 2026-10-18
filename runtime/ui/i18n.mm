@@ -1,4 +1,6 @@
 // The menus' Brazilian Portuguese (see i18n.h): one table of English -> pt-BR, looked up by the exact English text.
+#include <SDL3/SDL_locale.h>
+#include <SDL3/SDL_stdinc.h>
 #include <ctype.h>
 #include <pthread.h>
 #include <string.h>
@@ -58,4 +60,18 @@ void ui_upper(std::string &t) {
             i++;
         }
     }
+}
+
+// (settings.h) the menus' language: the setting, or the system's for auto
+extern "C" bool settings_ui_portuguese(void) {
+    if (g_settings.ui_language != UI_LANG_AUTO) return g_settings.ui_language == UI_LANG_PT_BR;
+    static int sys = -1;
+    if (sys < 0) {
+        sys = 0;
+        int n = 0;
+        SDL_Locale **l = SDL_GetPreferredLocales(&n);
+        if (l && n > 0 && l[0]->language && !strcmp(l[0]->language, "pt")) sys = 1;
+        SDL_free(l);
+    }
+    return sys;
 }
