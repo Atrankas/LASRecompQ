@@ -18,6 +18,8 @@ import glob
 import os
 import re
 
+import seashell_spots
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 POT_TYPES = {0x1a7: 'ObjDungeonPot', 0xeb: 'ObjHousePot'}
@@ -99,7 +101,8 @@ def scan(romfs, leb):
         for i, a in enumerate(room.actors):
             if a.type not in POT_TYPES:
                 continue
-            pots.append({'level': level, 'room': room_name, 'key': a.key, 'n': n})
+            if not seashell_spots.holds_shell(a):  # (its Secret Seashell is the check: seashell_spots.py)
+                pots.append({'level': level, 'room': room_name, 'key': a.key, 'n': n})
             n += 1
     return pots
 

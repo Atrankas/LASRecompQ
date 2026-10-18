@@ -245,6 +245,8 @@ int32_t g_stick_lx, g_stick_ly;  // left stick as the player holds it (runtime/h
 // frames, then run <script> relative to that moment: steps "<delay>:<L|R|U|D|A|B|X|Y>:<frames>" separated by '/', e.g.
 // "10:L:8/40:A:6/90:A:6/130:L:30" = face west, lift, throw, walk west (pot tests). Several placements: entries
 // separated by ';' in frame order, each placed at its frame (tools/stairs_test.sh: one per stairs of a level)
+// LARECOMP_PLACE_Y=<y>: also the height (a spot higher than where Link stands would put him inside the ground: he
+// falls)
 static long trace_until = -1;  // LARECOMP_DOORJUMP_TRACE: Link's position for 90 frames after each jump / placement
 
 static void place_tick(uint64_t frame) {
@@ -305,6 +307,7 @@ static void place_tick(uint64_t frame) {
     float *pos = (float *)(uintptr_t)(pc + 0x80), *pos2 = (float *)(uintptr_t)(pc + 0xb0);
     pos[0] = pos2[0] = px;
     pos[2] = pos2[2] = pz;
+    if (ENV("LARECOMP_PLACE_Y")) pos[1] = pos2[1] = (float)atof(ENV("LARECOMP_PLACE_Y"));
     LOG("[place] f%llu Link -> (%.2f, %.2f) in %s\n", (unsigned long long)frame, px, pz, lv);
     done = 1;
     placed_at = (long)frame;

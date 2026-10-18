@@ -23,6 +23,7 @@ import re
 import struct
 
 import pots
+import seashell_spots
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -80,6 +81,7 @@ def scan(romfs, leb, pits=False, open_mabe=False):
             pit = (int((a.posX - ox) // 1.5), int((a.posZ - oz) // 1.5)) in holes or \
                 any(abs(x - a.posX) < 0.1 and abs(z - a.posZ) < 0.1 for x, z in tips)
             gone = open_mabe and a.key in OPEN_MABE_REMOVED
+            gone = gone or seashell_spots.holds_shell(a)  # (its Secret Seashell is the check: seashell_spots.py)
             if len(out) < limit and (not only or room_name in only.split(',')) and (pits or not pit) and not gone:
                 out.append({'level': 'Field', 'room': room_name, 'key': a.key, 'n': n, 'tile': _tile(room_name, a)})
             n += 1

@@ -48,7 +48,8 @@ class ItemShuffler(QtCore.QThread):
         self.vanilla_locations = {k for k, v in self.logic_defs.items()
                             if v['type'] == 'item'
                             and v['subtype'] not in ('chest', 'boss', 'enemy', 'drop', 'npc', 'standing', 'overworld-statue', 'dungeon-statue',
-                                                     'underwater')}  # (LARecomp: tools/rando/underwater.py)
+                                                     'underwater',  # (LARecomp: tools/rando/underwater.py)
+                                                     'dig', 'hidden', 'bomb-hole')}  # (LARecomp: tools/rando/seashell_spots.py)
         if not self.settings.get('trendsanity'):  # LAS Recomp: tools/rando/trendsanity.py shuffles them
             self.vanilla_locations.add('trendy-prize-1') # yoshi doll stays until trendy is properly shuffled
             self.vanilla_locations.add('trendy-prize-2')
@@ -838,7 +839,7 @@ class ItemShuffler(QtCore.QThread):
                 
                 # Check for item type restrictions, i.e. songs can't be standing items
                 subtype = self.logic_defs[locations[0]]['subtype']
-                if item in ('red-tunic', 'blue-tunic') and subtype in ('standing', 'hidden', 'dig', 'drop', 'underwater', 'shop', 'enemy'):
+                if item in ('red-tunic', 'blue-tunic') and subtype in ('standing', 'hidden', 'dig', 'bomb-hole', 'drop', 'underwater', 'shop', 'enemy'):
                     valid_placement = False
                 elif item in self.force_chests and subtype != 'chest':
                     valid_placement = False

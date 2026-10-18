@@ -415,6 +415,8 @@ static int slot_of(uint64_t key) {
 }
 
 void rt_enemy_spawn(uint64_t info) {
+    extern void rt_shell_swap(uint64_t info);  // a dropped Secret Seashell: the seed's item (shell_spots.c)
+    rt_shell_swap(info);
     if (!info || (g_loaded && !g_nslots && same_seed()) || !LD64(info)) return;
     pthread_mutex_lock(&g_lock);
     if (g_loaded && !same_seed()) enemy_random_reset();

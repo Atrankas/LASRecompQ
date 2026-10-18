@@ -659,6 +659,10 @@ def main():
     from RandomizerCore.Randomizers import item_get as _uw_get, data as _uw_data
     print('underwater:', ', '.join(underwater.apply(mods, out_dir, romfs, _uw_leb, _uw_ev, _ot, _uw_get, _uw_data)),
           flush=True)
+    import seashell_spots  # buried / hidden / bomb-hole Secret Seashell spots: the seed's item there (runtime: shell_spots.c)
+    print('seashell spots:', ', '.join(seashell_spots.apply(seashell_spots.locations(logic_defs), mods, out_dir, romfs,
+                                                            _uw_leb, _uw_ev, _ot, _uw_get, _uw_data,
+                                                            digs_mod.SHELLS if dig_locs else ())), flush=True)
     import keysanity_text  # (after every flow edit, digs / underwater too) a dungeon item outside its dungeon names it
     keysanity_text.apply(out_dir, romfs, result['placements'])
     if settings.get('enemy-minibosses'):  # the Field's walls for roaming mini-bosses (tools/rando/roam.py)

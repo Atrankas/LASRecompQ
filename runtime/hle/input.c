@@ -530,6 +530,8 @@ static void fill_state(Cpu *c) {
       digs_game_tick(c, renderer_present_count());
       extern void pot_bush_game_tick(Cpu *c, uint64_t frame);
       pot_bush_game_tick(c, renderer_present_count());
+      extern void shell_spots_tick(Cpu *c, uint64_t frame);
+      shell_spots_tick(c, renderer_present_count());
       extern void qol_tick(void);
       qol_tick();
       extern void pets_game_tick(Cpu *c);
