@@ -115,6 +115,22 @@ static const char kMask[] =
     "  }\n"
     "  o = vec4(m);\n"
     "}\n";
+// The same with the scene kept at a quarter of the size (fg_sceneq): the scene's 4x4 average (two 2:1 linear blits)
+// against the finished picture's (the four bilinear taps of the block)
+static const char kMaskQ[] =
+    "#version 450\n"
+    "layout(set = 0, binding = 0) uniform sampler2D scene;\n"
+    "layout(set = 0, binding = 1) uniform sampler2D fin;\n"
+    "layout(location = 0) in vec2 uv;\n"
+    "layout(location = 0) out vec4 o;\n"
+    "void main() {\n"
+    "  vec2 t = 1.0 / vec2(textureSize(fin, 0));\n"
+    "  vec3 f = vec3(0.0);\n"
+    "  for (int i = 0; i < 4; i++) f += textureLod(fin, uv + t * vec2((i & 1) == 0 ? -1.0 : 1.0, (i & 2) == 0 ? -1.0 : 1.0), 0.0).rgb;\n"
+    "  vec3 d = abs(f * 0.25 - textureLod(scene, uv, 0.0).rgb);\n"
+    // (0.05: the two sides round differently - 8-bit sRGB blits against filtered taps - by up to a few levels)
+    "  o = vec4(step(0.05, max(d.r, max(d.g, d.b))));\n"
+    "}\n";
 static TexBackend g_mask;
 static TexBackend *g_fin;
 static bool build_mask(VkCommandBuffer cb);
@@ -132,6 +148,16 @@ static bool fg_wincopy(void) {
     return on && !vk_sc_quarter();  // (a pre-rotated window picture isn't in the window's shape: never copied)
 }
 bool fg_draws_overlays(void) { return !fg_wincopy(); }
+
+// The scene before the HUD kept at a quarter of its size (two 2:1 linear blits) instead of copied whole: it is only
+// compared block by block for the HUD mask, and sampled where the HUD covered the scenery (the in-between frame shows
+// it there a little soft). The whole copy was ~0.9 ms of the S20 FE's GPU at 1080p. LARECOMP_FG_SCENEQ=0: the copy.
+static bool fg_sceneq(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_FG_SCENEQ") ? atoi(getenv("LARECOMP_FG_SCENEQ")) != 0 : 1;
+    return on;
+}
+static TexBackend g_scene_half;
 
 // LARECOMP_FG_TEST=<bits> (measuring only, the in-between frame comes out wrong): 1 no scene copy, 2 no window copy,
 // 4 no HUD mask, 8 no full barriers around the scene copy
@@ -191,6 +217,22 @@ static void pick_depth(void) {
 // exec.c draw_, right after the scene's composite into the presented picture (outside any pass)
 void fg_scene_composited(VkCommandBuffer cb, TexBackend *rt) {
     if (!fg_enabled() || !rt || !rt->image || rt->samples != 1) return;
+    if (fg_sceneq()) {
+        uint32_t hw = (rt->width + 1) / 2, hh = (rt->height + 1) / 2, qw = (rt->width + 3) / 4, qh = (rt->height + 3) / 4;
+        VkImageUsageFlags u = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if (!make_image(&g_scene_half, rt->format, hw, hh, u) || !make_image(&g_scene, rt->format, qw, qh, u)) return;
+        vk_full_barrier(cb);
+        VkImageBlit b1 = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)rt->width, (int32_t)rt->height, 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)hw, (int32_t)hh, 1}}};
+        vkCmdBlitImage(cb, rt->image, VK_IMAGE_LAYOUT_GENERAL, g_scene_half.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b1, VK_FILTER_LINEAR);
+        vk_full_barrier(cb);
+        VkImageBlit b2 = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)hw, (int32_t)hh, 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)qw, (int32_t)qh, 1}}};
+        vkCmdBlitImage(cb, g_scene_half.image, VK_IMAGE_LAYOUT_GENERAL, g_scene.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b2, VK_FILTER_LINEAR);
+        vk_full_barrier(cb);
+        g_scene_ok = true;
+        return;
+    }
     if (!make_image(&g_scene, rt->format, rt->width, rt->height, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return;
     if (!(fg_test() & 8)) vk_full_barrier(cb);
     VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
@@ -398,8 +440,12 @@ static bool build_mask(VkCommandBuffer cb) {
     uint32_t mw = (fin->width + 3) / 4, mh = (fin->height + 3) / 4;
     if (!make_image(&g_mask, VK_FORMAT_R8_UNORM, mw, mh, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) return false;
     if (!g_mlayout) g_mlayout = set_layout(2, 0, &g_mdsl);
+    static int mq = -1;
+    if (g_mpipe && mq != (int)fg_sceneq()) g_mpipe = VK_NULL_HANDLE;  // (the toggle read once: never in practice)
+    mq = fg_sceneq();
     if (!g_mpipe) {
-        VkShaderModule fs = vk_compile_glsl(kMask, STAGE_FRAGMENT, "framegen_mask.frag");
+        VkShaderModule fs = mq ? vk_compile_glsl(kMaskQ, STAGE_FRAGMENT, "framegen_maskq.frag")
+                               : vk_compile_glsl(kMask, STAGE_FRAGMENT, "framegen_mask.frag");
         g_mpipe = fs ? fs_pipeline(fs, VK_FORMAT_R8_UNORM, g_mlayout) : VK_NULL_HANDLE;
         if (!g_mpipe) return false;
     }
