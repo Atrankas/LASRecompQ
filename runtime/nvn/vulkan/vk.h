@@ -98,6 +98,8 @@ typedef struct TexBackend {
     uint16_t vslots[8];  // its views' slots in textures.c's view table (views_forget visits these, not the whole table)
     uint8_t nvslots;
     bool vslot_overflow;  // (more than 8 since the last forget: the whole table is searched)
+    VkFormat fmt_twin;    // format list images (textures.c): the one other view format allowed, else UNDEFINED
+    bool fmt_listed;
 } TexBackend;
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)

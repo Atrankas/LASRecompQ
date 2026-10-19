@@ -316,6 +316,32 @@ void vk_collect_dead(void) {
     ndead = k;
 }
 
+// sRGB / UNORM twin of a colour format (VK_FORMAT_UNDEFINED = none)
+static VkFormat srgb_twin(VkFormat f) {
+    static const VkFormat P[][2] = {{VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB},
+                                    {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_SRGB},
+                                    {VK_FORMAT_A8B8G8R8_UNORM_PACK32, VK_FORMAT_A8B8G8R8_SRGB_PACK32},
+                                    {VK_FORMAT_R8_UNORM, VK_FORMAT_R8_SRGB}, {VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_SRGB}};
+    for (size_t i = 0; i < sizeof P / sizeof *P; i++) {
+        if (P[i][0] == f) return P[i][1];
+        if (P[i][1] == f) return P[i][0];
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+static bool vk_fmt_list(void) {  // LARECOMP_VK_FMTLIST=0/1 (on by default on phones: 2 ms of 25.7 at 1x, S20 FE)
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LARECOMP_VK_FMTLIST");
+#ifdef __ANDROID__
+        on = e ? atoi(e) != 0 : 1;
+#else
+        on = e ? atoi(e) != 0 : 0;
+#endif
+    }
+    return on;
+}
+
+
 static void create_image(NvnTexture *t, TexBackend *b) {
     VkFmt mf = fmt_of(t->format);
     tex_scale(t, b, &b->sx, &b->sy);
@@ -387,6 +413,17 @@ static void create_image(NvnTexture *t, TexBackend *b) {
                             .extent = {tw, th, depth}, .mipLevels = levels, .arrayLayers = layers,
                             .samples = (VkSampleCountFlagBits)samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage,
                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    // A mutable format image without a format list is never compressed on Turnip (UBWC): render targets list their
+    // own format and its sRGB / UNORM twin; views in any other format fall back to the image's own (vk_view).
+    VkFormat fl_fmts[2] = {vf, srgb_twin(vf)};
+    VkImageFormatListCreateInfo fl = {.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+                                      .viewFormatCount = fl_fmts[1] ? 2 : 1, .pViewFormats = fl_fmts};
+    b->fmt_listed = false;
+    if (vk_fmt_list() && !depthfmt && (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+        ci.pNext = &fl;
+        b->fmt_listed = true;
+        b->fmt_twin = fl_fmts[1];
+    }
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     VkResult r = vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL);
     if (r != VK_SUCCESS) {
@@ -400,6 +437,8 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         ci.flags &= ~VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+        ci.pNext = NULL;
+        b->fmt_listed = false;
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
         depthfmt = false;
     }
@@ -866,7 +905,12 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     if (v && (v->setmask & 4) && !(b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
         VkFormat vf = fmt_of(v->format).vf;
         if (vk_format(t->format) == b->format && vf != fmt) {  // (fallback images keep their own format)
-            if (vk_view_compatible(fmt, vf)) fmt = vf;
+            if (b->fmt_listed && vf != b->fmt_twin) {
+                static int nlog;
+                if (nlog++ < 20)
+                    LOG("[vk] texture %ux%u fmt %#x (vk %d) viewed as nvn %#x (vk %d) outside its format list: its own "
+                        "format instead\n", t->width, t->height, t->format, b->format, v->format, vf);
+            } else if (vk_view_compatible(fmt, vf)) fmt = vf;
             else {
                 static int nlog;
                 if (!nlog++)
