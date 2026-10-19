@@ -1207,12 +1207,6 @@ static void vk_end_pass_at(int line) {
 
 static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v : 1; }
 
-// A pass whose first draw covers its one colour target with a fullscreen triangle / quad (no blending, every
-// channel written, no discard, no depth, viewport and scissor over the whole target) doesn't need the target's old
-// contents: DONT_CARE instead of LOAD saves reading it into the tile memory (~10 MB a pass at 1080p). Only for the
-// fragment shaders listed (a UI quad looks the same from here but covers a corner): LARECOMP_VK_COVER_FS=<hash,...>
-// adds to the built-in list, LARECOMP_VK_COVER=0 turns it off, LARECOMP_LOG_COVER=1 logs the candidates.
-static bool g_pass_covered;  // set by draw_ for the pass begin_pass is about to start
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
@@ -1256,8 +1250,6 @@ static void begin_pass(void) {
         if (renderer_texture_first_write(t) || fresh) {
             ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             ca[i].clearValue.color.float32[3] = fresh ? 0.0f : 1.0f;
-        } else if (g_pass_covered && i == 0) {
-            ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         }
         pass_color[i] = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4) && vk_format(t->format) == b->format
                       ? vk_format(st.rt.cview[i].format) : b->format;
@@ -4331,36 +4323,6 @@ static void skip_why(int why, uint64_t fs) {
         memset(cnt, 0, sizeof cnt), at = now;
     }
 }
-static bool cover_listed(uint64_t h) {
-    static const uint64_t builtin[] = {0};
-    static uint64_t extra[16];
-    static int nextra = -1, on = -1;
-    if (on < 0) on = getenv("LARECOMP_VK_COVER") ? atoi(getenv("LARECOMP_VK_COVER")) != 0 : 1;
-    if (!on || !h) return false;
-    if (nextra < 0) {
-        nextra = 0;
-        for (const char *p = getenv("LARECOMP_VK_COVER_FS"); p && *p && nextra < 16;) {
-            extra[nextra++] = strtoull(p, (char **)&p, 16);
-            while (*p == ',') p++;
-        }
-    }
-    for (size_t i = 0; i < sizeof builtin / sizeof *builtin; i++) if (builtin[i] && builtin[i] == h) return true;
-    for (int i = 0; i < nextra; i++) if (extra[i] == h) return true;
-    return false;
-}
-static bool draw_covers_target(const CmdRec *r, const Prog *pr) {
-    NvnTexture *t = st.rt.ncolor == 1 ? st.rt.color[0] : NULL;
-    if (!t || st.rt.depth || r->x[2] > 6 || (st.color_state[0] & 1) || (st.channel_mask & 0xF) != 0xF) return false;
-    if (!pr->fi || pr->fi->uses_discard) return false;
-    if (st.rt.has_cview[0] && (st.rt.cview[0].setmask & 1) && st.rt.cview[0].base_level) return false;
-    float vx = st.viewport[0][0], vy = st.viewport[0][1], vw = st.viewport[0][2], vh = st.viewport[0][3];
-    if (vw < 0) vx += vw, vw = -vw;
-    if (vh < 0) vy += vh, vh = -vh;
-    if (vx > 0 || vy > 0 || vx + vw < (float)t->width || vy + vh < (float)t->height) return false;
-    int32_t sx = st.scissor[0][0], sy = st.scissor[0][1], sw = st.scissor[0][2], sh = st.scissor[0][3];
-    return sx <= 0 && sy <= 0 && sx + sw >= (int32_t)t->width && sy + sh >= (int32_t)t->height;
-}
-
 static uint64_t prof_tp_;
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
@@ -4450,19 +4412,7 @@ static void draw_(CmdRec *r, bool indexed) {
     snap_reason = "draw-colorwrite";
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
-    g_pass_covered = false;
-    if (!in_pass || st.rt_dirty) {
-        static int logc = -1;
-        if (logc < 0) logc = getenv("LARECOMP_LOG_COVER") != NULL;
-        bool cov = draw_covers_target(r, pr);
-        g_pass_covered = cov && cover_listed(pr->fs_hash);
-        if (cov && logc && g_debug_frame)
-            LOG("[cover] fs %llx hash %016llx target %ux%u fmt %#x%s\n", (unsigned long long)st.program->stages[1].code_addr,
-                (unsigned long long)pr->fs_hash, st.rt.color[0]->width, st.rt.color[0]->height, st.rt.color[0]->format,
-                g_pass_covered ? " (DONT_CARE)" : "");
-    }
     begin_pass();
-    g_pass_covered = false;
     VkCommandBuffer cb = vk_cmd();
 
     uint32_t mode = (uint32_t)r->x[0];
