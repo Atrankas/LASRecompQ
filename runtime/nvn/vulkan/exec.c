@@ -891,11 +891,15 @@ static void run_job(void (*fn)(void *), void *arg) { run_job_q(fn, arg, false); 
 // handler's save never came and every start built every pipeline again: pop-in and CPU in every area. Per frame.
 static _Atomic uint64_t g_pipes_built;  // pipelines created (build_pipeline, build_compute)
 static void cache_save_job(void *arg) { (void)arg; extern void vk_pipeline_cache_save(void); vk_pipeline_cache_save(); }
+// Also every 30 s while new ones keep coming: the head start's hundreds of pipelines build for minutes after a shader
+// change (a couple a second on a phone), never a 4 s pause, and a session ended before the 3-minute saver lost them all.
 void vk_pipeline_cache_autosave(void) {
-    static uint64_t last_n, saved_n, changed_at;
+    static uint64_t last_n, saved_n, changed_at, saved_at;
     uint64_t n = atomic_load(&g_pipes_built), now = SDL_GetTicksNS();
-    if (n != last_n) { last_n = n; changed_at = now; return; }
-    if (n != saved_n && now - changed_at > 4000000000ull) { saved_n = n; run_job(cache_save_job, NULL); }
+    if (!saved_at) saved_at = now;
+    bool due = n != saved_n && now - saved_at > 30000000000ull;
+    if (n != last_n) { last_n = n; changed_at = now; if (!due) return; }
+    if (n != saved_n && (due || now - changed_at > 4000000000ull)) { saved_n = n; saved_at = now; run_job(cache_save_job, NULL); }
 }
 
 // ================================================================== state
@@ -1606,6 +1610,7 @@ static void compile_program(void *arg) {
     free(sv);
     free(sf);
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
+    if (getenv("LARECOMP_LOG_PIPE_BUILD")) LOG("[build] program %p\n", (void *)p);
     atomic_fetch_add(&stat_compiles, 1);
     atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
 }
@@ -2234,6 +2239,9 @@ static void build_pipeline(void *arg) {
         static int n;
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
     }
+    if (getenv("LARECOMP_LOG_PIPE_BUILD"))
+        LOG("[build] pipeline prog %p hash %016llx ncolor %u c0 %d depth %d blend %x topo %u attrs %x\n", (void *)pp->k.prog,
+            (unsigned long long)pp->hash, pp->k.ncolor, pp->k.color[0], pp->k.depth, pp->k.blend_on, pp->k.topo_class, pp->k.attr_mask);
     atomic_fetch_add(&stat_compiles, 1);
     atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
 }
@@ -4285,10 +4293,25 @@ static void draw(CmdRec *r, bool indexed) {
     draw_(r, indexed);
     PROF_ADD(prof_draw);
 }
+// LARECOMP_LOG_SKIPS=1: why draws were skipped (reason: 1 no program, 2/3 program not ready, 4 skip list, 5 the pot
+// level's shader, 6 topology, 7 pipeline not built yet), each reason's count every 2 s with the last fragment shader address
+static void skip_why(int why, uint64_t fs) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_LOG_SKIPS") != NULL;
+    if (!on) return;
+    static uint64_t cnt[8], last_fs[8], at;
+    cnt[why & 7]++, last_fs[why & 7] = fs;
+    uint64_t now = SDL_GetTicksNS();
+    if (now - at > 2000000000ull) {
+        for (int i = 1; i < 8; i++)
+            if (cnt[i]) LOG("[skips] reason %d: %llu (fs %llx)\n", i, (unsigned long long)cnt[i], (unsigned long long)last_fs[i]);
+        memset(cnt, 0, sizeof cnt), at = now;
+    }
+}
 static uint64_t prof_tp_;
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
-    if (!st.program) { stat_skipped++; return; }
+    if (!st.program) { skip_why(1, st.program ? st.program->stages[1].code_addr : 0); stat_skipped++; return; }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
@@ -4296,7 +4319,7 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
-    if (!pr || atomic_load(&pr->state) != 1) { stat_skipped++; return; }
+    if (!pr || atomic_load(&pr->state) != 1) { skip_why(2, st.program ? st.program->stages[1].code_addr : 0); stat_skipped++; return; }
     g_mirror_w = 0;
     bool scene_composite = false;  // (frame generation copies the picture right after it: framegen.c)
     {   // mirror mode (runtime/hle/mirror.c; as renderer.m): the scene's composite into the window image is mirrored
@@ -4313,7 +4336,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (mirror_draw(composite)) {
             vkey.flip_x = fkey.flip_x = true;
             pr = get_program(st.program, &vkey, &fkey);
-            if (!pr || atomic_load(&pr->state) != 1) { stat_skipped++; return; }
+            if (!pr || atomic_load(&pr->state) != 1) { skip_why(3, st.program ? st.program->stages[1].code_addr : 0); stat_skipped++; return; }
             g_mirror_w = (float)st.rt.color[0]->width;
         }
     }
@@ -4334,9 +4357,9 @@ static void draw_(CmdRec *r, bool indexed) {
                 while (*p == ',') p++;
             }
         }
-        for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { stat_skipped++; return; }
+        for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { skip_why(4, st.program ? st.program->stages[1].code_addr : 0); stat_skipped++; return; }
         extern bool pot_level_active(void);
-        if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { stat_skipped++; return; }
+        if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { skip_why(5, st.program ? st.program->stages[1].code_addr : 0); stat_skipped++; return; }
         {   // LARECOMP_DUMP_UBO=<fs code addr hex> (as renderer.m): that shader's uniform buffers in the debug frame
             static uint64_t dump_fs = 1;
             if (dump_fs == 1) { const char *e = getenv("LARECOMP_DUMP_UBO"); dump_fs = e ? strtoull(e, NULL, 16) : 0; }
@@ -4381,7 +4404,7 @@ static void draw_(CmdRec *r, bool indexed) {
     VkPrimitiveTopology topo;
     uint8_t cls;
     bool native = topology(mode, &topo, &cls);
-    if (!native && mode != 6 && mode != 7 && mode != 9) { stat_skipped++; return; }
+    if (!native && mode != 6 && mode != 7 && mode != 9) { skip_why(6, st.program ? st.program->stages[1].code_addr : 0); stat_skipped++; return; }
 
     uint64_t prof_tk_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_pre += prof_tk_ - prof_tp_;
@@ -4422,7 +4445,7 @@ static void draw_(CmdRec *r, bool indexed) {
         pipe_tab[pslot].key = ph;
         pipe_tab[pslot].pipe = pp;
     }
-    if (atomic_load(&pp->state) != 1) { stat_skipped++; return; }
+    if (atomic_load(&pp->state) != 1) { skip_why(7, st.program->stages[1].code_addr); stat_skipped++; return; }
     ss_enabled();
     if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
