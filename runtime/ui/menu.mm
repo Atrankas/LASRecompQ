@@ -605,12 +605,13 @@ static void tab_display(void) {
                "next start of the app.");
 #endif
 #ifdef __ANDROID__
-    static const char *pwr[] = {"Balanced", "Maximum performance"};
-    opt_choice("Power", &g_settings.power_mode, pwr, 2, 0,
+    static const char *pwr[] = {"Balanced", "Maximum performance", "GPU performance"};
+    opt_choice("Power", &g_settings.power_mode, pwr, 3, 0,
                "Rooted phones: Balanced keeps the GPU a step under its top clock and leaves the phone's CPU and "
                "temperature limits alone - cooler, easier on the battery and safe on a worn one; the resolution "
-               "adjusts. Maximum performance holds every clock at the top, past those limits: the sharpest picture, a "
-               "hot phone, and a worn battery may not keep up (the phone restarts).");
+               "adjusts. GPU performance holds only the GPU at its top clock (the CPU's limits stay): the sharpest "
+               "picture for a warm phone, while the battery stays under 45 C. Maximum performance holds every clock at "
+               "the top, past those limits: a hot phone, and a worn battery may not keep up (the phone restarts).");
 #endif
 
     opt_section("Game");

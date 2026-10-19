@@ -176,7 +176,7 @@ void settings_load(void) {
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
         else if (!strcmp(key, "frame_gen")) g_settings.frame_gen = atoi(val);
-        else if (!strcmp(key, "power_mode")) g_settings.power_mode = atoi(val) == 1;
+        else if (!strcmp(key, "power_mode")) g_settings.power_mode = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
         else if (!strcmp(key, "ui_language")) g_settings.ui_language = atoi(val) >= 0 && atoi(val) < N_UI_LANGUAGES ? atoi(val) : 0;
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
         else if (!strcmp(key, "prompts")) g_settings.prompts = !strcmp(val, "nintendo") ? PROMPTS_NINTENDO : !strcmp(val, "xbox") ?

@@ -19,7 +19,9 @@ import java.nio.charset.StandardCharsets;
 // The game's Power setting (power_mode in larecomp.ini, read every second): 0 balanced - the GPU's floor at about
 // three quarters of its top clock, the system's CPU limits and temperature limits respected (the phone ran hot within
 // the hour with the GPU held at its top clock, and restarted under peak load with the CPU caps lifted); 1 maximum
-// performance - as described above.
+// performance - as described above; 2 GPU performance - the GPU as in 1 (top clock, no skin-temperature cap while the
+// battery is under 45 C), the CPU's limits as in 0 (S20 FE, 1080p + frame generation: 36 -> 27 ms of GPU a frame, 41 C
+// skin after 10 min).
 final class RootBoost {
     private static final String TAG = "LASRecomp";
     private static final String SCRIPT =
@@ -48,6 +50,15 @@ final class RootBoost {
         // the battery stays under 45 C; above that the system's thermal control is left alone
         "    bt=$(cat /sys/class/power_supply/battery/temp 2>/dev/null)\n" +
         "    [ \"${bt:-999}\" -lt 450 ] && echo 0 > $g/thermal_pwrlevel 2>/dev/null\n" +
+        "  elif [ \"$mode\" = 2 ]; then\n" +
+        // (GPU only: its top clock and no skin-temperature cap while the battery stays under 45 C, the CPU's limits
+        // as the system sets them - the GPU is what the game waits for, lifting the CPU caps is what restarted the phone)
+        "    [ -n \"$lim\" ] && [ \"$(cat /sys/power/cpufreq_max_limit 2>/dev/null)\" = -1 ] && echo $lim > /sys/power/cpufreq_max_limit 2>/dev/null\n" +
+        "    cat $g/devfreq/max_freq > $g/devfreq/min_freq 2>/dev/null\n" +
+        "    echo 0 > $g/min_pwrlevel 2>/dev/null\n" +
+        "    bt=$(cat /sys/class/power_supply/battery/temp 2>/dev/null)\n" +
+        "    if [ \"${bt:-999}\" -lt 450 ]; then echo 0 > $g/thermal_pwrlevel 2>/dev/null\n" +
+        "    elif [ -n \"$tpl\" ] && [ \"$tpl\" != 0 ]; then echo $tpl > $g/thermal_pwrlevel 2>/dev/null; fi\n" +
         "  else\n" +
         // (balanced: the CPU's limits as the system sets them - lifted, the phone restarted under peak load on its
         // worn battery: a hard reset, nothing logged - and those changed by maximum performance put back)

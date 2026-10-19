@@ -37,8 +37,8 @@
 // that its worn battery couldn't keep up (hard resets); maximum performance goes to the limit. (Measured later, the
 // resets were frame generation's passes - but the margin still pays: at the limit the S20 FE reached 48 C and thermal
 // status 4 in 7 minutes and collapsed to 20 fps at 67% speed; with it, 15 minutes at 42 C, 60 shown, same final res.)
-#define DYN_GPU_SLOW (g_settings.power_mode == 1 ? 30.0 : 27.0)
-#define DYN_GPU_ROOM (g_settings.power_mode == 1 ? 26.0 : 23.5)  // (+0.05 near 1: ~10% more pixels, ~1 ms in the Field)
+#define DYN_GPU_SLOW (g_settings.power_mode != 0 ? 30.0 : 27.0)
+#define DYN_GPU_ROOM (g_settings.power_mode != 0 ? 26.0 : 23.5)  // (+0.05 near 1: ~10% more pixels, ~1 ms in the Field)
 extern bool fg_enabled(void);
 static bool fg_on(void) { return fg_enabled(); }
 #else
