@@ -168,9 +168,14 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
 - [x] Quadro gerado: o Link fica onde o quadro real o mostra (posição dele projetada com a câmera, área em volta na
       profundidade dele com transição suave) - não tremia mais para trás e para frente; a busca do Link na memória roda
       numa thread própria (~170 ms no aparelho, era um engasgo a cada troca de área)
-- [ ] Build do jogo no próprio celular (escolher a pasta do jogo, gerar, compilar, abrir): protótipo funciona
-      (Python 3.14 oficial para Android + capstone/unicorn/lz4, zig 0.17 como compilador e linker); integração no app
-      em andamento (`docs/android-ondevice-build.md`)
+- [x] Build do jogo no próprio celular: o jogador instala o APK público (sem código do jogo), escolhe a pasta com
+      exefs/romfs no seletor do sistema, o app copia, gera e compila o código do jogo e abre o jogo. Testado de ponta a
+      ponta no S20 FE: 27 min (813 objetos, 4 núcleos, 42 °C), o jogo rodou com a biblioteca feita no aparelho. Python
+      3.14 oficial para Android + capstone/unicorn/lz4, zig 0.17; gerador com `--split-dispatch` (funções-switch enormes
+      em arquivos próprios sem LICM: Mac 43.8 -> 35.5 min de CPU). APK público: `./gradlew assembleRelease
+      -PonDeviceBuild=true` (76 MB), conferido por `tools/android/ondevice/check_public_apk.sh`
+      (`docs/android-ondevice-build.md`)
+- [x] 1.4x (1008 linhas) + geração no modo "Desempenho da GPU": 60 na tela por 8 min, 100% de velocidade, 41.6 °C
 - Tentado e descartado: stencil para achar personagens (o capim tem o mesmo valor), meia precisão com resultado f32
   (Fable 8: 0.06 ms, ruído), interpolantes puros (tiram o prefetch de textura: mais lento), forçar gmem (+4 ms) ou
   sysmem (igual)
