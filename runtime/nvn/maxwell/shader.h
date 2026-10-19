@@ -97,6 +97,10 @@ extern int maxwell_h2f_bits;
 // 1: no heap import (Vulkan without VK_EXT_external_memory_host): every stage reaches its storage buffers through the
 // address table (GMap / GFast), not only compute (runtime/nvn/vulkan/exec.c mirror_table)
 extern int maxwell_gmem_mirror;
+// Phone (mirror): the heap binding is a zero buffer (exec.c gmem_info), so a load that misses the table reads 0 and the
+// shader skips the heap path (maxwell_gmem_zero); the table's ranges are disjoint (mirror_table merges), so a shader keeps
+// the last range found and reuses it for the next load inside it (maxwell_gfind_cache). device.c sets both.
+extern int maxwell_gmem_zero, maxwell_gfind_cache;
 // 1: half-precision instructions as native fp16 in GLSL (GL_EXT_shader_explicit_arithmetic_types_float16; the device
 // enables shaderFloat16)
 extern int maxwell_half_native;

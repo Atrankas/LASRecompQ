@@ -464,6 +464,11 @@ static void create_device(void) {
     g_vk.host_import = has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);  // guest heap as a GPU buffer (exec.c)
     if (g_vk.host_import) ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
     maxwell_gmem_mirror = !g_vk.host_import;  // (exec.c mirror_table)
+    {   // (shader.h) LARECOMP_VK_GMEM_ZERO=0 / LARECOMP_VK_GFIND_CACHE=0: the loads as before
+        const char *z = getenv("LARECOMP_VK_GMEM_ZERO"), *gc = getenv("LARECOMP_VK_GFIND_CACHE");
+        maxwell_gmem_zero = maxwell_gmem_mirror && (!z || atoi(z));
+        maxwell_gfind_cache = maxwell_gmem_mirror && (!gc || atoi(gc));
+    }
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     g_fault_ext = fault;

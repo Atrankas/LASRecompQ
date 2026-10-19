@@ -27,6 +27,7 @@ uint64_t maxwell_gmem_base, maxwell_gmem_size;
 int maxwell_frag_subgroups = 1;
 int maxwell_h2f_bits = 1;
 int maxwell_gmem_mirror;
+int maxwell_gmem_zero, maxwell_gfind_cache;  // (phone: shader.h)
 int maxwell_half_native;
 int maxwell_precise_pos = 1;
 int maxwell_scalar_cbuf;
@@ -1681,7 +1682,25 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                 "(%s >> (uint(ga & 3ul) * 8u)) & 0xFFu", "uint(sx8(%s >> (uint(ga & 3ul) * 8u)))",
                 "(%s >> (uint(ga & 2ul) * 8u)) & 0xFFFFu", "uint(sx16(%s >> (uint(ga & 2ul) * 8u)))"};
             sp(&c->body, "      uint fw = ok ? gfind(uint(ga)) : 0xFFFFFFFFu;\n");
-            if (!store) {
+            if (!store && maxwell_gmem_zero) {
+                // (phone) a miss reads 0, as the heap binding's zero buffer would: one load, unconditional (index 0 on a
+                // miss: in the buffer), then a select - no branch per word
+                sp(&c->body, "      uint fwi = fw != 0xFFFFFFFFu ? fw : 0u;\n");
+                if (size < 4) {
+                    if (d != RZ) {
+                        char fast[160];
+                        snprintf(fast, sizeof fast, gl_small[size], "gv");
+                        c->reg_used[d] = 1;
+                        sp(&c->body, "      { uint gv = gfast_.w[fwi]; r%d = fw != 0xFFFFFFFFu ? %s : 0u; }\n", d, fast);
+                    }
+                } else {
+                    for (int k = 0; k < nw; k++)
+                        if (d != RZ && d + k < RZ) {
+                            c->reg_used[d + k] = 1;
+                            sp(&c->body, "      { uint gv = gfast_.w[fwi + %du]; r%d = fw != 0xFFFFFFFFu ? gv : 0u; }\n", k, d + k);
+                        }
+                }
+            } else if (!store) {
                 if (size < 4) {
                     if (d != RZ) {
                         char fast[160], slow[160];
@@ -3017,8 +3036,14 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GMap { uvec4 gmap[%d]; };\n", set, GMAP_BUFFER_INDEX, GMAP_MAX + 1);
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GFast { uint w[]; } gfast_;\n", set, GFAST_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
-        sp(&s, "uint gfind(uint g) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uint o = g - gmap[i].x; "
-               "if (g >= gmap[i].x && o < gmap[i].y) return gmap[i].z + (o >> 2); } return 0xFFFFFFFFu; }\n", GMAP_MAX);
+        if (maxwell_gfind_cache)  // the ranges are disjoint (exec.c mirror_table): the last range found serves the next load in it
+            sp(&s, "uint gc_lo = 0u, gc_sz = 0u, gc_w = 0u;\n"
+                   "uint gfind(uint g) { uint o = g - gc_lo; if (g >= gc_lo && o < gc_sz) return gc_w + (o >> 2); uint n = gmap[%d].x; "
+                   "for (uint i = 0u; i < n; i++) { o = g - gmap[i].x; if (g >= gmap[i].x && o < gmap[i].y) { gc_lo = gmap[i].x; "
+                   "gc_sz = gmap[i].y; gc_w = gmap[i].z; return gc_w + (o >> 2); } } return 0xFFFFFFFFu; }\n", GMAP_MAX);
+        else
+            sp(&s, "uint gfind(uint g) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uint o = g - gmap[i].x; "
+                   "if (g >= gmap[i].x && o < gmap[i].y) return gmap[i].z + (o >> 2); } return 0xFFFFFFFFu; }\n", GMAP_MAX);
     }
     if (c->uses_rscale && stage != STAGE_VERTEX) {
         sp(&s, "layout(std140, set = %d, binding = 18) uniform RScale { vec4 rscale[%d]; };\n", set,
