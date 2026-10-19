@@ -25,6 +25,7 @@ int main(int argc, char **argv) {
     ShaderKey key;
     memset(&key, 0, sizeof key);
     key.glsl = 1;
+    key.vs_out_mask = getenv("FLOW_VSMASK") ? (uint32_t)strtoul(getenv("FLOW_VSMASK"), NULL, 0) : 0xFFFFFFFFu;  // (a fragment shader: its varyings all provided, as on the phone)
     size_t cmax = getenv("FLOW_CMAX") ? strtoul(getenv("FLOW_CMAX"), NULL, 0) : (size_t)n;  // LARECOMP_SAVE_BLOB dumps cmax + 4 KB of constants
     ShaderInfo *si = maxwell_translate(blob, cmax, stage, &key);
     if (!si || !si->msl) { fprintf(stderr, "translation failed\n"); return 1; }
