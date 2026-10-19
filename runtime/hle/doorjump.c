@@ -13,11 +13,13 @@
 // LARECOMP_ADDF_MATCH bisection, notes/PLAN.md). It's re-found by a heap scan after each level load.
 #include "../game_addresses.h"
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../hle.h"
+#include "../platform.h"
 #include "../rando.h"
 
 // GA_PLAYER_STATUS_PTR: PlayerStatus*: current level name at +0
@@ -130,6 +132,7 @@ static uint64_t find_player(uint64_t frame) {
     g_player = 0;
     if (frame - g_player_scan < 30) return 0;
     g_player_scan = frame;
+    uint64_t t0 = plat_now_ns();
     extern int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
     uint64_t ra[64], rs[64];
     int nr = kernel_data_regions(ra, rs, 64), n = 0;
@@ -143,8 +146,8 @@ static uint64_t find_player(uint64_t frame) {
                 g_player = ra[r] + k;
                 n++;
             }
-    LOG("[doorjump] %s: PlayerCollision %s %llx (%d candidates)\n", lv, g_player ? "at" : "not found",
-        (unsigned long long)g_player, n);
+    LOG("[doorjump] %s: PlayerCollision %s %llx (%d candidates, %.1f ms)\n", lv, g_player ? "at" : "not found",
+        (unsigned long long)g_player, n, (plat_now_ns() - t0) / 1e6);
     return g_player;
 }
 
@@ -308,8 +311,65 @@ static void place_tick(uint64_t frame) {
     if (ENV("LARECOMP_DOORJUMP_TRACE")) trace_until = (long)frame + 240;
 }
 
+// Link's position for the generated frames (runtime/nvn/vulkan/framegen.c, the render thread): kept each frame.
+// His component is found by a heap scan on a thread of its own (a scan takes ~170 ms on a phone: on the game thread
+// it was a hitch at every level change); the game thread only checks the result before reading it.
+static volatile float g_link_pos[3];
+static volatile bool g_link_ok;
+bool doorjump_link_pos(float p[3]) {
+    if (!g_link_ok) return false;
+    p[0] = g_link_pos[0], p[1] = g_link_pos[1], p[2] = g_link_pos[2];
+    return true;
+}
+static volatile uint64_t g_async_found;  // the scan's result (0 = none)
+static volatile int g_async_state;       // 0 idle, 1 scanning, 2 done
+static void *link_scan(void *arg) {
+    (void)arg;
+    extern int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
+    uint64_t ra[64], rs[64], found = 0;
+    int nr = kernel_data_regions(ra, rs, 64);
+    for (int r = 0; r < nr; r++)
+        for (uint64_t k = 0; k + 0x100 <= rs[r]; k += 16)
+            if (LD64(ra[r] + k) == GUEST(GA_PLAYER_COLLISION_VT) && is_player_collision(ra[r] + k)) found = ra[r] + k;
+    g_async_found = found;
+    __atomic_store_n(&g_async_state, 2, __ATOMIC_RELEASE);
+    return NULL;
+}
+static void link_tick(uint64_t frame) {
+    extern bool fg_enabled(void) __attribute__((weak));
+    static char level[64];
+    static uint64_t since, pc;
+    static bool scanned;
+    if (!fg_enabled || !fg_enabled()) { g_link_ok = false; return; }
+    uint64_t ps = LD64(GUEST(GA_PLAYER_STATUS_PTR));
+    const char *lv = ps ? (const char *)(uintptr_t)ps : "";
+    int st = __atomic_load_n(&g_async_state, __ATOMIC_ACQUIRE);
+    if (strncmp(level, lv, sizeof level - 1)) {  // new level: scan once it has settled (the old one's player lingers)
+        strlcpy(level, lv, sizeof level);
+        since = frame, pc = 0, scanned = false;
+    }
+    if (st == 2) {
+        pc = g_async_found;
+        g_async_state = 0;
+        LOG("[framegen] %s: Link %s\n", lv, pc ? "found" : "not found");
+    }
+    if (pc && !is_player_collision(pc)) pc = 0, scanned = false, since = frame;  // (gone: look again)
+    if (!pc && !scanned && st == 0 && frame - since >= 30) {
+        pthread_t t;
+        g_async_state = 1;
+        if (pthread_create(&t, NULL, link_scan, NULL) == 0) pthread_detach(t), scanned = true;
+        else g_async_state = 0;
+    }
+    if (pc) {
+        const float *p0 = (const float *)(uintptr_t)(pc + 0x80);
+        g_link_pos[0] = p0[0], g_link_pos[1] = p0[1], g_link_pos[2] = p0[2];
+    }
+    g_link_ok = pc != 0;
+}
+
 void doorjump_tick(uint64_t frame) {
     place_tick(frame);
+    link_tick(frame);
     if (g_njumps < 0) load();
     {   // LARECOMP_LOG_LINK=<every N frames>: Link's position (movement tests)
         static int every = -1;

@@ -41,17 +41,18 @@ static const char kWarp[] =
     "layout(location = 0) in vec2 uv;\n"
     "layout(location = 0) out vec4 o;\n"
     // m0..m3: rows of (generated view-projection) x inverse(this frame's); rect: the game picture in the window (uv);
-    // crop: the part of the presented picture shown there; a: y flip (game NDC up = image top), depth in [-1, 1],
-    // present flip, unused; b: the presented picture's content scale (xy), the depth's (zw)
+    // crop: the part of the presented picture shown there; a: flags (1 y flip: game NDC up = image top, 2 depth in
+    // [-1, 1], 4 present flip), Link's radius (uv, 0 = none), his depth, the mode; b: Link (uv), the depth's scale (zw)
     "layout(push_constant) uniform P { vec4 m0; vec4 m1; vec4 m2; vec4 m3; vec4 rect; vec4 crop; vec4 a; vec4 b; } p;\n"
-    "vec2 toGame(vec2 w) { vec2 q = (w - p.rect.xy) / p.rect.zw; if (p.a.z > 0.5) q.y = 1.0 - q.y; return p.crop.xy + q * p.crop.zw; }\n"
-    "vec2 toWin(vec2 g) { vec2 q = (g - p.crop.xy) / p.crop.zw; if (p.a.z > 0.5) q.y = 1.0 - q.y; return p.rect.xy + q * p.rect.zw; }\n"
+    "bool flag(uint f) { return (uint(p.a.x) & f) != 0u; }\n"
+    "vec2 toGame(vec2 w) { vec2 q = (w - p.rect.xy) / p.rect.zw; if (flag(4u)) q.y = 1.0 - q.y; return p.crop.xy + q * p.crop.zw; }\n"
+    "vec2 toWin(vec2 g) { vec2 q = (g - p.crop.xy) / p.crop.zw; if (flag(4u)) q.y = 1.0 - q.y; return p.rect.xy + q * p.rect.zw; }\n"
     "layout(set = 0, binding = 4) uniform sampler2D hudMask;\n"  // where the HUD is: a quarter of the presented picture
     // (bilinear: also a texel around it)
     "bool hudAt(vec2 g) { return textureLod(hudMask, g, 0.0).r > 0.01; }\n"
     // where the scene point at g lands in the generated picture
     "vec2 moved(vec2 g) {\n"
-    "  vec2 n = g / p.b.xy;\n"
+    "  vec2 n = g;\n"
     // the depth as an average over ~9x9 pixels (five plain fetches, as view distance): the exact depth tore thin
     // layered things (tall grass, plants) into rows when the camera moved - neighbouring pixels near and far
     "  vec2 o = 4.0 / vec2(textureSize(depthT, 0));\n"
@@ -61,22 +62,36 @@ static const char kWarp[] =
     "    z += 1.0 / max(1.0 - textureLod(depthT, q, 0.0).r, 1e-6);\n"
     "  }\n"
     "  float d = 1.0 - 5.0 / z;\n"
-    "  vec4 c = vec4(n.x * 2.0 - 1.0, p.a.x > 0.5 ? 1.0 - 2.0 * n.y : 2.0 * n.y - 1.0, p.a.y > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
+    "  vec4 c = vec4(n.x * 2.0 - 1.0, flag(1u) ? 1.0 - 2.0 * n.y : 2.0 * n.y - 1.0, flag(2u) ? d * 2.0 - 1.0 : d, 1.0);\n"
     "  vec4 h = vec4(dot(p.m0, c), dot(p.m1, c), dot(p.m2, c), dot(p.m3, c));\n"
     "  if (h.w <= 1e-5) return g;\n"
     "  vec2 e = h.xy / h.w;\n"
-    "  vec2 n2 = vec2(e.x * 0.5 + 0.5, p.a.x > 0.5 ? 0.5 - e.y * 0.5 : e.y * 0.5 + 0.5);\n"
-    "  return n2 * p.b.xy;\n"
+    "  vec2 n2 = vec2(e.x * 0.5 + 0.5, flag(1u) ? 0.5 - e.y * 0.5 : e.y * 0.5 + 0.5);\n"
+    "  return n2;\n"
+    "}\n"
+    // Link (the player) moves on his own and the camera follows him: kept where the real frame has him instead of
+    // being moved with the scenery (he shook back and forth). How much (1 = held): around his projected position,
+    // at his depth, easing into the scenery's movement towards the edge (a continuous bend: no seam, no second Link)
+    "float linkW(vec2 g) {\n"
+    "  if (p.a.y <= 0.0) return 0.0;\n"
+    "  vec2 ts = vec2(textureSize(depthT, 0));\n"
+    "  vec2 d = (g - p.b.xy) / vec2(p.a.y, p.a.y * ts.x * p.b.z / (ts.y * p.b.w));\n"
+    "  float r2 = dot(d, d);\n"
+    "  if (r2 >= 1.0) return 0.0;\n"
+    "  float z = 1.0 / max(1.0 - textureLod(depthT, g * p.b.zw, 0.0).r, 1e-6);\n"
+    "  return (1.0 - smoothstep(0.35, 1.0, sqrt(r2))) * (1.0 - smoothstep(0.05, 0.1, abs(z * p.a.z - 1.0)));\n"
     "}\n"
     "void main() {\n"
-    "  if (p.a.w > 1.5) { vec2 n = toGame(uv) / p.b.xy; float d = textureLod(depthT, n * p.b.zw, 0.0).r; o = vec4(vec3(clamp((1.0 - d) * 20.0, 0.0, 1.0)), 1.0); return; }\n"  // (LARECOMP_FRAMEGEN_DEBUG=depth)
-    "  if (p.a.w > 0.5) { o = textureLod(comp, uv, 0.0); return; }\n"  // (LARECOMP_FRAMEGEN_PLAIN: the cost without the warp)
+    "  if (p.a.w > 1.5 && p.a.w < 2.5) { vec2 n = toGame(uv); float d = textureLod(depthT, n * p.b.zw, 0.0).r; o = vec4(vec3(clamp((1.0 - d) * 20.0, 0.0, 1.0)), 1.0); return; }\n"  // (LARECOMP_FRAMEGEN_DEBUG=depth)
+    "  if (p.a.w > 0.5 && p.a.w < 1.5) { o = textureLod(comp, uv, 0.0); return; }\n"  // (LARECOMP_FRAMEGEN_PLAIN: the cost without the warp)
     "  if (any(lessThan(uv, p.rect.xy)) || any(greaterThan(uv, p.rect.xy + p.rect.zw))) { o = textureLod(comp, uv, 0.0); return; }\n"
     "  vec2 g = toGame(uv);\n"
+    "  if (p.a.w > 2.5) { o = textureLod(comp, uv, 0.0); o.r = max(o.r, linkW(g)); return; }\n"  // (LARECOMP_FRAMEGEN_DEBUG=link)
     "  if (hudAt(g)) { o = textureLod(comp, uv, 0.0); return; }\n"
     "  vec2 lo = p.crop.xy, hi = p.crop.xy + p.crop.zw;\n"
     "  vec2 s = g;\n"
     "  for (int i = 0; i < 2; i++) s = clamp(g - (moved(s) - s), lo, hi);\n"  // (the source pixel that lands here)
+    "  s = mix(s, g, linkW(g));\n"
     "  o = hudAt(s) ? vec4(textureLod(scene, s, 0.0).rgb, 1.0) : textureLod(comp, toWin(s), 0.0);\n"
     "}\n";
 
@@ -380,6 +395,35 @@ static bool build_mask(VkCommandBuffer cb) {
     return true;
 }
 
+// Link's place in the real frame (game uv), the radius around it holding him (uv, horizontal) and the depth buffer's
+// value there (1 - d, as the warp compares view distances); nothing when he isn't known (runtime/hle/doorjump.c)
+static void link_on_screen(float flags, float uvo[2], float *radius, float *depth) {
+    extern bool doorjump_link_pos(float p[3]);
+    static int on = -1;  // LARECOMP_FRAMEGEN_LINK=0/1
+    if (on < 0) on = getenv("LARECOMP_FRAMEGEN_LINK") ? atoi(getenv("LARECOMP_FRAMEGEN_LINK")) : 1;
+    float w[3];
+    if (!on || !doorjump_link_pos(w)) return;
+    float c[2][4];
+    for (int k = 0; k < 2; k++) {  // his middle, and 1.1 to the side of it
+        float q[4] = {w[0] + (k ? 1.1f : 0), w[1] + 0.7f, w[2], 1};
+        for (int r = 0; r < 4; r++) c[k][r] = g_vp[r * 4] * q[0] + g_vp[r * 4 + 1] * q[1] + g_vp[r * 4 + 2] * q[2] + g_vp[r * 4 + 3] * q[3];
+        if (c[k][3] <= 1e-3f) return;
+    }
+    bool yflip = ((int)flags & 1) != 0, dneg = ((int)flags & 2) != 0;
+    float x0 = c[0][0] / c[0][3] * 0.5f + 0.5f, y0 = c[0][1] / c[0][3];
+    y0 = yflip ? 0.5f - y0 * 0.5f : y0 * 0.5f + 0.5f;
+    float x1 = c[1][0] / c[1][3] * 0.5f + 0.5f;
+    float z = c[0][2] / c[0][3];
+    if (dneg) z = z * 0.5f + 0.5f;
+    if (x0 < -0.2f || x0 > 1.2f || y0 < -0.2f || y0 > 1.2f || z >= 1) return;
+    uvo[0] = x0, uvo[1] = y0;
+    *radius = fabsf(x1 - x0);
+    *depth = 1 - z;
+    static int nlog;
+    if (getenv("LARECOMP_FRAMEGEN_DEBUG") && nlog++ % 60 == 0)
+        LOG("[framegen] Link (%.2f %.2f %.2f) at uv %.3f %.3f r %.3f depth %.5f\n", w[0], w[1], w[2], x0, y0, *radius, z);
+}
+
 // device.c, inside the in-between frame's rendering into the swapchain image: draws it. fin: the presented picture;
 // rect: where it lies in the window (pixels), crop: the part of it shown; flip_present: lower-left origin
 bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBackend *fin, const float rect[4], const float crop[4],
@@ -408,18 +452,18 @@ bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBack
     memcpy(pc.m, m, sizeof m);
     pc.rect[0] = rect[0] / ww, pc.rect[1] = rect[1] / wh, pc.rect[2] = rect[2] / ww, pc.rect[3] = rect[3] / wh;
     memcpy(pc.crop, crop, sizeof pc.crop);
-    pc.a[0] = nvn_window_origin() == 0 ? 1.0f : 0.0f;
-    pc.a[1] = nvn_depth_mode() == 0 ? 1.0f : 0.0f;
-    pc.a[2] = flip_present ? 1.0f : 0.0f;
+    pc.a[0] = (float)((nvn_window_origin() == 0 ? 1 : 0) | (nvn_depth_mode() == 0 ? 2 : 0) | (flip_present ? 4 : 0));
+    pc.a[1] = 0, pc.a[2] = 0, pc.b[0] = pc.b[1] = 0;
+    link_on_screen(pc.a[0], pc.b, &pc.a[1], &pc.a[2]);
     // a camera that didn't move: the real picture again, without the per-pixel reprojection
     float still = 0;
     for (int i = 0; i < 16; i++) still = fmaxf(still, fabsf(g_vp[i] - g_vp_prev[i]) / (fabsf(g_vp[i]) + 1e-3f));
-    pc.a[3] = getenv("LARECOMP_FRAMEGEN_DEBUG") ? 2.0f : getenv("LARECOMP_FRAMEGEN_PLAIN") || still < 1e-5f ? 1.0f : 0.0f;
+    const char *dbg = getenv("LARECOMP_FRAMEGEN_DEBUG");
+    pc.a[3] = dbg && !strcmp(dbg, "link") ? 3.0f : dbg ? 2.0f : getenv("LARECOMP_FRAMEGEN_PLAIN") || still < 1e-5f ? 1.0f : 0.0f;
     static int nlog;
     if (getenv("LARECOMP_FRAMEGEN_DEBUG") && nlog++ < 3)
         LOG("[framegen] depth %ux%u scale %.3f %.3f, picture %ux%u, rect %.0f %.0f %.0f %.0f crop %.3f %.3f %.3f %.3f\n", db->width, db->height,
             g_depth_scale[0], g_depth_scale[1], fin->width, fin->height, rect[0], rect[1], rect[2], rect[3], crop[0], crop[1], crop[2], crop[3]);
-    pc.b[0] = 1, pc.b[1] = 1;  // (scaled images are made at their scaled size: the content fills them)
     pc.b[2] = g_depth_scale[0], pc.b[3] = g_depth_scale[1];
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     static const bool lin[5] = {true, true, true, false, true};
