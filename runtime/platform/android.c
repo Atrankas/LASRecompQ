@@ -299,15 +299,43 @@ void plat_crash_handler_install(void) {
     sigaction(SIGABRT, &sa, NULL);
 }
 
-// ---- child processes (none on Android: the seed generator and the game code build run elsewhere)
+// ---- child processes: as on Linux (posix_spawn). Android runs programs only from the app's native library folder
+// (lib*.so in jniLibs, extracted at install), e.g. the on-phone game code build's python and compiler
+// (docs/android-ondevice-build.md); nothing starts any yet.
 #include <ftw.h>
+#include <spawn.h>
+#include <sys/wait.h>
+extern char **environ;
 
 PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_log) {
-    (void)argv; (void)log_path; (void)append_log;
-    return 0;
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 1, log_path ? log_path : "/dev/null",
+                                     O_WRONLY | O_CREAT | (append_log ? O_APPEND : O_TRUNC), 0644);
+    posix_spawn_file_actions_adddup2(&fa, 1, 2);
+    posix_spawnattr_t at;  // (its own process group: plat_proc_kill ends what it starts)
+    posix_spawnattr_init(&at);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&at, 0);
+    pid_t pid;
+    int rc = posix_spawn(&pid, argv[0], &fa, &at, (char *const *)argv, environ);
+    posix_spawnattr_destroy(&at);
+    posix_spawn_file_actions_destroy(&fa);
+    return rc ? 0 : (PlatProc)pid;
 }
-void plat_proc_kill(PlatProc p) { (void)p; }
-int plat_proc_wait(PlatProc p, bool block) { (void)p; (void)block; return 255; }
+
+void plat_proc_kill(PlatProc p) {
+    kill(-(pid_t)p, SIGKILL);
+    waitpid((pid_t)p, NULL, 0);
+}
+
+int plat_proc_wait(PlatProc p, bool block) {
+    int st = 0;
+    pid_t r = waitpid((pid_t)p, &st, block ? 0 : WNOHANG);
+    if (r == 0) return -1;
+    if (r < 0) return 255;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 255;
+}
 
 static int rm_entry(const char *path, const struct stat *sb, int flag, struct FTW *ftw) {
     (void)sb, (void)flag, (void)ftw;

@@ -491,6 +491,7 @@ class Module:
             out.append('    __attribute__((musttail)) return rt_dispatch(c);')
         out.append('}')
         self._refs = refs
+        self._all_labels = all_labels
         return out
 
 
@@ -503,6 +504,10 @@ RANDO_CODE = {}
 if _os.path.exists(_rv):
     for _a, _ws in _json.load(open(_rv))['code'].items():
         RANDO_CODE[int(_a, 16)] = [int(_w, 16) for _w in _ws]
+
+
+# First line of a --split-dispatch file (build_game.sh / runtime/gamebuild.c look for it; keep in step)
+SPLIT_MARK = '/* lasgen: split-dispatch */'
 
 
 def write_if_changed(path, text):
@@ -531,6 +536,12 @@ def main():
     ap.add_argument('--simd', choices=('asm', 'c'),
                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
     ap.add_argument('--shift', type=lambda s: int(s, 0), default=0)
+    # Functions with a jump table get every instruction as a label (emit_function all_labels): one dispatch switch
+    # over the whole function, which clang's LICM promotion takes minutes on (quadratic in the loop that switch
+    # makes; e.g. a 5000-instruction one: ~2-4 min at -O2 on an M1, 1 s at -O0). With N > 0, such a function of N
+    # instructions or more goes into a file of its own whose first line is SPLIT_MARK: the build compiles those files
+    # with -mllvm -disable-licm-promotion (tools/android/gamelib_id.sh --split-flags), the rest unchanged.
+    ap.add_argument('--split-dispatch', type=int, default=0)
     args = ap.parse_args()
     global SHIFT
     SHIFT = args.shift
@@ -604,32 +615,39 @@ def main():
         order = order[:args.limit]
     nchunks = 0
     ci = 0
-    pending = None  # (address, lines, refs) of a big function that starts the next file
+    pending = None  # (address, lines, refs, split) of a big function that starts the next file
+    nsplit = 0
     while ci < len(order) or pending:
-        body, refs, size, fns = [], set(), 0, []
+        body, refs, size, fns, split = [], set(), 0, [], False
         while (pending or ci < len(order)) and len(fns) < args.chunk and size < args.chunk_bytes:
             if pending:
-                a, lines, r = pending
+                a, lines, r, sp = pending
                 pending = None
             else:
                 a = order[ci]
                 ci += 1
                 end, labels, tables = entries[a]
+                m._all_labels = False  # (an HLE stub returns before setting it)
                 lines = m.emit_function(a, end, labels, tables, hle)
                 r = getattr(m, '_refs', set())
                 m._refs = set()
+                sp = args.split_dispatch > 0 and m._all_labels and (end - a) // 4 >= args.split_dispatch
             n = sum(len(l) + 1 for l in lines)
-            if n > args.big_fn and fns:  # (a big function gets a file of its own: they compile in parallel)
-                pending = (a, lines, r)
+            alone = n > args.big_fn or sp  # (a big function gets a file of its own: they compile in parallel)
+            if alone and fns:
+                pending = (a, lines, r, sp)
                 break
             body += lines
             size += n
             fns.append(a)
             refs |= r
-            if n > args.big_fn:
+            if alone:
+                split = sp
                 break
         path = os.path.join(args.outdir, f'{args.name}_{nchunks:03d}.c')
-        text = ['#include "cpu.h"\n' + ('#include "simd.h"\n' if m.lifter.sc else '')]
+        text = [SPLIT_MARK + '\n' if split else '']
+        nsplit += split
+        text += ['#include "cpu.h"\n' + ('#include "simd.h"\n' if m.lifter.sc else '')]
         text += [f'void {fname(r)}(Cpu *c);\n' for r in sorted(refs)]
         text += [f'void {sanitize(hle[a])}(Cpu *c);\n' for a in sorted(set(hle) & set(fns))]
         text += ['\n'.join(body), '\n']
@@ -654,7 +672,7 @@ def main():
         f.write('};\n')
         f.write(f'const uint64_t {args.name}_fn_count = {len(order)};\n')
         write_if_changed(os.path.join(args.outdir, f'{args.name}_table.c'), f.getvalue())
-    print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
+    print(f'{args.name}: wrote {nchunks} chunks ({nsplit} split dispatch), {time.time() - t0:.0f}s total', file=sys.stderr)
 
 
 if __name__ == '__main__':

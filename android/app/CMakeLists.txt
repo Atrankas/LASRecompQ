@@ -39,6 +39,11 @@ execute_process(COMMAND ${ROOT}/tools/android/gamelib_id.sh OUTPUT_VARIABLE GAME
                 COMMAND_ERROR_IS_FATAL ANY)
 execute_process(COMMAND ${ROOT}/tools/android/gamelib_id.sh --flags OUTPUT_VARIABLE GAMELIB_FLAGS
                 OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+# (building it on the phone, runtime/gamebuild.c: the same generator options and split-dispatch flags as build_game.sh)
+execute_process(COMMAND ${ROOT}/tools/android/gamelib_id.sh --split-flags OUTPUT_VARIABLE GAMELIB_SPLIT
+                OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+execute_process(COMMAND ${ROOT}/tools/android/gamelib_id.sh --gen-args OUTPUT_VARIABLE GAMELIB_GENARGS
+                OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
 foreach(f tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/simd_c.py
           tools/rando/patch_variants.json tools/gamelib_entry.c runtime/hle/hle_symbols.txt runtime/cpu.h runtime/simd.h
           runtime/simd_fp.h runtime/gamelib.h tools/android/gamelib_id.sh)
@@ -79,7 +84,8 @@ target_include_directories(main PRIVATE ${ROOT}/runtime ${ROOT}/runtime/nvn ${IM
 # and Android's libvulkan, which exports only the API level's core functions)
 target_compile_definitions(main PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_ANDROID_KHR IMGUI_IMPL_VULKAN_USE_VOLK
                                         "GAMELIB_ID=\"${GAMELIB_ID}\"" "GAMELIB_CFLAGS=\"${GAMELIB_FLAGS}\""
-                                        "GAMELIB_SHARED=\"-shared\"")
+                                        "GAMELIB_SHARED=\"-shared\"" "GAMELIB_SPLIT_FLAGS=\"${GAMELIB_SPLIT}\""
+                                        "GAMELIB_GEN_ARGS=\"${GAMELIB_GENARGS}\"")
 target_compile_options(main PRIVATE -fsigned-char -fno-strict-aliasing
                                     $<$<COMPILE_LANGUAGE:C>:-Wall -Wno-unused-function -Wno-format>
                                     $<$<COMPILE_LANGUAGE:CXX>:-std=c++17 -Wno-format>)

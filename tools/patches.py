@@ -223,6 +223,7 @@ def _item_name(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
     assert w == 0x94035896, hex(w)  # bl 0x7000f8c8b0
     return addr_text('c->x[30] = GUEST(0x@ITEM_NAME_RETURN@ull); { extern int rt_hide_item_explanation(void); '
+            'extern void f_@ITEM_NAME_TARGET@(Cpu *); '  # (declared here: its file may not declare it otherwise)
             'if (!rt_hide_item_explanation()) f_@ITEM_NAME_TARGET@(c); }'
             f'  /* {a:#x}: bl 0xf8c8b0 (set the item name pane) */')
 

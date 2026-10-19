@@ -46,6 +46,8 @@ fi
 
 ID=$(tools/android/gamelib_id.sh)
 FLAGS=$(tools/android/gamelib_id.sh --flags)
+SPLITFLAGS=$(tools/android/gamelib_id.sh --split-flags)
+GENARGS=$(tools/android/gamelib_id.sh --gen-args)
 GEN=build/android/gen
 OBJ=build/android/gen-obj
 LINKPGO=
@@ -62,17 +64,19 @@ mkdir -p "$GEN" "$OBJ" "$OUT"
 echo "== generating C (game code id $ID)"
 # (unchanged chunks keep their files: a rebuild after a change compiles only what it touched)
 (cd tools && "$ROOT/$VENV/bin/python" gen.py sdk "$EXEFS/sdk" 0x7004000000 "$ROOT/$GEN/sdk" --hle ../runtime/hle/hle_symbols.txt \
-    --simd asm --shift 0x6000000000)
-(cd tools && "$ROOT/$VENV/bin/python" gen.py main "$EXEFS/main" 0x7000000000 "$ROOT/$GEN/main" --simd asm --shift 0x6000000000)
+    $GENARGS)
+(cd tools && "$ROOT/$VENV/bin/python" gen.py main "$EXEFS/main" 0x7000000000 "$ROOT/$GEN/main" $GENARGS)
 
 echo "== compiling ($JOBS jobs)"
 compile() {  # <source> <object>
     [ "$2" -nt "$1" ] && [ "$2" -nt runtime/cpu.h ] && [ "$2" -nt tools/android/gamelib_id.sh ] && { [ -z "${PGOFILE:-}" ] || [ "$2" -nt "$PGOFILE" ]; } && return 0
-    "$CC" $FLAGS -c "$1" -o "$2.tmp" && mv "$2.tmp" "$2"
+    local x=  # (the generator's split-dispatch files: their first line says so, tools/gen.py SPLIT_MARK)
+    head -c 40 "$1" | grep -q 'lasgen: split-dispatch' && x=$SPLITFLAGS
+    "$CC" $FLAGS $x -c "$1" -o "$2.tmp" && mv "$2.tmp" "$2"
 }
 export -f compile
 PGOFILE=$([ -n "$PGO" ] && [ "$PGO" != gen ] && echo "$PGO" || true)
-export CC FLAGS PGOFILE
+export CC FLAGS SPLITFLAGS PGOFILE
 ls "$GEN"/sdk/*.c "$GEN"/main/*.c | while read -r c; do echo "$c $OBJ/$(basename "$(dirname "$c")")_$(basename "$c" .c).o"; done |
     xargs -P "$JOBS" -n 2 bash -c 'compile "$0" "$1" || exit 255'
 "$CC" $FLAGS -DGAMELIB_ID="\"$ID\"" -c tools/gamelib_entry.c -o "$OBJ/gamelib_entry.o"

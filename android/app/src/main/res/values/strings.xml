@@ -3,4 +3,6 @@
     <string name="app_name">LAS Recomp</string>
     <string name="import_title">Copying the game files</string>
     <string name="import_failed">The game files could not be copied: %1$s</string>
+    <string name="build_channel">Building the game code</string>
+    <string name="build_title">Recompiling the game</string>
 </resources>
