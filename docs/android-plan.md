@@ -176,6 +176,15 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
       -PonDeviceBuild=true` (76 MB), conferido por `tools/android/ondevice/check_public_apk.sh`
       (`docs/android-ondevice-build.md`)
 - [x] 1.4x (1008 linhas) + geração no modo "Desempenho da GPU": 60 na tela por 8 min, 100% de velocidade, 41.6 °C
+- [x] Cópias de textura que ninguém lê (captura HDR do quadro a cada frame) viram alias e são puladas: 1080p -1 ms
+- [x] Leituras de memória global nos celulares: uma leitura sem o desvio do heap, último intervalo reaproveitado: baía
+      em 1080p -1.5 ms
+- [x] Cache de pipelines salvo a cada 30 s durante a sessão: sessões curtas perdiam tudo e a próxima recompilava
+      ~1100 pipelines (milhares de draws pulados por segundo, objetos aparecendo atrasados)
+- [ ] 1080p (1.5) + geração por área, "Desempenho da GPU", cache completo: Tail Cave 60 / Bottle Grotto 60 / Mabe
+      56-60 / baía de Martha ~32 na tela (a 1.5 sem geração a baía já fica em ~29 fps, GPU 29-30 ms). A água da baía
+      (1530 instruções, 32 registros, 2 waves; já estruturada) é o maior custo; faltam ~15% de GPU ali. Em 1x a baía
+      custa 19 ms (60 com geração sobrando)
 - Tentado e descartado: stencil para achar personagens (o capim tem o mesmo valor), meia precisão com resultado f32
   (Fable 8: 0.06 ms, ruído), interpolantes puros (tiram o prefetch de textura: mais lento), forçar gmem (+4 ms) ou
   sysmem (igual)
