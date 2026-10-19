@@ -214,7 +214,11 @@ static void tex_scale(const NvnTexture *t, const TexBackend *b, float *sx, float
     if (ss < 1) { *sx = *sy = ss; return; }
     *sx = b->scalable ? g_rs_x : 1, *sy = b->scalable ? g_rs_y : 1;
     float cap = aux_cap();
-    bool aux = t->width <= 400 || (t->width >= 860 && t->width <= 900 && t->height < 560);
+    static int glow = -1;  // LARECOMP_AUX_GLOW=1: the first glow level (800x360) too - exec.c then hands the game's
+    // downsample into it a 2x2-averaged copy of the scene (its single bilinear tap at 3:1 lost the water's sparkles)
+    if (glow < 0) glow = getenv("LARECOMP_AUX_GLOW") ? atoi(getenv("LARECOMP_AUX_GLOW")) != 0 : 0;
+    bool aux = t->width <= 400 || (t->width >= 860 && t->width <= 900 && t->height < 560) ||
+               (glow && t->width == 800 && t->height == 360);
     if (b->scalable && cap > 0 && aux) {
         if (*sx > cap) *sx = cap;
         if (*sy > cap) *sy = cap;

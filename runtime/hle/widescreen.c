@@ -33,6 +33,10 @@ float widescreen_effect_stretch(uint64_t fs_hash) {
     // keep the original vignette)
     extern bool g_room_wide;
     if (fs_hash == 0xc42e882c08c5e5ebull && g_room_wide) return g_wide;
+    // interiors filling the screen (widescreen_present_crop): the backdrop behind the room is a 16:9 quad - widened
+    // with the picture, else its edges showed
+    extern bool widescreen_interior_fill(void);
+    if (fs_hash == BACKDROP_HASHES && widescreen_interior_fill()) return g_wide;
     return 1.0f;
 }
 
@@ -289,6 +293,15 @@ static int room_crop(uint64_t frame, double shape, float *u0, float *u1) {
     return r;
 }
 
+// Interiors and dungeons fill the phone's screen (its own aspect) instead of their 16:9 centre, now that they render
+// wide with the right proportions (the render-resolution setup above). LARECOMP_INTERIOR_FILL=0: boxed as before.
+bool widescreen_interior_fill(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_INTERIOR_FILL") ? atoi(getenv("LARECOMP_INTERIOR_FILL")) != 0 : 1;
+    return on && g_res.wide;
+}
+static bool game_in_play_now(void) { extern int game_in_play(void); return game_in_play() != 0; }
+
 // Presented part of the image (crop: uv origin and size) and its place in the window: interiors and dungeons show
 // their 16:9 centre (taller outputs: the 16:9 band), rooms wider than one screen the part inside the room.
 void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double *vx, double *vy, double *vw, double *vh) {
@@ -297,6 +310,7 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
     crop[0] = crop[1] = 0, crop[2] = crop[3] = 1;
     g_room_wide = false;
     if (shape == 1.0 || !widescreen_frame_boxed(frame)) return;
+    if (shape > 1.0 && widescreen_interior_fill() && game_in_play_now()) { g_room_wide = true; return; }  // (the whole screen)
     if (shape < 1.0) {
         crop[1] = (float)((1.0 - shape) / 2); crop[3] = (float)shape;
         double nh = *vh * shape; *vy += (*vh - nh) / 2; *vh = nh;
