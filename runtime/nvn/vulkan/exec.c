@@ -1597,6 +1597,19 @@ static void save_glsl(const char *src, uint64_t addr, const char *suffix) {
     if (f) { fputs(src, f); fclose(f); }
 }
 
+// LARECOMP_SAVE_BLOB=1 (with LARECOMP_SAVE_MSL): the shader's code too, build/glsl/<addr>_<stage>.bin, for tools/flow_driver
+static void save_blob(const uint8_t *code, size_t max, uint64_t addr, const char *suffix) {
+    if (!getenv("LARECOMP_SAVE_MSL") || !getenv("LARECOMP_SAVE_BLOB")) return;
+    char dir[512] = "build";
+#ifdef __ANDROID__
+    if (SDL_GetAndroidExternalStoragePath()) snprintf(dir, sizeof dir, "%s/build", SDL_GetAndroidExternalStoragePath());
+#endif
+    char path[600];
+    snprintf(path, sizeof path, "%s/glsl/%llx_%s.bin", dir, (unsigned long long)addr, suffix);
+    FILE *f = fopen(path, "wb");
+    if (f) { fwrite(code, 1, (max < 262144 ? max : 262144) + 4096, f); fclose(f); }  // (+ the constants' first 4 KB: brx_table reads them)
+}
+
 static void compile_program(void *arg) {
     Prog *p = arg;
     size_t nv = 0, nf = 0;
@@ -1679,6 +1692,8 @@ static void translate_program(void *arg) {
     if (!translate_program_now(p)) return;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
+    save_blob((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], p->code[0], "vs");
+    save_blob((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], p->code[1], "fs");
     run_job(compile_program, p);
 }
 

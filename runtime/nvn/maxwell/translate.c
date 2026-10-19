@@ -2010,6 +2010,12 @@ static int brx_of(const Ctx *c, size_t i) {
 // their guarded forms may also fall through with the stack as it was. flow_to[i]: the target of the SYNC / BRK /
 // CONT at i. False (keep the stacks) when an instruction is reached with two different stacks, a stack under- or
 // overflows, or the program has a jump table without a table or a call / return.
+// LARECOMP_LOG_FLOW=1: why structure() gave a shader up (and its blocks), to stderr
+static int flow_log(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_LOG_FLOW") ? atoi(getenv("LARECOMP_LOG_FLOW")) : 0;
+    return on;
+}
 typedef struct { uint8_t n[3], seen; uint32_t v[3][16]; } FlowSt;
 static bool resolve_stacks(const Ctx *c, const uint64_t *code, size_t end, int32_t *flow_to) {
     FlowSt *st = calloc(end, sizeof *st);
@@ -2020,8 +2026,14 @@ static bool resolve_stacks(const Ctx *c, const uint64_t *code, size_t end, int32
 #define FLOW_NEXT(i) ((i) + 1 + (((i) + 1) % 4 == 0))
 #define FLOW_GO(j, S) do { size_t j_ = (j); if (j_ >= end) break; \
         if (!st[j_].seen) { st[j_] = (S); st[j_].seen = 1; work[nwork++] = (uint32_t)j_; } \
-        else if (memcmp(st[j_].n, (S).n, 3) || memcmp(st[j_].v, (S).v, sizeof (S).v)) ok = false; } while (0)
-    if (end > 1) { FlowSt e = {{0}}; FLOW_GO(1, e); }
+        else if (memcmp(st[j_].n, (S).n, 3) || memcmp(st[j_].v, (S).v, sizeof (S).v)) { \
+            if (flow_log()) fprintf(stderr, "[flow] stacks: pc %zx reached from pc %zx with %d/%d/%d top %x/%x/%x, before %d/%d/%d top %x/%x/%x\n", \
+                                    j_ * 8, i * 8, (S).n[0], (S).n[1], (S).n[2], (S).n[0] ? (S).v[0][(S).n[0] - 1] : 0, \
+                                    (S).n[1] ? (S).v[1][(S).n[1] - 1] : 0, (S).n[2] ? (S).v[2][(S).n[2] - 1] : 0, \
+                                    st[j_].n[0], st[j_].n[1], st[j_].n[2], st[j_].n[0] ? st[j_].v[0][st[j_].n[0] - 1] : 0, \
+                                    st[j_].n[1] ? st[j_].v[1][st[j_].n[1] - 1] : 0, st[j_].n[2] ? st[j_].v[2][st[j_].n[2] - 1] : 0); \
+            ok = false; } } while (0)
+    if (end > 1) { size_t i = 0; FlowSt e = {{0}}; FLOW_GO(1, e); (void)i; }
     while (nwork && ok) {
         size_t i = work[--nwork];
         FlowSt S = st[i];
@@ -2041,12 +2053,12 @@ static bool resolve_stacks(const Ctx *c, const uint64_t *code, size_t end, int32
             if (cond) FLOW_GO(FLOW_NEXT(i), S);
         } else if (push) {  // SSY / PBK / PCNT
             int k = top == 0xe29 ? 0 : top == 0xe2a ? 1 : 2;
-            if (S.n[k] == 16 || t < 0) { ok = false; break; }
+            if (S.n[k] == 16 || t < 0) { if (flow_log()) fprintf(stderr, "[flow] stacks: pc %x push overflow\n", pc); ok = false; break; }
             S.v[k][S.n[k]++] = (uint32_t)t;
             FLOW_GO(FLOW_NEXT(i), S);
         } else if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || top == 0xe34 || top == 0xe35) {  // SYNC BRK CONT
             int k = top == 0xe34 ? 1 : top == 0xe35 ? 2 : 0;
-            if (!S.n[k]) { ok = false; break; }
+            if (!S.n[k]) { if (flow_log()) fprintf(stderr, "[flow] stacks: pc %x pops an empty stack %d\n", pc, k); ok = false; break; }
             uint32_t to = S.v[k][S.n[k] - 1];
             flow_to[i] = (int32_t)to;
             if (cond) FLOW_GO(FLOW_NEXT(i), S);
@@ -2059,6 +2071,7 @@ static bool resolve_stacks(const Ctx *c, const uint64_t *code, size_t end, int32
             for (int q = 0; q < c->brx[b].n; q++) FLOW_GO(c->brx[b].t[q] / 8, S);
             if (cond) FLOW_GO(FLOW_NEXT(i), S);
         } else if (top >= 0xe20 && top <= 0xe3f && top != 0xe33) {  // BRX, CAL, RET, PRET, ... (KIL: 0xe33)
+            if (flow_log()) fprintf(stderr, "[flow] stacks: pc %x: %016llx (brx without a table / cal / ret)\n", pc, (unsigned long long)w);
             ok = false;
         } else {
             FLOW_GO(FLOW_NEXT(i), S);
@@ -2468,6 +2481,13 @@ typedef struct {
     bool fail, exit_used;
 } SCtx;
 
+static void st_fail(SCtx *x, int k, const char *why) {
+    if (!x->fail && flow_log())
+        fprintf(stderr, "[flow] structure failed at %x (block %d of %d, %d loops, %d switches): %s\n",
+                k >= 0 && k < x->nb ? x->b[k].s * 8 : 0, k, x->nb, x->nloops, x->nsw, why);
+    x->fail = true;
+}
+
 static int st_thread(SCtx *x, int b) {  // through blocks that are only an unconditional jump
     for (int n = 0; b >= 0 && b < x->nb && n < x->nb; n++) {
         SBlk *k = &x->b[b];
@@ -2487,8 +2507,8 @@ static const char *st_jump(SCtx *x, int t) {
         int h = x->loops[l][0], e = x->loops[l][1];
         bool cont = t == h, brk = t == e || st_thread(x, t) == st_thread(x, e);
         if (!cont && !brk) continue;
-        if (l != x->nloops - 1) { x->fail = true; return NULL; }  // (out of two loops)
-        if (brk && x->nsw && x->sw_loops[x->nsw - 1] > l) { x->fail = true; return NULL; }  // (break: the switch's)
+        if (l != x->nloops - 1) { st_fail(x, -1, cont ? "continue out of two loops" : "break out of two loops"); return NULL; }
+        if (brk && x->nsw && x->sw_loops[x->nsw - 1] > l) { st_fail(x, -1, "break out of a switch"); return NULL; }
         return cont ? "continue;" : "break;";
     }
     return NULL;
@@ -2504,11 +2524,11 @@ static int st_switch(SCtx *x, int k, int end, int depth);
 static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt);
 static void st_range(SCtx *x, int a, int end, int opened, int depth) { st_range_alt(x, a, end, opened, depth, -1); }
 static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt) {
-    if (depth > 64) { x->fail = true; return; }
+    if (depth > 64) { st_fail(x, a, "nesting over 64"); return; }
     for (int k = a; k < end && !x->fail;) {
         if (x->latch[k] >= 0 && k != opened) {  // a loop: [k, its last back edge]
             int le = x->latch[k] + 1;
-            if (le > end || x->nloops == 32) { x->fail = true; return; }
+            if (le > end || x->nloops == 32) { st_fail(x, k, le > end ? "loop latch past the region" : "32 loops"); return; }
             sp(&x->out, "  for (;;) {\n");
             x->loops[x->nloops][0] = k, x->loops[x->nloops][1] = le, x->nloops++;
             st_range(x, k, le, k, depth + 1);
@@ -2538,7 +2558,7 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
         int t = b->tgt;
         if (t == end || (alt >= 0 && t == alt)) {  // the rest of the region, when not taken
             if (always) {
-                if (k + 1 < end) x->fail = true;
+                if (k + 1 < end) st_fail(x, k, "unconditional jump to the region's end with code after it");
                 return;
             }
             sp(&x->out, "  if (!(%s)) {\n", b->cond);
@@ -2546,7 +2566,13 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
             sp(&x->out, "  }\n");
             return;
         }
-        if (t <= k || t > end || always) { x->fail = true; return; }
+        if (t <= k || t > end || always) {
+            char why[96];
+            snprintf(why, sizeof why, "%s jump to %x (region %x-%x%s)", t <= k ? "backward non-loop" : t > end ? "forward out-of-region" : "unconditional",
+                     t >= 0 && t < x->nb ? x->b[t].s * 8 : t, x->b[a].s * 8, end < x->nb ? x->b[end].s * 8 : (unsigned)end * 0 + 0xffff, alt >= 0 ? ", alt" : "");
+            st_fail(x, k, why);
+            return;
+        }
         SBlk *last = &x->b[t - 1];
         int J = last->tgt;
         bool els = t - 1 > k && last->term == 1 && !strcmp(last->cond, "true") && J > t && J <= end && !x->consumed[t - 1];
@@ -2595,10 +2621,10 @@ static int st_switch(SCtx *x, int k, int end, int depth) {
     for (int q = 0; q < c->brx[bx].n; q++) {  // (blocks; the list is a superset: words of cbuf 1 that land on code)
         int ti = (int)(c->brx[bx].t[q] / 8), b = 0;
         while (b < x->nb && x->b[b].s != (uint32_t)ti) b++;
-        if (b <= k || b >= x->nb) { x->fail = true; return -1; }
+        if (b <= k || b >= x->nb) { st_fail(x, k, "brx target not a block after it"); return -1; }
         tb[n++] = b;
     }
-    if (!n || tb[0] != k + 1 || x->nsw == 16) { x->fail = true; return -1; }  // (code between the BRX and its first case)
+    if (!n || tb[0] != k + 1 || x->nsw == 16) { st_fail(x, k, "brx: code between it and its first case"); return -1; }  // (code between the BRX and its first case)
     // the join: where most cases that end in a jump go, forward past their own start; the table's words past it are
     // no cases (nor past the region's end)
     int J = -1, best = 0;
@@ -2615,7 +2641,7 @@ static int st_switch(SCtx *x, int k, int end, int depth) {
     if (J > end) J = -1;
     int stop = J >= 0 ? J : end;
     while (n && tb[n - 1] >= stop) n--;
-    if (!n) { x->fail = true; return -1; }
+    if (!n) { st_fail(x, k, "brx: no cases before the join"); return -1; }
     char r[8];
     if (ra == RZ) strcpy(r, "0u"); else snprintf(r, sizeof r, "r%d", ra);
     sp(&x->out, "  { uint bt = %uu + %s + 0x%08xu; if (((bt >> 3) & 3u) == 0u) bt += 8u;\n  switch (bt) {\n",
@@ -2675,7 +2701,7 @@ static bool structure(Ctx *c, const uint64_t *code, size_t end, const uint8_t *l
         if (bx >= 0 && !(pr == PT && prn)) {
             x.skip[i] = 1;
             prev_flow = true;
-            if (pr != PT || prn) ok = false;  // (a guarded one: not handled)
+            if (pr != PT || prn) { ok = false; if (flow_log()) fprintf(stderr, "[flow] structure failed at %zx: guarded brx\n", i * 8); }
             b->term = 3, b->brx = bx, b->tgt = -1;
             strcpy(b->cond, "true");
             continue;
@@ -2694,7 +2720,10 @@ static bool structure(Ctx *c, const uint64_t *code, size_t end, const uint8_t *l
         x.latch[k] = -1;
         if (x.b[k].term != 1) continue;
         int ti = x.b[k].tgt;
-        if (blk[ti] < 0 || x.b[blk[ti]].s != (uint32_t)ti) ok = false;  // (into the middle of a block)
+        if (blk[ti] < 0 || x.b[blk[ti]].s != (uint32_t)ti) {  // (into the middle of a block)
+            ok = false;
+            if (flow_log()) fprintf(stderr, "[flow] structure failed at %x: jump into the middle of a block (%x)\n", x.b[k].s * 8, ti * 8);
+        }
         else x.b[k].tgt = blk[ti];
     }
     for (int k = 0; ok && k < nb; k++) {  // (a table's targets: block starts too)
@@ -2702,7 +2731,10 @@ static bool structure(Ctx *c, const uint64_t *code, size_t end, const uint8_t *l
         const uint32_t *t = c->brx[x.b[k].brx].t;
         for (int q = 0; q < c->brx[x.b[k].brx].n && ok; q++) {
             size_t ti = t[q] / 8;
-            if (blk[ti] < 0 || x.b[blk[ti]].s != (uint32_t)ti) ok = false;
+            if (blk[ti] < 0 || x.b[blk[ti]].s != (uint32_t)ti) {
+                ok = false;
+                if (flow_log()) fprintf(stderr, "[flow] structure failed at %x: brx target into the middle of a block (%zx)\n", x.b[k].s * 8, ti * 8);
+            }
         }
     }
     for (int k = 0; ok && k < nb; k++)
@@ -2712,6 +2744,21 @@ static bool structure(Ctx *c, const uint64_t *code, size_t end, const uint8_t *l
         st_range(&x, 0, nb, -1, 0);
     }
     ok = ok && !x.fail;
+    if (!ok && flow_log()) {  // the blocks: start-end, terminator (cond > target), loop latch
+        fprintf(stderr, "[flow] blocks of the shader with %zu words (word 8: %016llx), %d blocks\n", end, (unsigned long long)code[8], nb);
+        for (int k = 0; k < nb; k += 12) {
+            char line[1024]; int o = 0;
+            for (int q = k; q < nb && q < k + 12; q++) {
+                SBlk *b = &x.b[q];
+                o += snprintf(line + o, sizeof line - o, " %d:%x-%x%s", q, b->s * 8, b->e * 8, b->code ? "c" : "");
+                if (b->term == 1) o += snprintf(line + o, sizeof line - o, "(%s>%d)", b->cond, b->tgt);
+                else if (b->term == 2) o += snprintf(line + o, sizeof line - o, "(%s>exit)", b->cond);
+                else if (b->term == 3) o += snprintf(line + o, sizeof line - o, "(brx)");
+                if (x.latch[q] >= 0) o += snprintf(line + o, sizeof line - o, "L%d", x.latch[q]);
+            }
+            fprintf(stderr, "[flow]  %s\n", line);
+        }
+    }
     if (ok) {
         free(c->body.buf);
         c->body = x.out;
@@ -3341,6 +3388,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         }
         info->num_insts++;
     }
+    if (!c->fail && c->glsl && any_branch && !dbg && nested && !resolved && flow_log())
+        fprintf(stderr, "[flow] structure not attempted: stacks unresolved (%zu words, word 8: %016llx)\n", end, (unsigned long long)((const uint64_t *)code)[8]);
     if (!c->fail && c->glsl && any_branch && !dbg && nested && resolved &&
         structure(c, (const uint64_t *)code, end, label, off0, off1)) {  // if / else / for from program order
         any_branch = false;
