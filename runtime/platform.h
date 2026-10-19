@@ -58,6 +58,7 @@ void plat_terminate(void);  // end the process now, skipping DLL teardown (exit 
 typedef intptr_t PlatProc;  // 0 = failed to start
 PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_log);
 int plat_proc_wait(PlatProc p, bool block);  // exit code, or -1 while still running (block = false)
+#define PLAT_PROC_SIGNALED 256               // + N: ended by signal N instead of exiting (not on Windows)
 void plat_proc_kill(PlatProc p);             // end it and what it started (then it's gone: no wait)
 bool plat_remove_tree(const char *dir);      // rm -rf
 #ifdef _WIN32

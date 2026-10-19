@@ -289,7 +289,7 @@ static void set_job(const std::string &s, bool failed = false, const std::string
 // Setup failures: a short headline and what to do next (also LARECOMP_LAUNCHER_SHOT=<f>:fail<1-6>, screenshots)
 enum { FAIL_NOT_FOUND = 1, FAIL_UNUSABLE, FAIL_COPY, FAIL_VERSION, FAIL_MISSING, FAIL_BUILD, FAIL_NOKEYS, FAIL_KEYS, FAIL_PACKAGE,
        FAIL_UPDATE_ONLY };
-static void set_failure(int k, int have = -1) {
+static void set_failure(int k, int have = -1, const char *reason = NULL) {
     static const char *const head[] = {"", "No game files found in that folder", "Those are game packages, not game files",
                                        "Setup didn't finish", "Wrong version of the game", "Your game files are incomplete",
                                        "The game code didn't build", "Your keys are needed",
@@ -326,7 +326,7 @@ static void set_failure(int k, int have = -1) {
         set_job(head[k], true, b);
         return;
     }
-    set_job(head[k], true, hint[k]);
+    set_job(head[k], true, reason ? std::string(reason) + " " + hint[k] : hint[k]);
 }
 
 static bool is_dir(const std::string &p) {
@@ -475,7 +475,7 @@ static bool build_game_code(void) {
     if (!ok) {
         fprintf(stderr, "[launcher] game code: %s\n", why);
         if (g_cancel_build) set_job("Compilation cancelled. Completed files are kept.");
-        else set_failure(FAIL_BUILD);
+        else set_failure(FAIL_BUILD, -1, gamebuild_killed() ? why : NULL);
     }
     return ok;
 }

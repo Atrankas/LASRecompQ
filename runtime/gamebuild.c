@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <signal.h>
+#endif
 
 #include "gamelib.h"
 #include "paths.h"
@@ -291,6 +294,33 @@ static void log_tail(const char *path, char *out, size_t n) {  // the last line 
     snprintf(out, n, "%s", nl ? nl + 1 : buf);
 }
 
+// A helper that failed (plat_proc_wait's r != 0): its log's last line for our log, and how it ended when that says
+// nothing or a signal ended it (the system killing it for memory writes nothing). A signal also gives the player why.
+static bool g_killed;
+static void helper_failed(const char *what, int r, const char *log, char *why, size_t why_size) {
+    char last[300], how[120] = "";
+    log_tail(log, last, sizeof last);
+#ifndef _WIN32
+    if (r > PLAT_PROC_SIGNALED) {
+        int sig = r - PLAT_PROC_SIGNALED;
+        if (sig == SIGKILL) {
+            snprintf(how, sizeof how, "killed by signal %d (SIGKILL: likely out of memory)", sig);
+            snprintf(why, why_size, "A build helper was killed by the system, likely out of memory.");
+        } else {
+            snprintf(how, sizeof how, "killed by signal %d (%s)", sig, strsignal(sig));
+            snprintf(why, why_size, "A build helper crashed (signal %d).", sig);
+        }
+        g_killed = true;
+    } else
+#endif
+    if (!last[0]) {
+        snprintf(how, sizeof how, "exit status %d", r);
+    }
+    LOG("[gamebuild] %s failed: %s%s%s\n", what, how, how[0] && last[0] ? ": " : "", last);
+}
+
+bool gamebuild_killed(void) { return g_killed; }
+
 // ------------------------------------------------------------------ compiling
 typedef struct {
     char src[1100], obj[1100], tmp[1100], log[1100], stem[64], source_hash[65];
@@ -478,6 +508,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     uint64_t t0 = plat_now_ns();
     static bool registered;
     if (!registered) registered = true, atexit(end_all);
+    g_killed = false;
     Tools t;
 #ifdef __ANDROID__
     // the generator and the NDK pieces out of the APK's assets (once per app version: LasActivity.buildTools)
@@ -641,10 +672,10 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                     g->exit = r;
                     read_gen_log(g);
                     if (r != 0) {
-                        char last[300];
-                        log_tail(g->log, last, sizeof last);
-                        LOG("[gamebuild] generator (%s) failed: %s\n", g->name, last);
+                        char what[64];
+                        snprintf(what, sizeof what, "generator (%s)", g->name);
                         snprintf(why, why_size, "the game code couldn't be prepared");
+                        helper_failed(what, r, g->log, why, why_size);
                         ok = false;
                     } else if (!build_cache_save_generation(cache, g->name, g->files, why, why_size)) {
                         ok = false;
@@ -708,10 +739,10 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             if (r < 0) continue;
             Unit *u = &units.u[run[k].unit];
             if (r != 0) {
-                char last[300];
-                log_tail(u->log, last, sizeof last);
-                LOG("[gamebuild] compiling %s failed: %s\n", u->src, last);
+                char what[1200];
+                snprintf(what, sizeof what, "compiling %s", u->src);
                 snprintf(why, why_size, "the game code didn't compile");
+                helper_failed(what, r, u->log, why, why_size);
                 ok = false;
             } else if (!build_cache_save_object(cache, u->stem, u->src, u->source_hash, why, why_size)) {
                 ok = false;
@@ -826,11 +857,17 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             if (o->cancelled && o->cancelled()) { stop(p); r = 130; break; }
             sleep_ms(50);
         }
-        if (r != 0) {
-            char last[300];
-            log_tail(log, last, sizeof last);
-            LOG("[gamebuild] linking failed: %s\n", last);
-            snprintf(why, why_size, "%s", r == 130 ? "Compilation cancelled. Completed files are kept for Resume." : "the game code didn't link");
+        if (r == 130) {
+            LOG("[gamebuild] linking cancelled\n");
+            snprintf(why, why_size, "Compilation cancelled. Completed files are kept for Resume.");
+            ok = false;
+        } else if (!p) {
+            LOG("[gamebuild] linking failed: the linker didn't start\n");
+            snprintf(why, why_size, "the game code didn't link");
+            ok = false;
+        } else if (r != 0) {
+            snprintf(why, why_size, "the game code didn't link");
+            helper_failed("linking", r, log, why, why_size);
             ok = false;
         }
     }
