@@ -195,10 +195,30 @@ void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
 static float g_display_h = 0;
 static float shadow_scale(const NvnTexture *t);
 void renderer_set_display_height(float h) { g_display_h = h; }
+// The game's small blur / glow levels (400x180 and below) and the water's reflection (880x396) at most at this share
+// of the internal resolution: blurred or broken up by waves, sharper is not visible (Martha's Bay at 1080p: -0.6 ms,
+// frames identical). Not the first glow level (800x360): the game halves the scene into it, and a 3:1 step there lost
+// the water's small sparkles. Phones: their own size (1x); LARECOMP_AUX_SCALE=<f> (0 = off).
+static float aux_cap(void) {
+    static float f = -1;
+#ifdef __ANDROID__
+    const float def = 1.0f;
+#else
+    const float def = 0.0f;
+#endif
+    if (f < 0) f = getenv("LARECOMP_AUX_SCALE") ? (float)atof(getenv("LARECOMP_AUX_SCALE")) : def;
+    return f;
+}
 static void tex_scale(const NvnTexture *t, const TexBackend *b, float *sx, float *sy) {
     float ss = shadow_scale(t);
     if (ss < 1) { *sx = *sy = ss; return; }
     *sx = b->scalable ? g_rs_x : 1, *sy = b->scalable ? g_rs_y : 1;
+    float cap = aux_cap();
+    bool aux = t->width <= 400 || (t->width >= 860 && t->width <= 900 && t->height < 560);
+    if (b->scalable && cap > 0 && aux) {
+        if (*sx > cap) *sx = cap;
+        if (*sy > cap) *sy = cap;
+    }
     if (b->scalable && g_display_h > 0 && t->height >= 1000 && t->height * *sy > g_display_h * 1.01f) {
         float f = g_display_h / (t->height * *sy);
         if (f * *sy < 1) f = 1 / *sy;  // (never below the game's own size)
