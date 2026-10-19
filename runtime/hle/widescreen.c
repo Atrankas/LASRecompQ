@@ -91,14 +91,66 @@ float rt_fovy(float orig) {
     return degrees ? wide * 180.0f / (float)M_PI : wide;
 }
 
-// Interiors: the indoor shadow setup runs while an interior is rendered (tools/patches.py).
+// The game's render-resolution setup, main 0x7001023c10 (system, step, weak_ptr<views>): h = 1080 - 36 * step,
+// w = (int)(h * 16/9) [the patched literal, tools/patches.py INDOOR_SITE], stored in the system object (+0x6e38/+0x6e3c
+// handheld, +0x6e40/+0x6e44 docked, by the mode at +0x56a8; the step at +0x6e48/+0x6e4c) and given to each view
+// (vtable+0x88(view, w, h)). The interior cameras and the lights' screen tiles follow this w/h, the overworld camera
+// the patched aspect sites: at 16:9 an interior shows stretched in the wide picture and its lights have hard edges at
+// tile boundaries (Tail Cave's entrance shaft cut by a vertical line, a lit rectangle around each torch); widened, the
+// overworld is boxed (black bars inside the picture). So the width follows the level: wide in interiors and dungeons,
+// 16:9 on the overworld ("Field"). The game only runs this setup while a level loads (and not for every change of
+// level), so the runtime re-runs it, with the arguments noted at the patched site, when the wanted width changes
+// (widescreen_present_hook, from the game's present call). LARECOMP_INDOOR_AR=0: 16:9 always (as before).
+#define GA_RES_SETUP 0x7001023c10ull
+const char *game_level_name(void);
+static struct { uint64_t sys, views, ctrl; bool valid, wide; float factor; } g_res;
+static bool indoor_wide(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_INDOOR_AR") ? atoi(getenv("LARECOMP_INDOOR_AR")) != 0 : 1;
+    if (!on || !widescreen_allowed() || g_wide <= 1.0f) return false;
+    uint64_t ps = LD64(GUEST(GA_PLAYER_STATUS_PTR));  // PlayerStatus*: current level name at +0 (the destination while loading)
+    const char *lv = ps ? (const char *)(uintptr_t)ps : NULL;
+    return lv && lv[0] && strcmp(lv, "Field") != 0;
+}
 static uint64_t g_indoor_frame;
 float rt_indoor_aspect(void) {
     extern uint64_t renderer_present_count(void);
     uint64_t f = renderer_present_count();
     if (ENV("LARECOMP_LOG_INDOOR") && f / 60 != g_indoor_frame / 60) LOG("[widescreen] indoor at frame %llu\n", (unsigned long long)f);
     g_indoor_frame = f;
-    return 16.0f / 9.0f;
+    Cpu *c = kernel_current_cpu();  // at 0x7001023c70: x21 the system object, x20 the views list, x19 its control block
+    if (c && c->x[21] && c->x[20] && c->x[19]) {
+        if (!g_res.valid || g_res.ctrl != c->x[19]) {
+            uint64_t *weak = (uint64_t *)(uintptr_t)(c->x[19] + 0x10);  // keep a weak reference (never dropped)
+            __atomic_fetch_add(weak, 1, __ATOMIC_SEQ_CST);
+        }
+        g_res.sys = c->x[21], g_res.views = c->x[20], g_res.ctrl = c->x[19], g_res.valid = true;
+    }
+    g_res.wide = indoor_wide();
+    g_res.factor = g_res.wide ? g_wide : 1.0f;
+    if (ENV("LARECOMP_LOG_INDOOR"))
+        LOG("[widescreen] render setup %s (x%.3f) at frame %llu, level %s\n", g_res.wide ? "wide" : "16:9", g_res.factor,
+            (unsigned long long)f, game_level_name());
+    return 16.0f / 9.0f * g_res.factor;
+}
+
+// From the game's present (nvnQueuePresentTexture, on its render thread, between frames): re-run the setup when the
+// width it should have changed (level change in play, output shape).
+void widescreen_present_hook(void) {
+    extern int game_in_play(void);
+    if (!g_res.valid || !game_in_play()) return;
+    bool want = indoor_wide();
+    float f = want ? g_wide : 1.0f;
+    if (want == g_res.wide && fabsf(f - g_res.factor) < 0.01f) return;
+    Cpu *c = kernel_current_cpu();
+    if (!c) return;
+    uint32_t mode = LD32(g_res.sys + 0x56a8);
+    uint32_t step = LD32(g_res.sys + (mode == 1 ? 0x6e4c : 0x6e48));
+    uint64_t pair[2] = {g_res.views, g_res.ctrl};
+    c->x[0] = g_res.sys, c->x[1] = step, c->x[2] = (uint64_t)(uintptr_t)pair;
+    if (ENV("LARECOMP_LOG_INDOOR"))
+        LOG("[widescreen] re-running the render setup (step %u, mode %u) for level %s\n", step, mode, game_level_name());
+    guest_call(c, GUEST(GA_RES_SETUP));
 }
 
 void romfs_file_read_hook(const char *path) { (void)path; }
