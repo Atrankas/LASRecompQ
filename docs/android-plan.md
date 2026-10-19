@@ -154,6 +154,27 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
 - Ferramentas: `LARECOMP_DUMP_UBO`, `LARECOMP_DBG_FS` (reg + 3000 = inteiro), `LARECOMP_VK_PASS_GPU_DRAWS=1` (GPU por
   shader), `LARECOMP_DISPLAY` (tela da janela no Mac)
 
+### Situação em 2026-10-19 (madrugada)
+- [x] Água com blocos 8x8 (Martha's Bay): era o LRZ (Z de baixa resolução) do Turnip no passe do reflexo; desligado
+      no app (`TU_DEBUG=nolrz`, 0.1 ms) - limpa em todas as rodadas
+- [x] Render targets comprimidos (UBWC): imagens com formato mutável sem lista de formatos nunca eram comprimidas no
+      Turnip. Lista {formato, gêmeo sRGB/UNORM}: 1x 25.7 -> 23.6 ms de GPU e o aparelho fica frio (10 min no Campo em
+      status térmico 0, pele 35 °C; antes 42-45 °C, status 3)
+- [x] 1x + geração de quadros: 60 na tela por 10 min, 37 °C, status 0, velocidade 100%
+- [x] Energia "Desempenho da GPU" (`power_mode = 2`): só a GPU no clock máximo (sem o limite de temperatura da pele
+      enquanto a bateria < 45 °C), CPU com os limites do sistema. 1080p (escala 1.5): 36.3 -> 27.4 ms; 1x 18.5 ms.
+      1080p + geração por 10 min: 41 °C, status 2; ~32 ms de GPU no trecho mais pesado - 59-60 na tela depois de 4 min,
+      antes com pausas e 94-98% de velocidade: faltam ~10% de GPU para 1080p/60 perfeito
+- [x] Quadro gerado: o Link fica onde o quadro real o mostra (posição dele projetada com a câmera, área em volta na
+      profundidade dele com transição suave) - não tremia mais para trás e para frente; a busca do Link na memória roda
+      numa thread própria (~170 ms no aparelho, era um engasgo a cada troca de área)
+- [ ] Build do jogo no próprio celular (escolher a pasta do jogo, gerar, compilar, abrir): protótipo funciona
+      (Python 3.14 oficial para Android + capstone/unicorn/lz4, zig 0.17 como compilador e linker); integração no app
+      em andamento (`docs/android-ondevice-build.md`)
+- Tentado e descartado: stencil para achar personagens (o capim tem o mesmo valor), meia precisão com resultado f32
+  (Fable 8: 0.06 ms, ruído), interpolantes puros (tiram o prefetch de textura: mais lento), forçar gmem (+4 ms) ou
+  sysmem (igual)
+
 ### 5. Extras
 - [ ] Randomizer no Android (seeds geradas no PC funcionam; gerador no aparelho depois)
 - [ ] Tradução PT-BR do app
