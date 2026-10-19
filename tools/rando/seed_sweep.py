@@ -42,7 +42,7 @@ FLAGS = ['bomb_bag', 'powder_bag', 'environments', 'pets_in_dungeons', 'skip_sto
          'randomize_enemies', 'randomize_music', 'open_mabe', 'fast_songs', 'boss_cutscenes', 'spoiler', 'decoupled',
          'pots', 'no_buffs', 'bushes', 'pet_rooster', 'pet_ghost', 'pet_marin', 'trendsanity', 'boss_souls',
          'hookshot_any', 'digs', 'miniboss_souls', 'no_start_sword', 'no_start_shield', 'no_start_ocarina',
-         'tunic_upgrades']
+         'tunic_upgrades', 'shellsanity']
 BITS = 150  # (v5: 30 characters; v4 IDs had 125 - decode reads both)
 TIMEOUT = 900  # (seconds per seed)
 
@@ -119,6 +119,7 @@ def request(sid, o, logic='basic'):
         'boss-cutscenes': o['boss_cutscenes'], 'create-spoiler': o['spoiler'], 'starting-rupees': o['start_rupees'],
         'blur-removal': False, 'starting-items': start, 'pots': o['pots'], 'no-buff-drops': o['no_buffs'],
         'bushes': o['bushes'], 'digs': o['digs'], 'tunic-upgrades': o['tunic_upgrades'],
+        'shellsanity': o['shellsanity'],
         'include-fishing': o['inc_fishing'], 'include-rapids': o['inc_rapids'], 'include-dampe': o['inc_dampe'],
         'include-trade-gifts': o['inc_trade'], 'include-blue-rupees': o['inc_blue'],
         'shuffle-bombs': o['bomb_bag'], 'unlocked-bombs': not o['bomb_bag'], 'shuffle-powder': o['powder_bag'],
@@ -153,7 +154,7 @@ def random_options(rng):
     for k in ('bomb_bag', 'powder_bag', 'bushes', 'pots', 'open_mabe', 'decoupled', 'pet_rooster', 'pet_ghost',
               'pet_marin', 'trendsanity', 'boss_souls', 'miniboss_souls', 'hookshot_any', 'no_start_sword',
               'no_start_shield', 'no_start_ocarina', 'shuffle_instruments', 'shuffle_dungeons', 'inc_trade',
-              'inc_dampe', 'inc_rapids'):
+              'inc_dampe', 'inc_rapids', 'shellsanity'):
         o[k] = rng.random() < 0.4
     return o
 
