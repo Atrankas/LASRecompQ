@@ -44,7 +44,9 @@ typedef struct {
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
     VkFormat sc_format;
-    VkExtent2D sc_extent;
+    VkExtent2D sc_extent;  // the window as the game and UI see it (landscape on phones)
+    VkExtent2D sc_phys;    // the swapchain images (the panel's own orientation when pre-rotated)
+    int sc_quarter;        // pre-rotation applied when drawing into them: 0, 1 (90 degrees) or 3 (270)
     uint32_t sc_count;
     VkImage sc_images[8];
     VkImageView sc_views[8];

@@ -770,6 +770,18 @@ static void create_swapchain(void) {
     // Phones are portrait underneath: in landscape the surface reports a 90 / 270 degree transform. The images are
     // made in the window's own (landscape) shape, the extent it reports, and the system turns them (identity)
     if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) xf = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    // Pre-rotation: the images in the panel's own (portrait) orientation with its transform, everything drawn into
+    // them turned (vk_sc_rect, the present / in-between frame / UI vertex shaders). Otherwise SurfaceFlinger composites
+    // the landscape layer with the GPU, turning the whole screen at every present (CLIENT composition): on the S20 FE
+    // ~13% of the GPU's time with frame generation. LARECOMP_PRETRANSFORM=0: the system turns them.
+    static int pre = -1;
+    if (pre < 0) pre = getenv("LARECOMP_PRETRANSFORM") ? atoi(getenv("LARECOMP_PRETRANSFORM")) != 0 : 1;
+    g_vk.sc_quarter = 0;
+    if (pre && (caps.currentTransform == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
+                caps.currentTransform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)) {
+        xf = caps.currentTransform;
+        g_vk.sc_quarter = xf == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ? 1 : 3;
+    }
 #endif
     g_sc_turned = xf != caps.currentTransform;  // (then presents say "suboptimal": that's this, not a new size)
     if (!ext.width || !ext.height) return;  // minimised
@@ -786,9 +798,10 @@ static void create_swapchain(void) {
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     if (count > 8) count = 8;
     VkSwapchainKHR old = g_vk.swapchain;
+    VkExtent2D phys = g_vk.sc_quarter ? (VkExtent2D){ext.height, ext.width} : ext;
     VkSwapchainCreateInfoKHR ci = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_vk.surface, .minImageCount = count,
-        .imageFormat = sf.format, .imageColorSpace = sf.colorSpace, .imageExtent = ext, .imageArrayLayers = 1,
+        .imageFormat = sf.format, .imageColorSpace = sf.colorSpace, .imageExtent = phys, .imageArrayLayers = 1,
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = xf,
         .compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
@@ -814,6 +827,8 @@ static void create_swapchain(void) {
     if (old) vkDestroySwapchainKHR(g_vk.dev, old, NULL);
     g_vk.sc_format = sf.format;
     g_vk.sc_extent = ext;
+    g_vk.sc_phys = phys;
+    if (g_vk.sc_quarter) LOG("[vk] swapchain pre-rotated %d degrees (images %ux%u)\n", g_vk.sc_quarter * 90, phys.width, phys.height);
     {
         int pw, ph;
         SDL_GetWindowSize(window, &pw, &ph);
@@ -985,13 +1000,15 @@ bool vk_frame_begin(const float clear[4]) {
                                     .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                     .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                                     .clearValue.color.float32 = {clear[0], clear[1], clear[2], clear[3]}};
-    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1,
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_vk.sc_phys}, .layerCount = 1,
                           .colorAttachmentCount = 1, .pColorAttachments = &ca};
     vkCmdBeginRendering(cb, &ri);
-    VkViewport vp = {0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, 0, 1};
-    VkRect2D sc = {{0, 0}, g_vk.sc_extent};
+    VkViewport vp = {0, 0, (float)g_vk.sc_phys.width, (float)g_vk.sc_phys.height, 0, 1};
+    VkRect2D sc = {{0, 0}, g_vk.sc_phys};
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
+    extern void vk_imgui_prerotation(int quarter);  // (the UI drawn into this image turned like it: imgui_glue.cpp)
+    vk_imgui_prerotation(g_vk.sc_quarter);
     cur_frame.ok = true;
     return true;
 }
@@ -1010,20 +1027,36 @@ void vk_frame_resume(void) {
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
                                     .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                     .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
-    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1,
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_vk.sc_phys}, .layerCount = 1,
                           .colorAttachmentCount = 1, .pColorAttachments = &ca};
     vkCmdBeginRendering(cb, &ri);
-    VkViewport vp = {0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, 0, 1};
-    VkRect2D sc = {{0, 0}, g_vk.sc_extent};
+    VkViewport vp = {0, 0, (float)g_vk.sc_phys.width, (float)g_vk.sc_phys.height, 0, 1};
+    VkRect2D sc = {{0, 0}, g_vk.sc_phys};
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
 }
 
 VkExtent2D vk_frame_extent(void) { return g_vk.sc_extent; }
+
+// A rectangle of the (landscape) window in the swapchain image's pixels, for viewports and scissors drawn turned
+// (clip space turned by the same quarter: 1 -> (-y, x), 3 -> (y, -x))
+VkRect2D vk_sc_rect(int32_t x, int32_t y, int32_t w, int32_t h) {
+    int32_t W = (int32_t)g_vk.sc_extent.width, H = (int32_t)g_vk.sc_extent.height;
+    if (g_vk.sc_quarter == 1) return (VkRect2D){{H - y - h, x}, {(uint32_t)h, (uint32_t)w}};
+    if (g_vk.sc_quarter == 3) return (VkRect2D){{y, W - x - w}, {(uint32_t)h, (uint32_t)w}};
+    return (VkRect2D){{x, y}, {(uint32_t)w, (uint32_t)h}};
+}
+VkViewport vk_sc_viewport(float x, float y, float w, float h) {
+    float W = (float)g_vk.sc_extent.width, H = (float)g_vk.sc_extent.height;
+    if (g_vk.sc_quarter == 1) return (VkViewport){H - y - h, x, h, w, 0, 1};
+    if (g_vk.sc_quarter == 3) return (VkViewport){y, W - x - w, h, w, 0, 1};
+    return (VkViewport){x, y, w, h, 0, 1};
+}
+int vk_sc_quarter(void) { return g_vk.sc_quarter; }
 void *vk_frame_cmd(void) { return (void *)vk_cmd(); }
 
 static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
-    uint32_t w = g_vk.sc_extent.width, h = g_vk.sc_extent.height;
+    uint32_t w = g_vk.sc_phys.width, h = g_vk.sc_phys.height;
     *out = vk_readback((uint64_t)w * h * 4);
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy rg = {.bufferOffset = out->off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
@@ -1072,12 +1105,24 @@ void vk_frame_end(const char *shot_path) {
     }
     if (shot_path) {
         vk_wait_seq(seq);
-        uint32_t w = g_vk.sc_extent.width, h = g_vk.sc_extent.height;
+        uint32_t w = g_vk.sc_phys.width, h = g_vk.sc_phys.height;
         uint8_t *px = shot.ptr;
         bool bgr = g_vk.sc_format == VK_FORMAT_B8G8R8A8_UNORM || g_vk.sc_format == VK_FORMAT_B8G8R8A8_SRGB;
         for (uint64_t i = 0; bgr && i < (uint64_t)w * h; i++) { uint8_t t = px[i * 4]; px[i * 4] = px[i * 4 + 2]; px[i * 4 + 2] = t; }
         for (uint64_t i = 0; i < (uint64_t)w * h; i++) px[i * 4 + 3] = 255;
-        vk_save_png(shot_path, px, w, h);
+        if (g_vk.sc_quarter) {  // (the pre-rotated image turned back into the window's shape)
+            uint32_t W = h, H = w;  // landscape
+            uint8_t *t = malloc((size_t)W * H * 4);
+            for (uint32_t y = 0; y < H; y++)
+                for (uint32_t x = 0; x < W; x++) {
+                    uint32_t qx = g_vk.sc_quarter == 1 ? H - 1 - y : y, qy = g_vk.sc_quarter == 1 ? x : W - 1 - x;
+                    memcpy(t + ((size_t)y * W + x) * 4, px + ((size_t)qy * w + qx) * 4, 4);
+                }
+            vk_save_png(shot_path, t, W, H);
+            free(t);
+        } else {
+            vk_save_png(shot_path, px, w, h);
+        }
     }
 }
 

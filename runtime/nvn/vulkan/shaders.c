@@ -253,7 +253,10 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(location = 0) out vec2 uv;\n"
                "void main() {\n"
                "  vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);\n"
-               "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+               "  vec2 c = p * 2.0 - 1.0;\n"
+               // pc.a.y: the swapchain's pre-rotation in quarter turns (device.c vk_sc_rect: 1 -> (-y, x), 3 -> (y, -x))
+               "  if (pc.a.y > 0.5 && pc.a.y < 1.5) c = vec2(-c.y, c.x); else if (pc.a.y > 2.5) c = vec2(c.y, -c.x);\n"
+               "  gl_Position = vec4(c, 0.0, 1.0);\n"
                "  vec2 u = vec2(p.x, pc.a.x > 0.5 ? 1.0 - p.y : p.y);\n"
                "  uv = pc.crop.xy + u * pc.crop.zw;\n"
                "}\n";
@@ -275,6 +278,26 @@ static const char *builtin_src(const char *name, int *stage) {
                "void main() {\n"
                "  vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);\n"
                "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+               "  uv = p;\n"
+               "}\n";
+    }
+    // the in-between frame into a pre-rotated swapchain image (framegen.c): uv in the window's shape, the triangle turned
+    if (!strcmp(name, "fs_rot1.vert") || !strcmp(name, "fs_rot3.vert")) {
+        *stage = STAGE_VERTEX;
+        return name[6] == '1' ? "#version 450\n"
+               "layout(location = 0) out vec2 uv;\n"
+               "void main() {\n"
+               "  vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);\n"
+               "  vec2 c = p * 2.0 - 1.0;\n"
+               "  gl_Position = vec4(-c.y, c.x, 0.0, 1.0);\n"
+               "  uv = p;\n"
+               "}\n"
+               : "#version 450\n"
+               "layout(location = 0) out vec2 uv;\n"
+               "void main() {\n"
+               "  vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);\n"
+               "  vec2 c = p * 2.0 - 1.0;\n"
+               "  gl_Position = vec4(c.y, -c.x, 0.0, 1.0);\n"
                "  uv = p;\n"
                "}\n";
     }

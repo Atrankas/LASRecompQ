@@ -128,7 +128,8 @@ static VkPipeline g_mpipe;
 static bool fg_wincopy(void) {
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_FG_WINCOPY") ? atoi(getenv("LARECOMP_FG_WINCOPY")) != 0 : 0;
-    return on;
+    extern int vk_sc_quarter(void);
+    return on && !vk_sc_quarter();  // (a pre-rotated window picture isn't in the window's shape: never copied)
 }
 bool fg_draws_overlays(void) { return !fg_wincopy(); }
 
@@ -309,10 +310,12 @@ void fg_copy_window(VkCommandBuffer cb, VkImage sc, VkFormat fmt, uint32_t w, ui
     g_comp_ok = (fg_test() & 4) ? true : build_mask(cb);
 }
 
-static VkPipeline fs_pipeline(VkShaderModule fs, VkFormat fmt, VkPipelineLayout layout) {
+static VkPipeline fs_pipeline_v(VkShaderModule fs, VkFormat fmt, VkPipelineLayout layout, const char *vert);
+static VkPipeline fs_pipeline(VkShaderModule fs, VkFormat fmt, VkPipelineLayout layout) { return fs_pipeline_v(fs, fmt, layout, "nv12.vert"); }
+static VkPipeline fs_pipeline_v(VkShaderModule fs, VkFormat fmt, VkPipelineLayout layout, const char *vert) {
     VkPipelineShaderStageCreateInfo stages[2] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
-         .module = vk_builtin_shader("nv12.vert"), .pName = "main"},  // (a fullscreen triangle, uv = position)
+         .module = vk_builtin_shader(vert), .pName = "main"},  // (a fullscreen triangle, uv = position)
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main"}};
     VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -354,14 +357,18 @@ static VkPipelineLayout set_layout(int nbind, uint32_t push, VkDescriptorSetLayo
     return l;
 }
 
+static int g_pipe_quarter;
 static VkPipeline warp_pipeline(VkFormat fmt) {
-    if (g_pipe && g_pipe_fmt == fmt) return g_pipe;
+    extern int vk_sc_quarter(void);
+    int q = vk_sc_quarter();
+    if (g_pipe && g_pipe_fmt == fmt && g_pipe_quarter == q) return g_pipe;
     if (!g_layout) g_layout = set_layout(5, 128, &g_dsl);
     static VkShaderModule fs;
     if (!fs) fs = vk_compile_glsl(kWarp, STAGE_FRAGMENT, "framegen.frag");
-    VkPipeline p = fs ? fs_pipeline(fs, fmt, g_layout) : VK_NULL_HANDLE;
+    VkPipeline p = fs ? fs_pipeline_v(fs, fmt, g_layout, q == 1 ? "fs_rot1.vert" : q == 3 ? "fs_rot3.vert" : "nv12.vert") : VK_NULL_HANDLE;
     if (!p) return VK_NULL_HANDLE;
-    g_pipe = p, g_pipe_fmt = fmt;
+    // (the old one is left to the device's teardown: the turn changes only when the phone is turned over)
+    g_pipe = p, g_pipe_fmt = fmt, g_pipe_quarter = q;
     LOG("[framegen] 60 fps (generated): in-between frames by reprojection\n");
     return p;
 }
@@ -493,8 +500,10 @@ bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBack
     static const bool lin[5] = {true, true, true, false, true};
     bind_images(cb, g_layout, g_dsl, 5, v, lin);
     vkCmdPushConstants(cb, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
-    VkViewport vp = {0, 0, (float)ww, (float)wh, 0, 1};
-    VkRect2D sc = {{0, 0}, {ww, wh}};
+    extern int vk_sc_quarter(void);
+    uint32_t pw = vk_sc_quarter() ? wh : ww, ph = vk_sc_quarter() ? ww : wh;  // (the swapchain image's own shape)
+    VkViewport vp = {0, 0, (float)pw, (float)ph, 0, 1};
+    VkRect2D sc = {{0, 0}, {pw, ph}};
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdDraw(cb, 3, 1, 0, 0);
