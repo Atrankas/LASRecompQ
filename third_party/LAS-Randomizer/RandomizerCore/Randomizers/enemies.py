@@ -135,6 +135,27 @@ def add_miniboss_kit(room_data, mi, arena, room_name=''):
         fit_rail(room_data, act, sec(room_data, b'point'), sec(room_data, b'rail').data.entries[act.relationships.section_2[0][1]])
 
 
+def remove_actors(room_data, indices):
+    """LARecomp: removes room_data.actors[i] for i in indices - with the mini-boss kit actors that came with them
+    (add_miniboss_kit: their keys carry KIT_KEY_TAG and link back to their mini-boss) - and renumbers every actor's
+    links (relationship sections 1 and 3 are actor indices: a plain pop left them pointing past the list or at the
+    wrong actor - a Rolling Bones copy then crashed the game on its screen's load)."""
+    gone = set(indices)
+    for i, a in enumerate(room_data.actors):
+        if a.key >> 56 == KIT_KEY_TAG and any(j in gone for j in a.relationships.section_3):
+            gone.add(i)
+    new = {}
+    for i in range(len(room_data.actors)):
+        if i not in gone:
+            new[i] = len(new)
+    room_data.actors = [a for i, a in enumerate(room_data.actors) if i not in gone]
+    for a in room_data.actors:
+        rl = a.relationships
+        rl.section_1 = [[s[0], new[s[1]]] for s in rl.section_1 if s[1] in new]
+        rl.section_3 = [new[j] for j in rl.section_3 if j in new]
+        rl.x, rl.y = len(rl.section_1), len(rl.section_3)
+
+
 RAIL_FIT = {0x58}  # Cue Ball circles a 4-point rail (its arena's 9 x 6 channel): fitted to the room's free tiles
 
 

@@ -683,6 +683,12 @@ def main():
     print('bomb bag text:', bomb_bag_text.apply(out_dir, romfs, settings), flush=True)
     import powder_bag_text  # (same) found powder: "You found your Powder Bag!"
     print('powder bag text:', powder_bag_text.apply(out_dir, romfs, settings), flush=True)
+    import room_links  # (every room edit done: actors' links within each room must still be sound)
+    problems = room_links.check(out_dir, _uw_leb, romfs)
+    if problems:
+        for pr in problems[:20]:
+            print('room links:', pr, file=sys.stderr)
+        sys.exit(f'room links broken in {len(problems)} place(s) - the game would crash loading them; first: {problems[0]}')
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
