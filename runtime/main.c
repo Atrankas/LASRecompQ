@@ -214,6 +214,9 @@ int main(int argc, char **argv) {
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
 #ifdef __ANDROID__
+    // Turnip's low-resolution Z (LRZ) leaves 8x8 blocks in the water's occluder pass (a discard against a sampled
+    // depth); without it the water is clean for 0.1 ms of GPU at 1x (S20 FE). env.txt can still override it.
+    setenv("TU_DEBUG", "nolrz", 0);
     android_env_file();
     if (!g_guest_reserved && !plat_reserve_guest(GUEST_LO, GUEST_HI)) {
         LOG("FATAL: guest address range %llx-%llx is not free\n", GUEST_LO, GUEST_HI);
