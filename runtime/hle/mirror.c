@@ -4,6 +4,7 @@
 // vulkan/exec.c) mirror that composite (ShaderKey flip_x). While the mirrored world is on screen the stick and d-pad
 // swap left and right (runtime/hle/input.c); the pause menu shows no composite (its backdrop is a small blurred copy),
 // so there they don't.
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -19,7 +20,12 @@ static uint64_t g_world_frame = ~0ull;  // the mirrored scene was drawn
 // (Requiring the window's own size left those frames unmirrored: the world flipped back and forth, issue #66.)
 bool mirror_scene_size(uint32_t sw, uint32_t sh, uint32_t w, uint32_t h) {
     uint64_t a = (uint64_t)sw * h, b = (uint64_t)sh * w;
-    return sw * 2 >= w && sw <= w && sh <= h && (a > b ? a - b : b - a) * 100 <= (uint64_t)w * h;
+    if (sw * 2 >= w && sw <= w && sh <= h && (a > b ? a - b : b - a) * 100 <= (uint64_t)w * h) return true;
+    // interiors at the wide render resolution (runtime/hle/widescreen.c): the scene has the window's aspect, not the
+    // composite target's 16:9 (frame generation and mirror mode missed their composite there)
+    extern float widescreen_factor(void);
+    float f = widescreen_factor(), sa = sh ? (float)sw / (float)sh : 0, want = 16.0f / 9.0f * f;
+    return f > 1.01f && sh * 2 >= h && sh <= h && fabsf(sa - want) < 0.01f * want;
 }
 
 // The renderer found the scene composite (composite): mirror it?
