@@ -1231,6 +1231,8 @@ void backend_present_gpu(NvnTexture *t) {
         if (gen && vk_frame_begin(black)) {  // the in-between frame: the next swapchain image, presented a refresh later
             float rect[4] = {(float)vx, (float)vy, (float)vw, (float)vh};
             fg_draw(vk_cmd(), g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height, b, rect, crop, pv[0] > 0.5f);
+            extern bool fg_draws_overlays(void);  // (drawn from the presented picture: the window's overlays on top again)
+            if (fg_draws_overlays()) menu_render((void *)vk_cmd(), g_vk.sc_extent.width, g_vk.sc_extent.height);
             vk_frame_end(fs0 ? "build/fg_gen0.png" : NULL);
         } else if (!gen && g_fifo_present && menu_open() && game_interval() == 2 && vk_frame_begin(black)) {
             // the menu over the game's 30: a second picture with the menu drawn again from the latest input, a refresh

@@ -45,7 +45,10 @@ static const char kWarp[] =
     // [-1, 1], 4 present flip), Link's radius (uv, 0 = none), his depth, the mode; b: Link (uv), the depth's scale (zw)
     "layout(push_constant) uniform P { vec4 m0; vec4 m1; vec4 m2; vec4 m3; vec4 rect; vec4 crop; vec4 a; vec4 b; } p;\n"
     "bool flag(uint f) { return (uint(p.a.x) & f) != 0u; }\n"
+    // (flag 8: comp is the presented picture in the game's texture layout, sampled at game uv; else the window picture)
     "vec2 toGame(vec2 w) { vec2 q = (w - p.rect.xy) / p.rect.zw; if (flag(4u)) q.y = 1.0 - q.y; return p.crop.xy + q * p.crop.zw; }\n"
+    "vec2 toWin(vec2 g);\n"
+    "vec4 compAt(vec2 g) { return flag(8u) ? textureLod(comp, g, 0.0) : textureLod(comp, toWin(g), 0.0); }\n"
     "vec2 toWin(vec2 g) { vec2 q = (g - p.crop.xy) / p.crop.zw; if (flag(4u)) q.y = 1.0 - q.y; return p.rect.xy + q * p.rect.zw; }\n"
     "layout(set = 0, binding = 4) uniform sampler2D hudMask;\n"  // where the HUD is: a quarter of the presented picture
     // (bilinear: also a texel around it)
@@ -83,16 +86,16 @@ static const char kWarp[] =
     "}\n"
     "void main() {\n"
     "  if (p.a.w > 1.5 && p.a.w < 2.5) { vec2 n = toGame(uv); float d = textureLod(depthT, n * p.b.zw, 0.0).r; o = vec4(vec3(clamp((1.0 - d) * 20.0, 0.0, 1.0)), 1.0); return; }\n"  // (LARECOMP_FRAMEGEN_DEBUG=depth)
-    "  if (p.a.w > 0.5 && p.a.w < 1.5) { o = textureLod(comp, uv, 0.0); return; }\n"  // (LARECOMP_FRAMEGEN_PLAIN: the cost without the warp)
-    "  if (any(lessThan(uv, p.rect.xy)) || any(greaterThan(uv, p.rect.xy + p.rect.zw))) { o = textureLod(comp, uv, 0.0); return; }\n"
+    "  if (p.a.w > 0.5 && p.a.w < 1.5) { o = flag(8u) ? compAt(toGame(uv)) : textureLod(comp, uv, 0.0); return; }\n"  // (LARECOMP_FRAMEGEN_PLAIN: the cost without the warp)
+    "  if (any(lessThan(uv, p.rect.xy)) || any(greaterThan(uv, p.rect.xy + p.rect.zw))) { o = flag(8u) ? vec4(0.0, 0.0, 0.0, 1.0) : textureLod(comp, uv, 0.0); return; }\n"
     "  vec2 g = toGame(uv);\n"
-    "  if (p.a.w > 2.5) { o = textureLod(comp, uv, 0.0); o.r = max(o.r, linkW(g)); return; }\n"  // (LARECOMP_FRAMEGEN_DEBUG=link)
-    "  if (hudAt(g)) { o = textureLod(comp, uv, 0.0); return; }\n"
+    "  if (p.a.w > 2.5) { o = compAt(g); o.r = max(o.r, linkW(g)); return; }\n"  // (LARECOMP_FRAMEGEN_DEBUG=link)
+    "  if (hudAt(g)) { o = compAt(g); return; }\n"
     "  vec2 lo = p.crop.xy, hi = p.crop.xy + p.crop.zw;\n"
     "  vec2 s = g;\n"
     "  for (int i = 0; i < 2; i++) s = clamp(g - (moved(s) - s), lo, hi);\n"  // (the source pixel that lands here)
     "  s = mix(s, g, linkW(g));\n"
-    "  o = hudAt(s) ? vec4(textureLod(scene, s, 0.0).rgb, 1.0) : textureLod(comp, toWin(s), 0.0);\n"
+    "  o = hudAt(s) ? vec4(textureLod(scene, s, 0.0).rgb, 1.0) : compAt(s);\n"
     "}\n";
 
 // the HUD mask: each texel covers 4x4 pixels of the presented picture, set where it differs from the scene's copy
@@ -118,6 +121,24 @@ static bool build_mask(VkCommandBuffer cb);
 static VkDescriptorSetLayout g_mdsl;
 static VkPipelineLayout g_mlayout;
 static VkPipeline g_mpipe;
+
+// The in-between frame is drawn from the picture the real frame was presented from (post-processed, the game's
+// texture layout) with the window's overlays drawn again on top (device.c), instead of a copy of the finished window
+// picture: 2400x1080 copied every real frame was ~0.7 ms of the S20 FE's GPU. LARECOMP_FG_WINCOPY=1: the copy.
+static bool fg_wincopy(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_FG_WINCOPY") ? atoi(getenv("LARECOMP_FG_WINCOPY")) != 0 : 0;
+    return on;
+}
+bool fg_draws_overlays(void) { return !fg_wincopy(); }
+
+// LARECOMP_FG_TEST=<bits> (measuring only, the in-between frame comes out wrong): 1 no scene copy, 2 no window copy,
+// 4 no HUD mask, 8 no full barriers around the scene copy
+static int fg_test(void) {
+    static int t = -1;
+    if (t < 0) t = getenv("LARECOMP_FG_TEST") ? atoi(getenv("LARECOMP_FG_TEST")) : 0;
+    return t;
+}
 
 static int fg_setting(void) {
     static int env = -2;
@@ -170,11 +191,11 @@ static void pick_depth(void) {
 void fg_scene_composited(VkCommandBuffer cb, TexBackend *rt) {
     if (!fg_enabled() || !rt || !rt->image || rt->samples != 1) return;
     if (!make_image(&g_scene, rt->format, rt->width, rt->height, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return;
-    vk_full_barrier(cb);
+    if (!(fg_test() & 8)) vk_full_barrier(cb);
     VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                      .extent = {rt->width, rt->height, 1}};
-    vkCmdCopyImage(cb, rt->image, VK_IMAGE_LAYOUT_GENERAL, g_scene.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
-    vk_full_barrier(cb);
+    if (!(fg_test() & 1)) vkCmdCopyImage(cb, rt->image, VK_IMAGE_LAYOUT_GENERAL, g_scene.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    if (!(fg_test() & 8)) vk_full_barrier(cb);
     g_scene_ok = true;
 }
 
@@ -265,6 +286,7 @@ bool fg_frame_wanted(uint64_t frame, TexBackend *fin) {
 // device.c vk_frame_end, outside rendering: the real window picture, before it goes to the presentation engine
 void fg_copy_window(VkCommandBuffer cb, VkImage sc, VkFormat fmt, uint32_t w, uint32_t h) {
     g_comp_ok = false;
+    if (!fg_wincopy()) { g_comp_ok = build_mask(cb); return; }  // (only the HUD mask: the in-between frame draws from the presented picture)
     if (!make_image(&g_comp, fmt, w, h, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return;
     VkImageMemoryBarrier2 b[2] = {
         {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -279,12 +301,12 @@ void fg_copy_window(VkCommandBuffer cb, VkImage sc, VkFormat fmt, uint32_t w, ui
     vkCmdPipelineBarrier2(cb, &di);
     VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                      .extent = {w, h, 1}};
-    vkCmdCopyImage(cb, sc, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_comp.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    if (!(fg_test() & 2)) vkCmdCopyImage(cb, sc, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_comp.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     b[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b[0].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     b[0].srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT, b[0].dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
     b[1].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, b[1].dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
     vkCmdPipelineBarrier2(cb, &di);
-    g_comp_ok = build_mask(cb);
+    g_comp_ok = (fg_test() & 4) ? true : build_mask(cb);
 }
 
 static VkPipeline fs_pipeline(VkShaderModule fs, VkFormat fmt, VkPipelineLayout layout) {
@@ -433,7 +455,9 @@ bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBack
     g_scene_ok = false;
     NvnTexture *dt = g_depth;
     g_depth = NULL;
-    if (!g_comp_ok || !fin || !fin->image || !dt || !dt->backend) return false;
+    extern VkImageView vk_last_present_src(void);
+    VkImageView psrc = fg_wincopy() ? VK_NULL_HANDLE : vk_last_present_src();
+    if (!g_comp_ok || !fin || !fin->image || !dt || !dt->backend || (!fg_wincopy() && !psrc)) return false;
     TexBackend *db = dt->backend;
     VkPipeline pipe = warp_pipeline(fmt);
     if (!pipe) return false;
@@ -445,14 +469,14 @@ bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBack
     if (!mat_inv(g_vp, inv)) return false;
     mat_mul(vpg, inv, m);
     VkComponentMapping ident = {0};
-    VkImageView v[5] = {color_view(&g_comp), color_view(&g_scene), color_view(fin),
+    VkImageView v[5] = {psrc ? psrc : color_view(&g_comp), color_view(&g_scene), color_view(fin),
                         vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, ident, VK_IMAGE_ASPECT_DEPTH_BIT), color_view(&g_mask)};
     for (int i = 0; i < 5; i++) if (!v[i]) return false;
     struct { float m[16], rect[4], crop[4], a[4], b[4]; } pc;
     memcpy(pc.m, m, sizeof m);
     pc.rect[0] = rect[0] / ww, pc.rect[1] = rect[1] / wh, pc.rect[2] = rect[2] / ww, pc.rect[3] = rect[3] / wh;
     memcpy(pc.crop, crop, sizeof pc.crop);
-    pc.a[0] = (float)((nvn_window_origin() == 0 ? 1 : 0) | (nvn_depth_mode() == 0 ? 2 : 0) | (flip_present ? 4 : 0));
+    pc.a[0] = (float)((nvn_window_origin() == 0 ? 1 : 0) | (nvn_depth_mode() == 0 ? 2 : 0) | (flip_present ? 4 : 0) | (psrc ? 8 : 0));
     pc.a[1] = 0, pc.a[2] = 0, pc.b[0] = pc.b[1] = 0;
     link_on_screen(pc.a[0], pc.b, &pc.a[1], &pc.a[2]);
     // a camera that didn't move: the real picture again, without the per-pixel reprojection
