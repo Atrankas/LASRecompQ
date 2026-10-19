@@ -91,11 +91,27 @@ public class LasActivity extends SDLActivity {
 
     // ---- called from native code (runtime/platform/android_jni.c)
 
+    private static boolean sAskedNotify;
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 4104) pickGameFolder();  // (the notification question answered: on to the picker)
+    }
+
     // Opens the system's folder picker; the choice comes back through nativeFolderPicked.
     public static void pickGameFolder() {
         final LasActivity a = (LasActivity) mSingleton;
         if (a == null) return;
         a.runOnUiThread(() -> {
+            // (Android 13+: the setup's progress notification needs a permission - asked here, before the copy and the
+            // build start, the picker opening once it is answered)
+            if (android.os.Build.VERSION.SDK_INT >= 33 && !sAskedNotify &&
+                a.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                sAskedNotify = true;
+                a.requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 4104);
+                return;
+            }
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
             try {
