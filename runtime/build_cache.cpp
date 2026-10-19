@@ -153,7 +153,7 @@ std::unique_ptr<BuildCache> acquire(const char *game_dir) {
     return c;
 }
 bool library_name(const std::string &s) {
-    return s == "lasgame.dll" || s == "lasgame.so" || s == "lasgame.dylib";
+    return s == "lasgame.dll" || s == "lasgame.so" || s == "lasgame.dylib" || s == "liblasgame.so";  // (Android: lib*.so)
 }
 void recover(BuildCache *c) {
     // The library and its ID cannot be replaced together. A remaining journal means restore the old pair

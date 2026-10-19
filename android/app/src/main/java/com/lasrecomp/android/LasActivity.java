@@ -140,7 +140,7 @@ public class LasActivity extends SDLActivity {
     // into dest/exefs and dest/romfs, reporting progress through nativeImportProgress. Runs on the calling (native)
     // thread. Returns null when done, else what went wrong: "nofolder", "notfound", "unusable" (game packages such
     // as .nsp / .xci instead of their files), "space:<bytes needed>" or "copy:<details>".
-    public static String importGameFiles(String dest) {
+    public static String importGameFiles(String dest, String buildId) {
         LasActivity a = (LasActivity) mSingleton;
         if (a == null || sTree == null) return "nofolder";
         ContentResolver cr = a.getContentResolver();
@@ -151,6 +151,28 @@ public class LasActivity extends SDLActivity {
             boolean[] unusable = new boolean[1];
             find(cr, root, 0, found, unusable);
             if (found[0] == null || found[1] == null) return unusable[0] ? "unusable" : "notfound";
+            // the version first (exefs/main's build id at 0x40: runtime/ui/launcher.mm BUILD_ID), before ~6 GB of copy
+            if (buildId != null && !buildId.isEmpty()) {
+                String have = null;
+                for (Doc k : children(cr, found[0])) {
+                    if (k.dir || !k.name.equals("main")) continue;
+                    Uri u = DocumentsContract.buildDocumentUriUsingTree(sTree, k.id);
+                    try (InputStream in = cr.openInputStream(u)) {
+                        byte[] h = new byte[0x48];
+                        int n = 0, r;
+                        while (in != null && n < h.length && (r = in.read(h, n, h.length - n)) > 0) n += r;
+                        if (n == h.length) {
+                            StringBuilder sb = new StringBuilder();
+                            for (int i = 0x40; i < 0x48; i++) sb.append(String.format(Locale.ROOT, "%02x", h[i] & 0xff));
+                            have = sb.toString();
+                        }
+                    }
+                }
+                if (!buildId.equalsIgnoreCase(have)) {
+                    Log.w(TAG, "exefs/main build id " + have + ", wanted " + buildId);
+                    return "version";
+                }
+            }
             List<Doc[]> files = new ArrayList<>();  // {file, its folder} pairs, relative names in Doc.rel
             long total = list(cr, found[0], "exefs", files, false) + list(cr, found[1], "romfs", files, true);
             long need = 0;  // (what an earlier, interrupted import already copied isn't copied again)
@@ -187,6 +209,78 @@ public class LasActivity extends SDLActivity {
         } finally {
             a.runOnUiThread(() -> a.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
         }
+    }
+
+    // ---- building the game code on the phone (runtime/gamebuild.c; docs/android-ondevice-build.md)
+
+    // The asset archive (assets/ondevice.zip: the generator, its Python's standard library and modules, the NDK
+    // pieces the compiler needs; tools/android/ondevice/make_assets.sh) unpacked into files/ondevice, once per app
+    // version. Returns that folder, or null (an APK built without it, or the unpacking failed). Blocking.
+    public static synchronized String buildTools() {
+        LasActivity a = (LasActivity) mSingleton;
+        if (a == null) return null;
+        File dir = new File(a.getFilesDir(), "ondevice");
+        File stamp = new File(dir, ".unpacked");
+        String want;
+        try {
+            android.content.pm.PackageInfo pi = a.getPackageManager().getPackageInfo(a.getPackageName(), 0);
+            want = pi.getLongVersionCode() + " " + pi.lastUpdateTime;
+        } catch (Exception e) {
+            want = "?";
+        }
+        try {
+            if (stamp.isFile() && want.equals(new String(java.nio.file.Files.readAllBytes(stamp.toPath())).trim()))
+                return dir.getAbsolutePath();
+        } catch (Exception ignored) {
+        }
+        try (InputStream raw = a.getAssets().open("ondevice.zip");
+             java.util.zip.ZipInputStream zin = new java.util.zip.ZipInputStream(new java.io.BufferedInputStream(raw, 1 << 16))) {
+            deleteTree(dir);
+            if (!dir.mkdirs()) return null;
+            String root = dir.getCanonicalPath() + File.separator;
+            byte[] buf = new byte[1 << 16];
+            for (java.util.zip.ZipEntry e; (e = zin.getNextEntry()) != null; ) {
+                File out = new File(dir, e.getName());
+                if (!out.getCanonicalPath().startsWith(root)) continue;  // (no ../ out of the folder)
+                if (e.isDirectory()) { out.mkdirs(); continue; }
+                File p = out.getParentFile();
+                if (p != null) p.mkdirs();
+                try (OutputStream os = new FileOutputStream(out)) {
+                    for (int n; (n = zin.read(buf)) > 0; ) os.write(buf, 0, n);
+                }
+            }
+            try (OutputStream os = new FileOutputStream(stamp)) { os.write(want.getBytes()); }
+            return dir.getAbsolutePath();
+        } catch (java.io.FileNotFoundException e) {
+            return null;  // (no assets/ondevice.zip: a build without -PonDeviceBuild)
+        } catch (Exception e) {
+            Log.e(TAG, "build tools", e);
+            return null;
+        }
+    }
+
+    private static void deleteTree(File f) {
+        File[] kids = f.listFiles();
+        if (kids != null) for (File k : kids) deleteTree(k);
+        f.delete();
+    }
+
+    // The build's foreground service (BuildService): on while it runs, off at its end
+    public static void buildService(boolean on, String title) {
+        final LasActivity a = (LasActivity) mSingleton;
+        if (a == null) return;
+        if (!on) { BuildService.stop(a); return; }
+        a.runOnUiThread(() -> {
+            // (Android 13+: its progress notification needs the permission - asked once; the build runs without it)
+            if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                a.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                a.requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 4103);
+            BuildService.start(a, title);
+        });
+    }
+
+    public static void buildProgress(int percent, String text) {
+        BuildService.progress(percent, text);
     }
 
     // ---- a fan translation (the menu's Language row, runtime/ui/menu.mm): its RomFS folder copied into the app

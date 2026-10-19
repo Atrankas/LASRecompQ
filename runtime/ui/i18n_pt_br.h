@@ -409,6 +409,17 @@
 {"Setting up the game files", "Preparando os arquivos do jogo"},
 {"This only needs to be done once and may take a while.", "Só precisa ser feito uma vez e pode demorar um pouco."},
 {"Setting up the game files...", "Preparando os arquivos do jogo..."},
+// (building the game code on the phone: runtime/ui/launcher.mm, runtime/gamebuild.c)
+{"This only needs to be done once and may take a while. You can turn the screen off.",
+ "Só precisa ser feito uma vez e pode demorar um pouco. Pode desligar a tela."},
+{"about a minute left", "falta cerca de um minuto"},
+{"about %d minutes left", "faltam cerca de %d minutos"},
+{"about %d h %02d min left", "faltam cerca de %d h %02d min"},
+{"Preparing shaders", "Preparando os shaders"},
+{"Preparing the build tools...", "Preparando as ferramentas de compilação..."},
+{"Checking completed build files...", "Conferindo os arquivos já compilados..."},
+{"Resuming compilation...", "Retomando a compilação..."},
+{"Compilation cancelled. Completed files are kept.", "Compilação cancelada. Os arquivos prontos foram mantidos."},
 {"Update available!  ", "Atualização disponível!  "},
 {"DOWNLOAD ", "BAIXAR "},
 

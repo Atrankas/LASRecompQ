@@ -275,6 +275,7 @@ static std::string g_src;           // the picked folder
 static std::string g_job;           // current setup step / result for the status line
 static std::string g_job_hint;      // a failure: what to do about it (shown under it)
 static bool g_busy, g_job_failed;
+static bool g_play_pending;        // PLAY as if pressed once the start screen is up (a Rando seed; Android: a finished build)
 static bool g_confirm_delete;       // game-files page: "Delete the game files?" shown
 
 static void set_job(const std::string &s, bool failed = false, const std::string &hint = "") {
@@ -359,10 +360,45 @@ static bool build_cancelled(void) { return g_cancel_build.load(); }
 static bool g_copy_skipped;                  // (only the game code to build: the bar is all of that)
 static bool g_auto_update;                   // started by itself: game files there, game code from an older version
 static void setup_progress(uint64_t done, uint64_t) { g_done = g_phase_base + done; }
+// The build's time left (seconds, -1 = not known yet): its progress over the last few minutes, from 1 minute in
+static std::atomic<int> g_build_eta{-1};
+static void track_eta(double f) {
+    static double t[32], fr[32];
+    static int n, at;
+    double now = SDL_GetTicks() / 1000.0;
+    if (f <= 0) { n = at = 0; g_build_eta = -1; return; }  // (a new build)
+    if (n && now - t[(at + 31) % 32] < 10) return;  // (a sample every 10 s, the last ~5 minutes)
+    t[at] = now, fr[at] = f, at = (at + 1) % 32;
+    if (n < 32) n++;
+    int old = n < 32 ? 0 : at;
+    double dt = now - t[old], df = f - fr[old];
+    g_build_eta = dt >= 60 && df > 0.002 ? (int)((1 - f) * dt / df) : -1;
+}
+// "about N minutes left" (or "" when not known), translated
+static std::string eta_text(void) {
+    int s = g_build_eta;
+    if (s < 0) return "";
+    char b[96];
+    if (s < 90) snprintf(b, sizeof b, "%s", T("about a minute left"));
+    else if (s < 3600) snprintf(b, sizeof b, T("about %d minutes left"), (s + 30) / 60);
+    else snprintf(b, sizeof b, T("about %d h %02d min left"), s / 3600, (s % 3600 + 30) / 60);
+    return b;
+}
 static void build_progress(double f, const char *step) {
     g_build_frac = (float)f;
+    track_eta(f);
     static const char *last;
     if (step != last) last = step, set_job(step);
+#ifdef __ANDROID__
+    static uint64_t shown_at;  // (the notification: once a second at most)
+    uint64_t now = SDL_GetTicks();
+    if (now - shown_at >= 1000 || f >= 1) {
+        shown_at = now;
+        std::string e = eta_text(), text = T(step);
+        if (!e.empty()) text += " - " + e;
+        android_build_progress((int)(f * 100), text.c_str());
+    }
+#endif
 }
 // Shader preparation, after the game files are ready (runtime/nvn/shader_prep.h): its own bar, and Skip
 static std::atomic<float> g_prep_frac{-1};  // -1: not preparing
@@ -413,6 +449,9 @@ static float extract_progress(void) {
 static bool build_game_code(void) {
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
     GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1, build_cancelled};
+#ifdef __ANDROID__
+    o.jobs = 4;  // (phones: the big and mid cores - runtime/gamebuild.c keeps the compilers on those, at a lower priority)
+#endif
     char why[256] = "";
     g_build_frac = 0;
     bool ok = gamebuild_run(g_root.c_str(), &o, why, sizeof why);
@@ -427,7 +466,9 @@ static bool build_game_code(void) {
 #ifdef __ANDROID__
 // Android: the game files are copied out of the picked folder (the system hands out documents, not paths) straight into
 // extracted/exefs and extracted/romfs (LasActivity.importGameFiles), or were put there over USB (the game reads its
-// data from romfs/ itself: runtime/services/fs.c). The game code isn't built here: liblasgame.so comes from a computer
+// data from romfs/ itself: runtime/services/fs.c). Then the game code is built on the phone (runtime/gamebuild.c) when
+// the APK carries the builder (android/app/build.gradle onDeviceBuild), inside a foreground service (BuildService: it
+// goes on with the screen off), and the game starts; otherwise liblasgame.so comes from a computer
 // (tools/android/build_game.sh).
 static bool in_place_files(const std::string &root) {
     return file_exists(root + "/exefs/main") && is_dir(root + "/romfs/region_common");
@@ -439,15 +480,20 @@ static void *extract_thread(void *) {
     pthread_mutex_lock(&g_lock);
     src = g_src;
     pthread_mutex_unlock(&g_lock);
-    g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false;
+    g_cancel_build = false;
+    g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = src.empty();
+    bool built = false;
     if (!src.empty()) {
         set_job("Copying the game files...");
         mkdir(g_root.c_str(), 0755);
         std::string dest = g_root[0] == '/' ? g_root : std::string(rt_data_root()) + "/" + g_root;  // (Java: no cwd)
-        const char *err = android_import_game_files(dest.c_str(), import_progress);
+        char want[17];
+        for (int i = 0; i < 8; i++) snprintf(want + 2 * i, 3, "%02x", BUILD_ID[i]);
+        const char *err = android_import_game_files(dest.c_str(), want, import_progress);
         if (err) {
             fprintf(stderr, "[launcher] import: %s\n", err);
             if (!strcmp(err, "notfound") || !strcmp(err, "nofolder")) set_failure(FAIL_NOT_FOUND);
+            else if (!strcmp(err, "version")) set_failure(FAIL_VERSION);
             else if (!strcmp(err, "unusable")) set_failure(FAIL_UNUSABLE);
             else if (!strncmp(err, "space:", 6))
                 set_job("Not enough free space", true, T("The game files need about ") +
@@ -460,15 +506,26 @@ static void *extract_thread(void *) {
     if (!build_id_ok(g_root + "/exefs/main")) { set_failure(FAIL_VERSION); goto done; }
     if (!in_place_files(g_root)) { set_failure(FAIL_MISSING); goto done; }
     game_files_changed();  // (counted again: the copy is new)
+    pthread_mutex_lock(&g_lock);
+    g_src.clear();  // (a retry - after a failed or cancelled build - uses the copied files and the build's cache)
+    pthread_mutex_unlock(&g_lock);
     if (!gamelib_present(g_root.c_str())) {
-        set_job("Game code not installed", true, "Build liblasgame.so from these game files on a computer "
-                "(tools/android/build_game.sh) and install it.");
-        goto done;
+        if (!gamebuild_available()) {
+            set_job("Game code not installed", true, "Build liblasgame.so from these game files on a computer "
+                    "(tools/android/build_game.sh) and install it.");
+            goto done;
+        }
+        android_build_service(true, T("Recompiling the game"));
+        built = build_game_code();
+        android_build_service(false, NULL);
+        if (!built) goto done;
     }
     {
         std::string why = check_game_files(g_root);
-        if (why.empty()) set_job("Game files ready.");
-        else set_failure(why.find("version") != std::string::npos ? FAIL_VERSION : FAIL_MISSING);
+        if (why.empty()) {
+            set_job("Game files ready.");
+            if (built) g_play_pending = true;  // (the whole setup done on the phone: straight into the game)
+        } else set_failure(why.find("version") != std::string::npos ? FAIL_VERSION : FAIL_MISSING);
     }
 done:
     pthread_mutex_lock(&g_lock);
@@ -715,7 +772,7 @@ extern "C" void menu_apply_window_requests(void *sdl_window);
 extern "C" int g_start_screen;  // runtime/hle/warp.c: the start screen is up (no game loaded: don't read its memory)
 // The Randomizer tab's Play / Play Now on the start screen (rando_tab.mm): start the game with that seed
 static std::string g_play_seed;
-static bool g_play_seed_req, g_play_pending;
+static bool g_play_seed_req;  // (g_play_pending: with the setup state above)
 extern "C" void launcher_play_seed(const char *seed) {
     g_play_seed = seed ? seed : "";
     g_play_seed_req = true;
@@ -973,9 +1030,13 @@ static void draw_busy_overlay(ImVec2 ds, const std::string &job, bool test_busy,
     float f = test_busy && g_prep_frac < 0 ? 0.42f : prep_wait && g_prep_frac < 0 ? 0.99f : extract_progress();
     // (while the game code is built: what's happening, on whose files - runtime/gamebuild.c)
     bool preparing = g_prep_frac >= 0 || prep_wait, recompiling = g_build_frac >= 0 && !preparing;
-    const char *title = preparing ? "Preparing shaders" : g_auto_update ? "Updating the game"
-                      : recompiling ? "Recompiling the game" : "Setting up the game files";
-    static const char *const notes[] = {"This only needs to be done once and may take a while."};
+    const char *title = T(preparing ? "Preparing shaders" : g_auto_update ? "Updating the game"
+                          : recompiling ? "Recompiling the game" : "Setting up the game files");
+#ifdef __ANDROID__  // (an hour or so on a phone: it goes on with the screen off - BuildService)
+    const char *notes[] = {T("This only needs to be done once and may take a while. You can turn the screen off.")};
+#else
+    const char *notes[] = {T("This only needs to be done once and may take a while.")};
+#endif
     int nnotes = recompiling && !g_auto_update ? 1 : 0;
     float tfs = g_font_menu->FontSize * 0.75f, sfs = g_font_small->FontSize * 0.85f;
     ImVec2 ts = g_font_menu->CalcTextSizeA(tfs, FLT_MAX, 0, title);
@@ -995,8 +1056,11 @@ static void draw_busy_overlay(ImVec2 ds, const std::string &job, bool test_busy,
     if (f > 0) fg->AddRectFilled(ba, ImVec2(ba.x + (bb.x - ba.x) * f, bb.y), IM_COL32(236, 194, 84, 255), 12 * sc);
     char line[200];
     if (preparing) snprintf(line, sizeof line, "%d%%", (int)(f * 100));  // (the title says it)
-    else snprintf(line, sizeof line, "%s   %d%%", test_busy ? "Setting up the game files..." : job.c_str(),
-                  (int)(f * 100));
+    else {
+        std::string e = recompiling ? eta_text() : "";  // (time left: a build only)
+        snprintf(line, sizeof line, "%s   %d%%%s%s", T(test_busy ? "Setting up the game files..." : job.c_str()),
+                 (int)(f * 100), e.empty() ? "" : "   ", e.c_str());
+    }
     ImVec2 ls = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, line);
     fg->AddText(g_font_small, sfs, ImVec2((a.x + b.x - ls.x) * 0.5f, bb.y + 26 * sc), IM_COL32(220, 216, 205, 255), line);
     for (int i = 0; i < nnotes; i++) {

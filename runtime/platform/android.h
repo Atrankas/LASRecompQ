@@ -14,9 +14,20 @@ extern "C" {
 void android_pick_game_folder(void (*cb)(const char *name));
 // The folder picked in an earlier session (still readable), or NULL
 const char *android_saved_game_folder(void);
-// Copies exefs/ and romfs/ out of the picked folder into dest (blocking; any thread). NULL = done, else what went
-// wrong: "nofolder", "notfound", "unusable", "space:<bytes>", "copy:<details>" (LasActivity.importGameFiles).
-const char *android_import_game_files(const char *dest, void (*progress)(uint64_t done, uint64_t total));
+// Copies exefs/ and romfs/ out of the picked folder into dest (blocking; any thread). build_id: exefs/main's at 0x40
+// (16 hex digits) - another version is refused before anything is copied. NULL = done, else what went wrong:
+// "nofolder", "notfound", "unusable", "version", "space:<bytes>", "copy:<details>" (LasActivity.importGameFiles).
+const char *android_import_game_files(const char *dest, const char *build_id,
+                                      void (*progress)(uint64_t done, uint64_t total));
+
+// ---- building the game code on the phone (runtime/gamebuild.c; docs/android-ondevice-build.md)
+// The generator, its Python and the compiler's NDK pieces unpacked from the APK's assets into the app's internal
+// storage (once per app version; blocking): that folder, or NULL (an APK without them, or no space)
+const char *android_build_tools(void);
+// The build's foreground service (keeps the app running with the screen off: wake lock, a notification); on = false
+// ends it. text: what the notification says (any thread).
+void android_build_service(bool on, const char *title);
+void android_build_progress(int percent, const char *text);
 
 // ---- a custom Vulkan driver (Mesa Turnip on Adreno ...: GpuDrivers.java), loaded by runtime/nvn/vulkan/device.c
 bool android_gpu_driver_supported(void);  // an Adreno GPU

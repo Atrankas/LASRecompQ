@@ -49,15 +49,18 @@ const char *android_saved_game_folder(void) {
     return name[0] ? name : NULL;
 }
 
-const char *android_import_game_files(const char *dest, void (*progress)(uint64_t, uint64_t)) {
+const char *android_import_game_files(const char *dest, const char *build_id, void (*progress)(uint64_t, uint64_t)) {
     static char result[512];
     g_import_progress = progress;
     JNIEnv *env;
     jclass cls;
-    jmethodID m = activity_method(&env, &cls, "importGameFiles", "(Ljava/lang/String;)Ljava/lang/String;");
+    jmethodID m = activity_method(&env, &cls, "importGameFiles",
+                                  "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
     if (!m) return "copy:no activity";
     jstring jdest = (*env)->NewStringUTF(env, dest);
-    jstring r = (jstring)(*env)->CallStaticObjectMethod(env, cls, m, jdest);
+    jstring jid = (*env)->NewStringUTF(env, build_id ? build_id : "");
+    jstring r = (jstring)(*env)->CallStaticObjectMethod(env, cls, m, jdest, jid);
+    (*env)->DeleteLocalRef(env, jid);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); r = NULL; snprintf(result, sizeof result, "copy:exception"); }
     else if (!r) result[0] = 0;
     else {
@@ -151,6 +154,36 @@ bool android_gpu_driver_config(AndroidGpuDriver *out) {
         p = nl + 1;
     }
     return true;
+}
+
+// ---- building the game code on the phone (LasActivity.buildTools / BuildService)
+const char *android_build_tools(void) {
+    static char dir[1024];
+    return call_string("buildTools", dir, sizeof dir);
+}
+
+void android_build_service(bool on, const char *title) {
+    JNIEnv *env;
+    jclass cls;
+    jmethodID m = activity_method(&env, &cls, "buildService", "(ZLjava/lang/String;)V");
+    if (!m) return;
+    jstring t = (*env)->NewStringUTF(env, title ? title : "");
+    (*env)->CallStaticVoidMethod(env, cls, m, (jboolean)on, t);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, t);
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+void android_build_progress(int percent, const char *text) {
+    JNIEnv *env;
+    jclass cls;
+    jmethodID m = activity_method(&env, &cls, "buildProgress", "(ILjava/lang/String;)V");
+    if (!m) return;
+    jstring t = (*env)->NewStringUTF(env, text ? text : "");
+    (*env)->CallStaticVoidMethod(env, cls, m, (jint)percent, t);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, t);
+    (*env)->DeleteLocalRef(env, cls);
 }
 
 JNIEXPORT void JNICALL Java_com_lasrecomp_android_LasActivity_nativeFolderPicked(JNIEnv *env, jclass cls, jstring name) {
