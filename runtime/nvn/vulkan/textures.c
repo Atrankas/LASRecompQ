@@ -195,10 +195,11 @@ void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
 static float g_display_h = 0;
 static float shadow_scale(const NvnTexture *t);
 void renderer_set_display_height(float h) { g_display_h = h; }
-// The game's small blur / glow levels (400x180 and below) and the water's reflection (880x396) at most at this share
-// of the internal resolution: blurred or broken up by waves, sharper is not visible (Martha's Bay at 1080p: -0.6 ms,
-// frames identical). Not the first glow level (800x360): the game halves the scene into it, and a 3:1 step there lost
-// the water's small sparkles. Phones: their own size (1x); LARECOMP_AUX_SCALE=<f> (0 = off).
+// The game's small blur / glow levels (400 wide and below: the game's sizes follow its own render resolution, e.g.
+// 336x189) at most at this share of the internal resolution: blurred, sharper is not visible (Martha's Bay at 1080p:
+// -0.6 ms, frames identical). Not the first glow level (half the scene, e.g. 672x378): kept small it lost the water's
+// sparkles even fed a 2x2-averaged scene (-1.7 ms, rejected). Phones: their own size (1x); LARECOMP_AUX_SCALE=<f>
+// (0 = off).
 static float aux_cap(void) {
     static float f = -1;
 #ifdef __ANDROID__
@@ -214,11 +215,7 @@ static void tex_scale(const NvnTexture *t, const TexBackend *b, float *sx, float
     if (ss < 1) { *sx = *sy = ss; return; }
     *sx = b->scalable ? g_rs_x : 1, *sy = b->scalable ? g_rs_y : 1;
     float cap = aux_cap();
-    static int glow = -1;  // LARECOMP_AUX_GLOW=1: the first glow level (800x360) too - exec.c then hands the game's
-    // downsample into it a 2x2-averaged copy of the scene (its single bilinear tap at 3:1 lost the water's sparkles)
-    if (glow < 0) glow = getenv("LARECOMP_AUX_GLOW") ? atoi(getenv("LARECOMP_AUX_GLOW")) != 0 : 0;
-    bool aux = t->width <= 400 || (t->width >= 860 && t->width <= 900 && t->height < 560) ||
-               (glow && t->width == 800 && t->height == 360);
+    bool aux = t->width <= 400;
     if (b->scalable && cap > 0 && aux) {
         if (*sx > cap) *sx = cap;
         if (*sy > cap) *sy = cap;

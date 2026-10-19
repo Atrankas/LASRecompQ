@@ -3747,13 +3747,6 @@ void vk_exec_reset(void) {
     st_defaults();
 }
 
-// (the halved scene for a draw into a smaller target: prefilter_prepare)
-static NvnTexture *pf_src[2];
-static TexBackend pf_img[2];
-static VkImageView pf_view[2];
-static float pf_scale[2];
-static int pf_n;
-
 static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo *out, float sc[2], uint32_t wh[2]) {
     ShaderTexture *st_ = &si->tex[i];
     int slot = ((int)st_->handle_offset - 0x20) / 8;  // 64-bit handles from offset 0x20
@@ -3786,9 +3779,6 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             }
             renderer_texture_scale(e->tex, &sc[0], &sc[1]);
             wh[0] = e->tex->width; wh[1] = e->tex->height;
-            if (stage == 1 && st_->type == TEXTYPE_2D)
-                for (int k = 0; k < pf_n; k++)
-                    if (e->tex == pf_src[k]) view = pf_view[k], sc[0] = sc[1] = pf_scale[k];
             for (int k = 0; k < nfeedback; k++)
                 if (e->tex == feedback_tex[k] && (st_->type == TEXTYPE_2D || st_->type == TEXTYPE_2D_ARRAY)) {
                     view = feedback_view[k];
@@ -4341,56 +4331,6 @@ static void skip_why(int why, uint64_t fs) {
         memset(cnt, 0, sizeof cnt), at = now;
     }
 }
-// The scene halved (a 2x2 average) for a draw that samples it into a target kept smaller than the scene's scale
-// (textures.c aux_cap: the first glow level): the game's downsample reads one bilinear tap per pixel, exact at 2:1,
-// and at 3:1 it skipped pixels - the water's sparkles came and went. The draw samples the halved copy instead.
-static void prefilter_prepare(Prog *pr) {
-    pf_n = 0;
-    NvnTexture *t0 = st.rt.ncolor == 1 ? st.rt.color[0] : NULL;
-    TexBackend *tb = t0 ? t0->backend : NULL;
-    if (!tb || !tb->scalable || !pr->fi) return;
-    for (int i = 0; i < pr->fi->ntex && pf_n < 2; i++) {
-        ShaderTexture *stx = &pr->fi->tex[i];
-        if (stx->type != TEXTYPE_2D) continue;
-        int slot = ((int)stx->handle_offset - 0x20) / 8;
-        uint64_t h = (slot >= 0 && slot < 32) ? st.tex[1][slot] : 0;
-        uint32_t tic = h & 0xFFFFF;
-        if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) continue;
-        NvnTexture *src = ((NvnTexEntry *)st.tpool->entries)[tic].tex;
-        TexBackend *b = src ? vk_tex(src, false) : NULL;
-        if (!b || !b->scalable || src->width != 2 * t0->width || src->height != 2 * t0->height || b->sx < tb->sx * 1.25f ||
-            b->samples != 1 || b->levels < 1 || (b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)))
-            continue;
-        int k = pf_n;
-        uint32_t w = b->width / 2, hh = b->height / 2;
-        TexBackend *d = &pf_img[k];
-        if (!d->image || d->width != w || d->height != hh || d->format != b->format) {
-            if (d->image) vk_views_forget(d), vk_defer_image(d->image, d->mem);
-            VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = b->format,
-                                    .extent = {w, hh, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
-                                    .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
-            VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-            *d = (TexBackend){0};
-            if (vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL) != VK_SUCCESS) { d->image = VK_NULL_HANDLE; return; }
-            vk_image_init_layout(vk_upload_cmd(), d->image, VK_IMAGE_ASPECT_COLOR_BIT);
-            d->format = b->format, d->width = w, d->height = hh, d->depth = 1, d->levels = d->layers = d->samples = 1;
-            d->aspect = VK_IMAGE_ASPECT_COLOR_BIT, d->base_type = VK_IMAGE_VIEW_TYPE_2D, d->gpu_owned = true;
-        }
-        vk_end_pass();
-        VkCommandBuffer cb = vk_cmd();
-        vk_full_barrier(cb);
-        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)(w * 2), (int32_t)(hh * 2), 1}},
-                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)hh, 1}}};
-        vkCmdBlitImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
-        vk_full_barrier(cb);
-        VkComponentMapping ident = {0};
-        pf_view[k] = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, d->format, 0, 1, 0, 1, ident, VK_IMAGE_ASPECT_COLOR_BIT);
-        if (!pf_view[k]) return;
-        pf_src[k] = src, pf_scale[k] = b->sx * 0.5f;
-        pf_n++;
-    }
-}
-
 static bool cover_listed(uint64_t h) {
     static const uint64_t builtin[] = {0};
     static uint64_t extra[16];
@@ -4510,12 +4450,6 @@ static void draw_(CmdRec *r, bool indexed) {
     snap_reason = "draw-colorwrite";
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
-    pf_n = 0;
-    {
-        static int on = -1;  // (only with the first glow level kept small: textures.c LARECOMP_AUX_GLOW)
-        if (on < 0) on = getenv("LARECOMP_AUX_GLOW") ? atoi(getenv("LARECOMP_AUX_GLOW")) != 0 : 0;
-        if (on) prefilter_prepare(pr);
-    }
     g_pass_covered = false;
     if (!in_pass || st.rt_dirty) {
         static int logc = -1;
