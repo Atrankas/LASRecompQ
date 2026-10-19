@@ -1,13 +1,81 @@
-# Building the game code on the phone (prototype)
+# Building the game code on the phone
 
-Goal: a player installs the APK, picks their own extracted game folder (`exefs/` + `romfs/`), and the app itself
-generates, compiles and links `liblasgame.so`, the way the desktop start screen already does (`runtime/gamebuild.c`
-with `zig cc` and the PyInstaller'd generator). Today the Android library is built on a computer by
-`tools/android/build_game.sh`.
+A player installs the APK, picks their own extracted game folder (`exefs/` + `romfs/`), and the app itself copies
+it, generates, compiles and links `liblasgame.so`, and starts the game - the way the desktop start screen already
+does (`runtime/gamebuild.c` with `zig cc` and the PyInstaller'd generator). A computer (`tools/android/build_game.sh`)
+is still the faster way, and makes the same library (same game code id).
 
-This document covers what was tried on the test phone (Samsung S20 FE, Snapdragon 865, 6 GB, Android 16 per
-`getprop ro.build.version.release`), what was measured, and the recommended design. Everything was tested from
-`/data/local/tmp` over adb (shell user, no app install, no root) and removed afterwards.
+## The public APK
+
+    tools/android/ondevice/build_all.sh                       # once, and after a Python/zig/capstone/unicorn change
+    cd android && ./gradlew assembleRelease -PonDeviceBuild=true   # (no -PlasGameLib: no game code inside)
+    tools/android/ondevice/check_public_apk.sh android/app/build/outputs/apk/release/app-release.apk
+
+- `build_all.sh` (on the computer, NDK 27.2 from `android/local.properties`): `build_python.sh`, `build_zig.sh`,
+  `build_cckit.sh`, `make_assets.sh` → `build/ondevice/stage/jniLibs/arm64-v8a/` (libzig.so, liblaspython.so,
+  libpython3.14.so, libcapstone.so, libunicorn.so) and `build/ondevice/assets/` (ondevice.zip, licenses/). Downloads
+  are checked against published sha256 (python.org's release-file API, PyPI, tools/fetch_zig.sh's pins, the license
+  texts' pinned hashes).
+- `-PonDeviceBuild=true` (android/app/build.gradle) adds those to the APK, sets `android:extractNativeLibs="true"` and
+  `useLegacyPackaging` (the programs must be files to run), and re-runs `build_cckit.sh` + `make_assets.sh` before
+  each build so the generator and headers inside are this checkout's (the game code id the app is compiled with is
+  made from the same files). Without the property the APK is as before (dev builds stay small; a phone then needs a
+  library from a computer).
+- `check_public_apk.sh` fails if the APK has `liblasgame.so`, a library defining recompiled game functions
+  (`f_70xxxxxxxx`), generated C (also inside ondevice.zip) or game files; it lists the native libraries and licenses.
+  Checked: the release APK built this way (76 MB) passes; a personal APK made with `build_game.sh --apk` fails
+  (liblasgame.so).
+- Licenses: `assets/licenses/` in the APK (README.txt lists each component, version, license and source; unicorn's
+  GPL-2.0 `COPYING` and LLVM's license fetched from their repositories at the pinned tags `2.1.4` / `llvmorg-22.1.8`).
+
+## What the app does (first start without the game code)
+
+1. Start screen, setup page (as before): "Game files folder" opens the system folder picker
+   (`ACTION_OPEN_DOCUMENT_TREE`), "Set up game files" starts the setup (runtime/ui/launcher.mm `extract_thread`).
+2. `LasActivity.importGameFiles` finds exefs/ (main + main.npdm) and romfs/ (region_common) in the picked tree, reads
+   `exefs/main`'s build id at 0x40 and refuses anything but v1.0.0 **before** copying ("Wrong version of the game"),
+   then copies both into the data folder (`Android/data/com.lasrecomp.android/files/extracted/`; the game reads romfs/
+   in place, runtime/services/fs.c), resuming a partial copy.
+3. If no matching `liblasgame.so` is installed and the APK carries the builder (`gamebuild_available()`: libzig.so and
+   liblaspython.so in the native library folder), `BuildService` (a foreground service, type dataSync) starts: a
+   partial wake lock and a notification with the step, percent and time left, so the build continues with the screen
+   off or another app in front. `gamebuild_run` (runtime/gamebuild.c, Android branch):
+   - `LasActivity.buildTools` unpacks `assets/ondevice.zip` into `files/ondevice/` (once per app version);
+   - the build thread (and so every compiler, which inherit it) goes to nice 10 and the faster cores (those whose
+     `cpuinfo_max_freq` is above the slowest's: 4 of 8 on a Snapdragon 865); 4 compile jobs;
+   - `liblaspython.so files/ondevice/tools/gen.py sdk ...`, then `... main ...` (one after the other: main alone
+     peaks at ~1.7 GB), with `gamelib_id.sh --gen-args` (`--simd asm --shift 0x6000000000 --split-dispatch 512`);
+     chunks are compiled as soon as they're written;
+   - `libzig.so clang -target aarch64-linux-android30 <gamelib flags> -nostdinc -isystem cckit/...`, split-dispatch
+     files with `-mllvm -disable-licm-promotion`;
+   - `libzig.so ld.lld @cckit/link.rsp ... -L<native lib dir> -lmain ...`, published by the build cache, then copied to
+     internal storage (`files/liblasgame.so` + `.id`, where runtime/gamelib.c looks first).
+4. The progress overlay shows "Recompiling the game", the step, percent and "about N minutes left" (from the progress
+   of the last few minutes); Cancel keeps the finished pieces. When the build ends the service stops and the game
+   starts (PLAY as if pressed: the first-launch questions, then the game).
+5. A build that was cancelled, failed or killed (the app swiped away, the phone rebooted) resumes: on the next start
+   the start screen sees the copied files without game code and starts the build again by itself, reusing every
+   finished object (runtime/build_cache.cpp; tested: a build killed partway reused what was done, a second run
+   reused all 14 objects).
+
+## Testing it
+
+- `tools/android/ondevice/phone_test.sh [one generated .c]` - Python + modules, the compiler, a link against libmain.so,
+  over adb in /data/local/tmp (no app).
+- `tools/android/ondevice/phone_gamebuild_test.sh` - **the real `gamebuild_run` from the app's libmain.so, on the
+  phone**, without installing the app and without game files: a test program loads libmain.so from a folder laid out
+  like the native library folder, `LARECOMP_ONDEVICE_DIR` points at an unpacked ondevice.zip whose gen.py is replaced
+  by `fake_gen.py` (synthetic chunks in the generator's layout and progress protocol, one split-dispatch file). Result
+  on the S20 FE: Python ran both generators in turn, zig compiled 15 objects and linked them against libmain.so, the
+  library was installed and loaded (`id 5510c73a0430eb62, 240 + 240 functions`); killed partway and run again it
+  resumed; run again it reused everything.
+- The full flow with the real game files needs the APK installed (`adb install`) and the game folder on the phone:
+  pick it on the start screen, Set up game files, wait (screen off is fine), the game starts. `lasrecomp.log` (data
+  folder) has the `[gamebuild]` lines; `files/ondevice` and `extracted/.gamebuild/*.log` the details of a failure.
+
+## Prototype findings
+
+The rest of this document is the prototype's study: what was measured and why these choices.
 
 ## Recommendation
 
@@ -18,12 +86,12 @@ This document covers what was tried on the test phone (Samsung S20 FE, Snapdrago
 | lz4 | the python-lz4 C extensions built against the Android libpython with the NDK (4 small `clang -shared` lines) | **works** (no pure-Python fallback needed) |
 | Compiler + linker | **zig 0.17.0, aarch64-linux release** (the same pinned version as the desktop builds), run as `zig clang` / `zig ld.lld` | **Works on the phone.** Compiles generated C, links a bionic `.so` with `DT_NEEDED libmain.so`, and bionic loads it and calls into libmain/libc/compiler-rt |
 | libc headers, crt, stubs, compiler-rt | a 1.1 MB "cckit" taken from the NDK (`build_cckit.sh`) | **works** |
-| Driver | **`runtime/gamebuild.c`** (already in libmain.so, already drives the start screen's progress bar); Java only supplies the paths and keeps the process alive | `plat_spawn` for Android implemented (posix_spawn, same as Linux); the rest is a list of small changes below |
-| Packaging | programs and libraries as `lib*.so` in `jniLibs/arm64-v8a`, **`extractNativeLibs=true`** (so the programs exist as files Android lets the app run); stdlib + generator + cckit as one asset archive unpacked into `files/` | designed, not built into the APK yet |
+| Driver | **`runtime/gamebuild.c`** (already in libmain.so, already drives the start screen's progress bar); Java only supplies the paths and keeps the process alive | **implemented** (Android branch: see "What the app does") |
+| Packaging | programs and libraries as `lib*.so` in `jniLibs/arm64-v8a`, **`extractNativeLibs=true`** (so the programs exist as files Android lets the app run); stdlib + generator + cckit as one asset archive unpacked into `files/` | **implemented** (`-PonDeviceBuild=true`) |
 
-The big open problem is **compile time**, not feasibility: a full build is roughly **1-1.5 hours** on this phone with
-the current flags, and a handful of generated functions dominate it (see "Compile time"). The generator, Python and
-linking are minor in comparison.
+The big cost is **compile time**: the prototype estimated 1-1.5 hours on this phone; with the generator's split
+(below) and 4 jobs on the big cores, expect roughly 40-60 minutes (to be measured with a real build on the phone).
+The generator, Python and linking are minor in comparison.
 
 ## Measurements
 
@@ -43,8 +111,8 @@ benchmarks, so phone numbers are noisy (repeat runs of the same thing varied by 
 | `cckit/` (44 headers, crt, libc/libm/libdl stubs, compiler-rt builtins, gamelib sources, link.rsp) | 1.1 MB | |
 | **Total** | **~211 MB** | **~69 MB** |
 
-So the APK grows by about **69 MB** (today's personal APK with the game library inside is 143 MB; without it, about
-50 MB) and the installed footprint by about **210 MB** (the extracted native libraries + the unpacked asset archive),
+So the APK grows by about **48 MB** (measured: the release APK with `-PonDeviceBuild=true` is **76 MB**, a dev APK
+without it 29 MB, a personal one with the game library inside 143 MB) and the installed footprint by about **210 MB** (the extracted native libraries + the unpacked asset archive),
 plus the build's scratch space: generated C **445 MB** (719 files), objects **122 MB**, the library **~100 MB**. About
 **0.7 GB of scratch** during a build; the C and the objects can be deleted afterwards (keeping them makes an update
 rebuild incremental, as on the desktop).
@@ -104,10 +172,16 @@ LICM's promotion of the `c->x[...]` accesses inside it is quadratic). `-mllvm -d
 **34 s**. 158 generated files contain such a switch with more than 20,000 characters (both modules). On the phone this
 one file alone would take on the order of 10-20 minutes of one big core.
 
-Ways to fix it, best first (none done here - they change the generator or the flags, i.e. the game code id):
-1. The generator puts `br_all_labels` functions in chunk files of their own, compiled with
-   `-mllvm -disable-licm-promotion` (or `-O1` plus that); every other file keeps today's flags, so normal code keeps
-   LICM's register promotion (which matters for the game's speed).
+Ways to fix it, best first:
+1. **Done:** `gen.py --split-dispatch 512` puts every function with a jump table (all instructions as labels) of 512+
+   instructions in a chunk file of its own whose first line is `/* lasgen: split-dispatch */`; build_game.sh and
+   gamebuild.c compile those with `-mllvm -disable-licm-promotion` (`gamelib_id.sh --split-flags`), every other file
+   with today's flags, so normal code keeps LICM's register promotion. 148 such files (72 sdk, 76 main; 810 chunks
+   instead of 719). Mac full build, NDK clang, 8 jobs: **43.8 → 35.5 CPU-minutes** (wall 6m48s → 5m42s on a quiet
+   machine); sdk_055's function alone 110-250 s → 34 s. The slowest files are now the split ones themselves (~30-90
+   s on the M1 under load; LoopLoadElimination and the rest); `-O1` on top would make them 23 s but changes their
+   code more - not done. The bulk of the time is now simply the 445 MB of C. The whole split library links with
+   `-z defs` (nothing undefined) and is the same size class (94 MB).
 2. A smaller dispatch for those functions (only the addresses an indirect branch can actually reach, when the
    analysis can bound them) - fewer labels, a smaller loop.
 3. Ship the profile (`build/android/lasgame.profdata`, clang 18 format; clang 22 reads older formats) and let `-fprofile-use`
@@ -206,13 +280,12 @@ its **native library folder** (`ApplicationInfo.nativeLibraryDir`), which only e
 libraries are extracted at install. So:
 
 - `jniLibs/arm64-v8a/`: `libzig.so`, `liblaspython.so`, `libpython3.14.so`, `libcapstone.so`, `libunicorn.so` (all
-  produced by `build_python.sh` / `build_zig.sh` into `build/ondevice/stage/jniLibs/arm64-v8a/`, to be added to
-  `jniLibs.srcDirs` in `android/app/build.gradle`).
-- `android:extractNativeLibs="true"` in the manifest and `packaging.jniLibs.useLegacyPackaging true` in
-  build.gradle (today: `false` / mapped from the APK). This also extracts libmain.so, libSDL3.so, etc. (~60 MB more
-  on disk) and stores the libraries deflated in the APK (smaller download). A "builder" flavour could keep the
-  current mapping for personal APKs that already contain the game library.
-- One asset archive (`ondevice.zip`, ~15 MB): `pyhome/` (stdlib + lib-dynload + site-packages), the generator
+  produced by `build_python.sh` / `build_zig.sh` into `build/ondevice/stage/jniLibs/arm64-v8a/`, added to
+  `jniLibs.srcDirs` by `-PonDeviceBuild=true`).
+- `android:extractNativeLibs="${extractNativeLibs}"` in the manifest and `useLegacyPackaging onDevice` in
+  build.gradle: true with the builder (also extracts libmain.so, libSDL3.so, ... ~17 MB more on disk; the libraries
+  are stored deflated in the APK), false without it (mapped from the APK, as before).
+- One asset archive (`ondevice.zip`, 9.9 MB, 1351 files): `pyhome/` (stdlib + lib-dynload + site-packages), the generator
   (`tools/*.py`, `tools/rando/patch_variants.json`, `runtime/game_addresses/patches_v1_0_0.h`) and `cckit/`. Unpacked
   into `files/ondevice/` on first use (or when the app's version changes), like `runtime/paths.c android_resources`
   does for fonts. `lib-dynload/*.so` and the lz4 extension modules are loaded with `dlopen` from there - allowed (the
@@ -221,34 +294,28 @@ libraries are extracted at install. So:
 - The output goes to the app's internal storage (`files/liblasgame.so` + `.id`), where `runtime/gamelib.c` already looks
   first; the external data folder (where the game files are) is mounted without exec.
 
-## Driver: reuse runtime/gamebuild.c
+## Driver: runtime/gamebuild.c
 
-gamebuild.c already does everything needed - both generators as child processes, their progress from the log,
+gamebuild.c already did everything needed - both generators as child processes, their progress from the log,
 compiling chunks while the generator writes, the resumable build cache, cancelling, the link, publishing with the
-id - and it is already compiled into libmain.so and wired to the start screen (`runtime/ui/launcher.mm`). A Java
-driver would duplicate all of it. Changes for Android:
+id - and is compiled into libmain.so and wired to the start screen (`runtime/ui/launcher.mm`), so its Android branch
+is small (the Java side only unpacks the assets, copies the game files and runs the foreground service):
 
-1. `plat_spawn` / `plat_proc_wait` / `plat_proc_kill`: **done in this branch** (`runtime/platform/android.c`,
-   posix_spawn as on Linux, which is safe to call from a multithreaded ART process, unlike fork).
-2. `find_tools` (Android branch): generator = `<nativeLibraryDir>/liblaspython.so` + `files/ondevice/tools/gen.py`
-   (the existing `gen` + `gen_script` pair), compiler = `<nativeLibraryDir>/libzig.so`, headers / entry / hle from
-   `files/ondevice/cckit/gamelib-src/`. `nativeLibraryDir` from Java (`getApplicationInfo().nativeLibraryDir`) through
-   `android_jni.c`, or from `dladdr` on a libmain.so symbol (its folder is the native library folder).
-3. `compiler()` / `add_cflags`: on Android `libzig.so clang -target aarch64-linux-android30 -nostdinc -isystem ...`
-   (above) instead of `zig cc`; the flags stay `GAMELIB_CFLAGS` (CMakeLists passes gamelib_id.sh's flags already).
-4. The generator command line gets `--shift 0x6000000000` (and `--simd asm`, which is the default on aarch64 anyway);
-   environment `LASPY_HOME`, `LASPY_PATH`, `LIBCAPSTONE_PATH`, `LIBUNICORN_PATH` (set once with `setenv` before the
-   build: posix_spawn passes `environ`).
-5. Run the two generators one after the other on Android (memory, see above), and limit jobs to the number of cores
-   (8: 4 small + 3 big + 1 prime; maybe 6 to leave the UI responsive).
-6. The link: `libzig.so ld.lld @cckit/link.rsp ...` with crt/stubs/builtins (above) instead of `zig cc -shared`
-   (like the Windows branch's `lld-link @rt/link.rsp`).
-7. Work folder: `.gamebuild` under the game folder works (external storage, FUSE); `build_cache_publish` must put the
-   result in internal storage (`SDL_GetAndroidInternalStoragePath()`), where gamelib.c looks.
-8. Java side: keep the process alive for an hour - keep the start screen on (`FLAG_KEEP_SCREEN_ON`) and/or a
-   foreground service with a notification while the build runs (Android kills background apps; Android 14+ needs a
-   foreground service type, e.g. `dataSync`/`specialUse`, with their time limits on Android 15). Cancel/resume already
-   exists in gamebuild.c (the build cache keeps finished objects), so being killed costs only the unfinished files.
+- `plat_spawn` / `plat_proc_wait` / `plat_proc_kill` (`runtime/platform/android.c`): posix_spawn as on Linux.
+- `find_tools_android`: the native library folder from `dladdr` on libmain.so (an APK whose libraries aren't
+  extracted - "base.apk!/lib/..." - has no builder: `gamebuild_available()` false); generator = `liblaspython.so` +
+  `files/ondevice/tools/gen.py`, compiler = `libzig.so`, headers / entry / HLE list from `files/ondevice/cckit/gamelib-src/`.
+- `compiler()`: `clang -target aarch64-linux-android30 -nostdinc -isystem <kit>...`; `add_cflags` drops gamelib_id.sh's
+  `-Iruntime`; split-dispatch files (first line) get `GAMELIB_SPLIT_FLAGS`; the generator gets `GAMELIB_GEN_ARGS`
+  (both from gamelib_id.sh through CMakeLists, also part of the build cache's spec).
+- Generators one after the other (sdk first), progress weighted by their share of the C (main 78%, sdk 22%; also on
+  desktop, where they still run together).
+- nice 10 + the faster cores for the build thread (the compilers inherit both), `LASPY_*` / `LIB*_PATH` / `TMPDIR`
+  in the environment.
+- The link with `libzig.so ld.lld @cckit/link.rsp` against `<native lib dir>/libmain.so`; after `build_cache_publish`
+  (which now accepts `liblasgame.so`) the library is copied to internal storage and the external copy removed.
+- `LARECOMP_ONDEVICE_DIR` (tests) replaces the unpacked assets' folder, so `phone_gamebuild_test.sh` can run it
+  without the app's Java side.
 
 ## Licenses of everything bundled
 
@@ -280,7 +347,10 @@ sha256: python.org's release-file API, PyPI's JSON, tools/fetch_zig.sh's pins):
 3. `build_cckit.sh` - the cckit: the exact headers the generated C and gamelib_entry.c include (dependency lists of a
    probe compiled with the host zig, so they are clang 22's own headers), crt + stubs + builtins from the NDK, the
    gamelib sources, link.rsp.
-4. `phone_test.sh [one generated .c]` - pushes it all to `/data/local/tmp/lasondev` and runs: `selftest.py` +
+4. `make_assets.sh` - `build/ondevice/assets/ondevice.zip` (deterministic: fixed dates, sorted) and `licenses/`.
+   `build_all.sh` runs 1-4.
+5. `check_public_apk.sh <apk>`, `phone_gamebuild_test.sh` (above).
+6. `phone_test.sh [one generated .c]` - pushes it all to `/data/local/tmp/lasondev` and runs: `selftest.py` +
    `gen.py --help` + `pybench.py`; `phone_cc_test.sh` (headers, gamelib_entry.c, optionally one chunk, timed);
    `linkprobe.c` compiled, linked against libmain.so and loaded. Removes the folder at the end (trap).
 
@@ -288,11 +358,13 @@ Output: `build/ondevice/stage/` (`jniLibs/arm64-v8a/*.so`, `pyhome/`, `cckit/`, 
 
 ## Remaining work
 
-1. **Compile time**: the `br_all_labels` functions (generator: own chunks + `-mllvm -disable-licm-promotion`), then
-   a full on-phone build to measure the real total, thermals included.
-2. gamebuild.c's Android branch (points 2-7 above), the asset archive and its unpacking, `extractNativeLibs`, the
-   foreground service / keep-screen-on, then the start screen flow (pick folder → copy → build) on Android.
-3. A real generator run on the phone (memory, time) - needs the player's `exefs/` on the phone, i.e. the app flow.
-4. The game's speed with the clang-22-built library vs the NDK-built one.
-5. Size: our own NDK-built clang+lld instead of zig (≈ 1/3 the size); trim the stdlib further (email, http, xml,
+1. **The on-phone end-to-end test** with the installed APK and real game files (not done here: no APK installs on the
+   shared phone yet): the copy, the real generator's time and memory on the phone, the whole build's time and
+   thermals with 4 jobs at nice 10, the notification with the screen off, resume after swiping the app away, and the
+   game running from the phone-built library (clang 22 code vs the NDK's clang 18).
+2. The library from `build_game.sh` with the split (computer) to be checked in the game too (same code id as the
+   phone's).
+3. Size: our own NDK-built clang+lld instead of zig (≈ 1/3 the size); trim the stdlib further (email, http, xml,
    asyncio, multiprocessing... are unused); ship sourceless .pyc.
+4. If the split files stay the slowest: `-O1` for them too (23 s instead of 34 s for the worst on the M1), measured
+   against the game's speed in those functions.
