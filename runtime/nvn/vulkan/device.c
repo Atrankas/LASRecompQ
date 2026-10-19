@@ -1506,6 +1506,7 @@ int ui_run(void) {
             input_rumble_poll();
             if (e.type == SDL_EVENT_QUIT) {
                 input_rumble_stop();
+                input_led_stop();
                 LOG("window closed\n");
                 exit(0);
             }
@@ -1516,5 +1517,6 @@ int ui_run(void) {
         }
         menu_apply_window_requests(window);
         input_rumble_poll();
+        input_led_poll();
     }
 }

@@ -68,6 +68,10 @@ jobs:
           build/test-condvar
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Controller light colours
+        run: |
+          clang -std=gnu11 -O1 tools/test_led.c -lm -o build/test-led
+          build/test-led
       - name: Vulkan fence sequence regression
         run: python3 tools/test_fence_sequence.py
       - name: Vulkan validation failure regression
@@ -116,6 +120,10 @@ jobs:
           build/test-condvar
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Controller light colours
+        run: |
+          clang -std=gnu11 -O1 tools/test_led.c -lm -o build/test-led
+          build/test-led
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
       - name: Vulkan synchronization failure regression
