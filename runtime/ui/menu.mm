@@ -89,6 +89,7 @@ extern "C" void menu_test_open(void) {
 
 void menu_tabs_focus(bool first_tab);
 extern "C" void touch_reset(void);  // touch_controls.mm
+extern "C" bool touch_edit_back(void);
 static void set_open(bool open) {
     if (open == g_open.load()) return;
     g_open.store(open);
@@ -167,6 +168,12 @@ bool menu_handle_event(const SDL_Event *e) {
     bool typing = g_kbd.load() == 1 || (g_open.load() && g_text_busy.load());
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
+        // Android's back button: cancels the touch layout editor, opens the menu, and in it backs out as Esc does
+        if (e->key.scancode == SDL_SCANCODE_AC_BACK) {
+            if (e->key.repeat) return true;
+            if (touch_edit_back()) return true;
+            if (!g_open.load()) { if (!typing) set_open(true); return true; }
+        }
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
                                (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load()))) {
             if (!typing) set_open(!g_open.load());  // (Esc with the menu open goes to ImGui below: it cancels a field)
@@ -184,7 +191,8 @@ bool menu_handle_event(const SDL_Event *e) {
     case SDL_EVENT_KEY_UP: {
         if (!capturing()) return false;
         bool down = e->type == SDL_EVENT_KEY_DOWN;
-        if (down && e->key.scancode == SDL_SCANCODE_ESCAPE) {  // Esc: back out of popups, else close
+        if (e->key.scancode == SDL_SCANCODE_AC_BACK && !down) return true;
+        if (down && (e->key.scancode == SDL_SCANCODE_ESCAPE || e->key.scancode == SDL_SCANCODE_AC_BACK)) {  // Esc: back out of popups, else close
             QEvent q = {};
             q.kind = QEvent::KEY; q.key = ImGuiKey_Escape; q.down = true; push(q);
             q.down = false; push(q);

@@ -216,6 +216,7 @@ bool input_gamepad_connected(void) { return pad != NULL; }
 bool touch_handle_event(const SDL_Event *e);
 uint64_t touch_buttons(void);
 void touch_stick(int32_t *lx, int32_t *ly);
+void touch_pad_used(void);
 
 // Forget held keys (the menu took focus); the gamepad is re-read on its next event.
 void input_reset(void) {
@@ -345,6 +346,7 @@ void input_handle_event(const SDL_Event *e) {
         break;
     case SDL_EVENT_GAMEPAD_ADDED:
         if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
+        touch_pad_used();  // (the touch controls hide: touch_controls.mm)
         break;
     case SDL_EVENT_GAMEPAD_REMOVED:
         if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) {
@@ -357,6 +359,9 @@ void input_handle_event(const SDL_Event *e) {
         break;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
         recompute_pad();
+        // the controller in use (a press, a stick or trigger well off centre - not drift): the touch controls hide
+        if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 12000))
+            touch_pad_used();
         break;
     }
 }
@@ -366,6 +371,8 @@ void input_handle_event(const SDL_Event *e) {
 // that angle, 0 = right, 90 = up).
 static _Atomic uint64_t script_buttons;
 static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
+// (touch_controls.mm, LARECOMP_TOUCH_SHOW_INPUT: the scripted presses drawn on the on-screen controls)
+void input_script_state(uint64_t *buttons, int32_t *lx, int32_t *ly) { *buttons = script_buttons, *lx = script_lx, *ly = script_ly; }
 
 // Tests of the bindings, through them like a real player:
 // LARECOMP_HOST_INPUT="frame:key:<SDL key name>:frames,frame:pad:<button>:frames,..." holds a host key / controller

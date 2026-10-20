@@ -80,6 +80,13 @@ typedef struct {
     int touch_mode;      // 0 Auto (while no controller is connected), 1 Always, 2 Off
     float touch_opacity; // 0.15 .. 1
     float touch_size;    // 0.6 .. 1.6 (1 = the default layout)
+    // the layout editor (touch_controls.mm): per control, moved (its place: share of the screen), size (x), hidden;
+    // saved as touch_ctl_<name> = x, y, size, hidden
+#define TOUCH_NCTL 13
+    bool touch_moved[TOUCH_NCTL];
+    float touch_pos[TOUCH_NCTL][2];
+    float touch_scale[TOUCH_NCTL];
+    bool touch_hidden[TOUCH_NCTL];
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
 } Settings;
 

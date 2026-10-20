@@ -17,6 +17,11 @@
 extern "C" {
 #include "../input_bind.h"
 #include "../settings.h"
+
+extern "C" bool touch_edit_available(void);  // touch_controls.mm
+extern "C" void touch_edit_begin(void);
+extern "C" void touch_layout_reset(void);
+extern "C" void menu_toggle(void);           // menu.mm
 int input_pad_family(void);              // runtime/hle/input.c
 SDL_JoystickID input_active_pad(void);   // runtime/hle/input.c: the controller the game reads (0: none yet)
 void input_apply_background(void);
@@ -273,6 +278,16 @@ extern "C" void controls_tab_draw(float scale) {
         float sz = roundf(g_settings.touch_size * 100), op = roundf(g_settings.touch_opacity * 100);
         if (opt_slider("Size", &sz, 60, 160, 5, 100, "%.0f%%", "The on-screen buttons' size.")) g_settings.touch_size = sz / 100;
         if (opt_slider("Opacity", &op, 15, 100, 5, 60, "%.0f%%", "How see-through the on-screen buttons are.")) g_settings.touch_opacity = op / 100;
+        // the layout editor (touch_controls.mm): over the game, so only while it plays
+        if (!touch_edit_available()) opt_disable_next();
+        if (opt_action("Edit touch layout", "", "Move the on-screen buttons, change each one's size or hide it, over the game. "
+                       "Available while playing.")) {
+            touch_edit_begin();
+            menu_toggle();  // (closes this menu: the editing happens on the game's screen)
+        }
+        if (opt_action("Reset touch layout", "", "Puts every on-screen button back in its place, at its size, shown.")) {
+            touch_layout_reset();
+        }
     }
 
     opt_section("Movement");

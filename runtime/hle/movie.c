@@ -352,6 +352,15 @@ static void movie_track(int kind, void *p, bool add) {
     pthread_mutex_unlock(&g_movie_lock);
 }
 
+// the launch opening playing, still skippable (the touch controls: a tap skips it - runtime/ui/touch_controls.mm)
+bool movie_opening_playing(void) {
+    for (int i = 0; i < MAX_MOVIE_OBJS; i++) {
+        const Extractor *e = g_movie_objs[0][i];
+        if (e && e->skippable && !e->eof) return true;
+    }
+    return false;
+}
+
 static void ex_dtor(Cpu *c) {
     Extractor *e = self_state(c);
     if (e && e->pkt) av_packet_free(&e->pkt);

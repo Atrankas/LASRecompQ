@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <map>
+#include <string>
 #include <vector>
 
 #include "imgui.h"
@@ -180,4 +181,22 @@ bool triforce_icon_draw(ImDrawList *dl, ImVec2 c, float size, ImU32 tint) {
     ImVec2 a(floorf(c.x - t.w * 0.5f), floorf(c.y - t.h * 0.5f));  // (whole pixels: the texture drawn 1:1)
     dl->AddImage(t.id, a, ImVec2(a.x + t.w, a.y + t.h), ImVec2(0, 0), ImVec2(1, 1), tint);
     return true;
+}
+
+// One of the game's own UI textures by name (Game.arc: item icons...), uploaded once and kept; 0 when it isn't there.
+// The touch controls draw the items on their buttons with these (runtime/ui/touch_controls.mm).
+ImTextureID ui_game_icon(const char *name) {
+    static std::map<std::string, ImTextureID> cache;
+    auto it = cache.find(name);
+    if (it != cache.end()) return it->second;
+    int w = 0, h = 0;
+    uint8_t *src = texpatch_ui_rgba(name, &w, &h);
+    ImTextureID id = (ImTextureID)0;
+    if (src && w > 0 && h > 0) {
+        std::vector<uint8_t> v(src, src + (size_t)w * h * 4);
+        id = upload(v, w, h);
+    }
+    free(src);
+    cache.emplace(name, id);
+    return id;
 }
