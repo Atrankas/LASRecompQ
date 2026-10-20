@@ -76,15 +76,20 @@ echo "== generating C (game code id $ID)"
 echo "== compiling ($JOBS jobs)"
 compile() {  # <source> <object>
     [ "$2" -nt "$1" ] && [ "$2" -nt runtime/cpu.h ] && [ "$2" -nt tools/android/gamelib_id.sh ] && { [ -z "${PGOFILE:-}" ] || [ "$2" -nt "$PGOFILE" ]; } && return 0
-    local x=  # (the generator's split-dispatch files: their first line says so, tools/gen.py SPLIT_MARK)
-    head -c 40 "$1" | grep -q 'lasgen: split-dispatch' && x=$SPLITFLAGS
-    "$CC" $FLAGS $x -c "$1" -o "$2.tmp" && mv "$2.tmp" "$2"
+    local x= f=$FLAGS  # (the generator's split-dispatch files: their first line says so, tools/gen.py SPLIT_MARK;
+    head -c 40 "$1" | grep -q 'lasgen: split-dispatch' && x=$SPLITFLAGS  # cold functions' files (COLD_MARK): -O0)
+    head -c 40 "$1" | grep -q 'lasgen: cold' && f=${FLAGS/-O2/-O0}
+    "$CC" $f $x -c "$1" -o "$2.tmp" && mv "$2.tmp" "$2"
 }
 export -f compile
 PGOFILE=$([ -n "$PGO" ] && [ "$PGO" != gen ] && echo "$PGO" || true)
 export CC FLAGS SPLITFLAGS PGOFILE
-# the slowest first (no long file left alone at the end): the split-dispatch files (~8x the time per byte), then by size
-{ grep -l 'lasgen: split-dispatch' "$GEN"/sdk/*.c "$GEN"/main/*.c | xargs ls -S; ls -S "$GEN"/sdk/*.c "$GEN"/main/*.c; } | awk '!seen[$0]++' |
+# the slowest first (no long file left alone at the end): the split-dispatch files (~8x the time per byte), then by
+# size, the cold functions' files (-O0) last
+# (grep -L's exit status differs between versions: || true)
+{ { grep -l 'lasgen: split-dispatch' "$GEN"/sdk/*.c "$GEN"/main/*.c || true; } | xargs ls -S
+  { grep -L 'lasgen: cold' "$GEN"/sdk/*.c "$GEN"/main/*.c || true; } | xargs ls -S
+  ls -S "$GEN"/sdk/*.c "$GEN"/main/*.c; } | awk '!seen[$0]++' |
     while read -r c; do echo "$c $OBJ/$(basename "$(dirname "$c")")_$(basename "$c" .c).o"; done |
     xargs -P "$JOBS" -n 2 bash -c 'compile "$0" "$1" || exit 255'
 "$CC" $FLAGS -DGAMELIB_ID="\"$ID\"" -c tools/gamelib_entry.c -o "$OBJ/gamelib_entry.o"

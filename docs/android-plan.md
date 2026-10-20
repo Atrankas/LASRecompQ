@@ -175,7 +175,8 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
       em arquivos próprios sem LICM: Mac 43.8 -> 35.5 min de CPU). APK público: `./gradlew assembleRelease
       -PonDeviceBuild=true` (76 MB), conferido por `tools/android/ondevice/check_public_apk.sh`
       (`docs/android-ondevice-build.md`)
-- [ ] Build no celular mais rápido (meta <= 15 min, a medir no S20 FE): flags só de tempo de compilação, mesmo código
+- [x] Build no celular mais rápido (meta <= 15 min; medido depois: 26.6 min com estas mudanças - o calor limita, ver
+      2026-10-20): flags só de tempo de compilação, mesmo código
       (`-dag-maps-huge-region=500`; no clang 22 do celular `-opt-disable=loop-load-elim`,
       `-has-predecessor-max-steps=2048`: 40 -> ~33 min de CPU no M1, 806/812 objetos idênticos), 8 jobs em todos os
       núcleos (os pequenos também), o arquivo mais longo primeiro, freio por memória; modelo: ~15-16 min
@@ -206,6 +207,24 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
 - Tentado e descartado: stencil para achar personagens (o capim tem o mesmo valor), meia precisão com resultado f32
   (Fable 8: 0.06 ms, ruído), interpolantes puros (tiram o prefetch de textura: mais lento), forçar gmem (+4 ms) ou
   sysmem (igual)
+
+### Situação em 2026-10-20
+- [x] Geração de quadros: andando na vertical o quadro gerado movia o cenário **para trás** (gravação da tela, fase por
+      quadro: -5 / +17 px em vez de +6 / +6) - a inversão do eixo Y da reprojeção estava ao contrário para a origem
+      inferior-esquerda do jogo. Agora +6 / +6, liso
+- [x] Linha escura nos corações durante o movimento: a cópia do cenário antes da HUD é HDR linear (B10G11R11) e era
+      colada na imagem sRGB sem codificar; área da HUD um quarto de texel maior com borda suave (sombra dos corações).
+      `LARECOMP_FRAMEGEN_DEBUG=diff/mask/scene`
+- [x] Jogo a partir do **.xci / .nsp + prod.keys** do jogador, extraído no próprio celular (`NxPackage.java`, como o
+      hactool): 6.3 GB em 32 s no S20 FE; pacote com atualização junto funciona igual (usa sempre a base v1.0.0); pacote
+      só com atualização é recusado com mensagem própria; prod.keys na pasta ou escolhido no seletor
+- [x] Build no celular: **26.6 -> 10.8 min** (+33 s de extração do .xci), mesmo aparelho e condições (frio, no USB).
+      Perfil de jogo em 122 lugares (todas as regiões, casas e cavernas, 4 salas de cada dungeon): 99.999% dos blocos
+      executados estão em 12862 das 121651 funções (`tools/hot_functions.txt`, só endereços); as outras vão para
+      arquivos `/* lasgen: cold */` compilados em -O0. Velocidade do jogo igual (CPU do jogo 16.98 vs 17.02 ms por
+      quadro com tudo em -O2, 30 fps, 100%; CPU do app em 120 s: 42.8 vs 47.7 s). Biblioteca 95 -> 175 MB
+- Aparelho de teste: S20 FE com ROM custom (aparece como SM-S901E), Magisk; a ROM tinha `wm fixed-to-user-rotation`
+  ligado (app preso em retrato, swapchain 1080x486)
 
 ### 5. Extras
 - [ ] Randomizer no Android (seeds geradas no PC funcionam; gerador no aparelho depois)

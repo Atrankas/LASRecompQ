@@ -2,7 +2,7 @@
 # tools/android/ondevice/check_public_apk.sh <apk>: an APK to share carries no code or data made from the game
 # (docs/android-ondevice-build.md "A public APK"). Fails when it finds:
 #   - liblasgame.so (the game code library) or any other library defining recompiled game functions (f_70xxxxxxxx)
-#   - generated C (the generator's chunk files: "#include \"cpu.h\"" + f_70... functions) or its split-dispatch mark,
+#   - generated C (the generator's chunk files: "#include \"cpu.h\"" + f_70... functions) or its split-dispatch / cold marks,
 #     inside the APK or inside assets/ondevice.zip
 #   - game files (exefs/, romfs/, main.npdm, .nso / .nca / .nsp / .xci)
 # and shows what it carries for building the game code on the phone.
@@ -29,8 +29,8 @@ if [ -f $W/apk/assets/ondevice.zip ]; then
     unzip -q -o $W/apk/assets/ondevice.zip -d $W/zip
     echo "assets/ondevice.zip: $(find $W/zip -type f | wc -l | tr -d ' ') files"
 fi
-grep -rlE 'lasgen: split-dispatch|^void f_70[0-9a-f]{8}\(Cpu \*CPU_RESTRICT c\) \{' $W/apk $W/zip 2>/dev/null | grep -v '/tools/gen.py$' |
-    grep -q . && fail "generated C: $(grep -rlE 'lasgen: split-dispatch|^void f_70[0-9a-f]{8}\(Cpu \*CPU_RESTRICT c\) \{' $W/apk $W/zip | grep -v '/tools/gen.py$' | head -3)"
+grep -rlE 'lasgen: (split-dispatch|cold)|^(COLD_FN )?void f_70[0-9a-f]{8}\(Cpu \*CPU_RESTRICT c\) \{' $W/apk $W/zip 2>/dev/null | grep -v '/tools/gen.py$' |
+    grep -q . && fail "generated C: $(grep -rlE 'lasgen: (split-dispatch|cold)|^(COLD_FN )?void f_70[0-9a-f]{8}\(Cpu \*CPU_RESTRICT c\) \{' $W/apk $W/zip | grep -v '/tools/gen.py$' | head -3)"
 echo "native libraries:"
 (cd $W/apk/lib/arm64-v8a && ls -l | awk 'NR > 1 {printf "  %-24s %10d\n", $9, $5}')
 ls $W/apk/assets/licenses >/dev/null 2>&1 && echo "licenses: $(ls $W/apk/assets/licenses | tr '\n' ' ')"

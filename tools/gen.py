@@ -361,7 +361,8 @@ class Module:
         raise Unsupported(k)
 
     def emit_function(self, entry, end, labels, tables, hle):
-        out = [f'void {fname(entry)}(Cpu *CPU_RESTRICT c) {{']
+        cold = HOT is not None and entry - self.base not in HOT  # (--hot: not in the list, compiled without optimizing)
+        out = [f'{"COLD_FN " if cold else ""}void {fname(entry)}(Cpu *CPU_RESTRICT c) {{']
         if entry in hle:
             out.append(f'    {sanitize(hle[entry])}(c);')
             out.append('}')
@@ -506,8 +507,18 @@ if _os.path.exists(_rv):
         RANDO_CODE[int(_a, 16)] = [int(_w, 16) for _w in _ws]
 
 
+# --hot <file>: the module's functions that run (offsets from its base: "<name> <hex offset>" lines, from a play
+# profile - tools/hot_functions.py); every other one is emitted COLD_FN (runtime/cpu.h: optnone, noinline), in files
+# of their own compiled at -O0. Compile time on phones: those take ~1/4 of the time per byte, and most of the game's
+# code never runs (the whole library: 5062 -> 1767 CPU-s with zig clang 22; docs/android-ondevice-build.md).
+HOT = None
+
+
 # First line of a --split-dispatch file (build_game.sh / runtime/gamebuild.c look for it; keep in step)
 SPLIT_MARK = '/* lasgen: split-dispatch */'
+# With --hot, the first line of a file of cold functions (they come after the hot ones, in files of their own): the
+# build compiles those at -O0 (build_game.sh, runtime/gamebuild.c) - ~1.8x faster than optnone functions in an -O2 file
+COLD_MARK = '/* lasgen: cold */'
 
 
 def write_if_changed(path, text):
@@ -542,9 +553,14 @@ def main():
     # instructions or more goes into a file of its own whose first line is SPLIT_MARK: the build compiles those files
     # with -mllvm -disable-licm-promotion (tools/android/gamelib_id.sh --split-flags), the rest unchanged.
     ap.add_argument('--split-dispatch', type=int, default=0)
+    ap.add_argument('--hot')  # (a relative path is next to this script)
     args = ap.parse_args()
-    global SHIFT
+    global SHIFT, HOT
     SHIFT = args.shift
+    if args.hot:
+        path = args.hot if os.path.isabs(args.hot) else os.path.join(os.path.dirname(os.path.abspath(__file__)), args.hot)
+        HOT = {int(l.split()[1], 16) for l in open(path) if l.split()[:1] == [args.name]}
+        print(f'{args.name}: {len(HOT)} hot functions ({os.path.basename(path)})', file=sys.stderr)
 
     t0 = time.time()
     m = Module(args.name, args.nso, args.base - SHIFT, args.simd)
@@ -613,30 +629,35 @@ def main():
     order = sorted(entries)
     if args.limit:
         order = order[:args.limit]
+    # (--hot: the hot functions' files first, then the cold ones' - a file is one or the other)
+    is_cold = lambda a: HOT is not None and a - m.base not in HOT
+    emit_order = [a for a in order if not is_cold(a)] + [a for a in order if is_cold(a)]
     nchunks = 0
     ci = 0
     pending = None  # (address, lines, refs, split) of a big function that starts the next file
     nsplit = 0
     while ci < len(order) or pending:
-        body, refs, size, fns, split = [], set(), 0, [], False
+        body, refs, size, fns, split, cold = [], set(), 0, [], False, False
         while (pending or ci < len(order)) and len(fns) < args.chunk and size < args.chunk_bytes:
             if pending:
                 a, lines, r, sp = pending
                 pending = None
             else:
-                a = order[ci]
+                a = emit_order[ci]
                 ci += 1
                 end, labels, tables = entries[a]
                 m._all_labels = False  # (an HLE stub returns before setting it)
                 lines = m.emit_function(a, end, labels, tables, hle)
                 r = getattr(m, '_refs', set())
                 m._refs = set()
-                sp = args.split_dispatch > 0 and m._all_labels and (end - a) // 4 >= args.split_dispatch
+                # (a cold one is compiled at -O0, where LICM doesn't run: no file of its own for that)
+                sp = args.split_dispatch > 0 and m._all_labels and (end - a) // 4 >= args.split_dispatch and not is_cold(a)
             n = sum(len(l) + 1 for l in lines)
             alone = n > args.big_fn or sp  # (a big function gets a file of its own: they compile in parallel)
-            if alone and fns:
+            if (alone or is_cold(a) != cold) and fns:
                 pending = (a, lines, r, sp)
                 break
+            cold = is_cold(a)
             body += lines
             size += n
             fns.append(a)
@@ -645,7 +666,7 @@ def main():
                 split = sp
                 break
         path = os.path.join(args.outdir, f'{args.name}_{nchunks:03d}.c')
-        text = [SPLIT_MARK + '\n' if split else '']
+        text = [SPLIT_MARK + '\n' if split else COLD_MARK + '\n' if cold else '']
         nsplit += split
         text += ['#include "cpu.h"\n' + ('#include "simd.h"\n' if m.lifter.sc else '')]
         text += [f'void {fname(r)}(Cpu *c);\n' for r in sorted(refs)]

@@ -49,7 +49,7 @@ execute_process(COMMAND ${ROOT}/tools/android/gamelib_id.sh --cc22-flags OUTPUT_
                 OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
 foreach(f tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/simd_c.py
           tools/rando/patch_variants.json tools/gamelib_entry.c runtime/hle/hle_symbols.txt runtime/cpu.h runtime/simd.h
-          runtime/simd_fp.h runtime/gamelib.h tools/android/gamelib_id.sh)
+          runtime/simd_fp.h runtime/gamelib.h tools/hot_functions.txt tools/android/gamelib_id.sh)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${ROOT}/${f})
 endforeach()
 message(STATUS "game code library id ${GAMELIB_ID}")

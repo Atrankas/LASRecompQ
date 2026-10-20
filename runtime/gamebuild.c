@@ -47,6 +47,8 @@
 #endif
 // The first line of a split-dispatch file (tools/gen.py SPLIT_MARK)
 #define SPLIT_MARK "/* lasgen: split-dispatch */"
+// and of a file of cold functions (tools/gen.py --hot COLD_MARK): compiled at -O0
+#define COLD_MARK "/* lasgen: cold */"
 
 #ifdef _WIN32
 #define SEP "\\"
@@ -294,22 +296,28 @@ typedef struct {
     char src[1100], obj[1100], tmp[1100], log[1100], stem[64], source_hash[65];
     unsigned long long bytes;
     bool split;  // a split-dispatch file (split_dispatch)
+    bool cold;   // a file of functions the play profile didn't see run (compiled at -O0)
     double cost;  // its expected compile time, in bytes of ordinary C (the longest go first: next_unit)
 } Unit;
 
-// The generator's split-dispatch files (tools/gen.py --split-dispatch) say so on their first line
-static bool split_dispatch(const char *src) {
+// The generator's split-dispatch files (tools/gen.py --split-dispatch) and files of cold functions (--hot) say so on
+// their first line
+static bool split_dispatch(const char *src, bool *cold) {
     char head[64] = {0};
+    *cold = false;
     FILE *f = fopen(src, "rb");
     if (!f) return false;
     size_t n = fread(head, 1, sizeof head - 1, f);
     fclose(f);
     head[n] = 0;
+    *cold = !strncmp(head, COLD_MARK, strlen(COLD_MARK));
     return !strncmp(head, SPLIT_MARK, strlen(SPLIT_MARK));
 }
 // (a split-dispatch file takes ~8x the time per byte of the rest: one huge jump-table function; measured over the
 // whole library with zig clang 22, 25.6 vs 3.1 CPU-seconds per MB on an M1)
 #define SPLIT_COST 8.0
+// (a file of cold functions at -O0 takes this share of an ordinary one's time per byte: zig clang 22 on a PC)
+#define COLD_COST 0.25
 
 typedef struct {
     Unit *u;
@@ -329,8 +337,8 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
     snprintf(u->log, sizeof u->log, "%s" SEP "%s.log", work, stem);
     struct stat st;
     u->bytes = stat(src, &st) == 0 ? (unsigned long long)st.st_size : 0;
-    u->split = GAMELIB_SPLIT_FLAGS[0] && split_dispatch(src);
-    u->cost = (double)u->bytes * (u->split ? SPLIT_COST : 1.0);
+    u->split = split_dispatch(src, &u->cold) && GAMELIB_SPLIT_FLAGS[0];
+    u->cost = (double)u->bytes * (u->split ? SPLIT_COST : u->cold ? COLD_COST : 1.0);
 }
 
 // The next file to compile: of those written so far (from..n), the longest (longest processing time first: no big
@@ -350,10 +358,12 @@ static void next_unit(Units *us, int from) {
 
 // The flags the game code was built with (GAMELIB_CFLAGS, part of its id). zig cc reads -march=<cpu> with its own CPU
 // names (x86_64_v3) and takes "-<feature>" off the end, so x86-64-v3 would be CPU "x86": the same CPU as -mcpu there.
-static void add_cflags(Args *a, const Tools *t) {
+// cold: a file of cold functions, at -O0 instead
+static void add_cflags(Args *a, const Tools *t, bool cold) {
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", GAMELIB_CFLAGS);
     for (char *f = strtok(buf, " "); f; f = strtok(NULL, " ")) {
+        if (cold && f[0] == '-' && f[1] == 'O') f = (char *)"-O0";
 #ifdef __ANDROID__
         if (!strcmp(f, "-Iruntime")) continue;  // (gamelib_id.sh's, for a computer's checkout: the kit's -I instead)
         add(a, f);
@@ -373,7 +383,7 @@ static void add_cflags(Args *a, const Tools *t) {
 static PlatProc start_compile(const Tools *t, const Unit *u) {
     Args a = {0};
     compiler(&a, t);
-    add_cflags(&a, t);
+    add_cflags(&a, t, u->cold);
     if (u->split) add_split(&a, GAMELIB_SPLIT_FLAGS);
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);

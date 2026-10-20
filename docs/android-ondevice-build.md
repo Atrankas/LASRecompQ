@@ -1,7 +1,8 @@
 # Building the game code on the phone
 
-A player installs the APK, picks their own extracted game folder (`exefs/` + `romfs/`), and the app itself copies
-it, generates, compiles and links `liblasgame.so`, and starts the game - the way the desktop start screen already
+A player installs the APK, picks the folder with their own game - its `.xci` / `.nsp` with their `prod.keys`, or the
+extracted `exefs/` + `romfs/` - and the app itself extracts or copies it, generates, compiles and links `liblasgame.so`,
+and starts the game - the way the desktop start screen already
 does (`runtime/gamebuild.c` with `zig cc` and the PyInstaller'd generator). A computer (`tools/android/build_game.sh`)
 is still the faster way, and makes the same library (same game code id).
 
@@ -32,7 +33,20 @@ is still the faster way, and makes the same library (same game code id).
 
 1. Start screen, setup page (as before): "Game files folder" opens the system folder picker
    (`ACTION_OPEN_DOCUMENT_TREE`), "Set up game files" starts the setup (runtime/ui/launcher.mm `extract_thread`).
-2. `LasActivity.importGameFiles` finds exefs/ (main + main.npdm) and romfs/ (region_common) in the picked tree, reads
+2. A game package instead: when the picked tree has no exefs/romfs but an `.xci` or `.nsp` (the largest), with
+   `prod.keys` (or `keys.txt`) beside it - else the file picker asks for it - `LasActivity.importPackage` runs
+   `NxPackage` on it (plain Java, hactool's way): the base program NCA of title 01006BB00C6F0000 (an update's program
+   NCA in the same package, BKTR sections, is skipped: the recompilation is of v1.0.0), its header decrypted with
+   `header_key` (AES-XTS, 0x200-byte sectors, big-endian sector tweak), its section key from the key area
+   (`key_area_key_application_XX`) or, for an eShop package, the ticket's title key (`titlekek_XX`; a `title.keys` in
+   the folder is read too), both also derived from `master_key_XX`; exefs (PFS0) and romfs (IVFC level 5) decrypted
+   (AES-CTR, the counter counting from the NCA's start) and written file by file (`.part` then renamed; a rerun keeps
+   finished files). exefs/main's build id is checked before the romfs is written. Measured with a cartridge image
+   holding v1.0.0 + its 1.0.1 patch: **32 s on the S20 FE** for 6.3 GB (12.6 s on a PC), exefs and a sample of 96 romfs
+   files byte-identical to an earlier dump (main.npdm differs only in its ACID signature, which the game doesn't read),
+   3836 romfs files; an .nsp made of the same NCAs gives the same files; one with only the update is refused
+   ("That package is only an update"). `java NxPackage.java <package> <prod.keys> <dest|->` runs it on a computer.
+   Otherwise `LasActivity.importGameFiles` finds exefs/ (main + main.npdm) and romfs/ (region_common) in the picked tree, reads
    `exefs/main`'s build id at 0x40 and refuses anything but v1.0.0 **before** copying ("Wrong version of the game"),
    then copies both into the data folder (`Android/data/com.lasrecomp.android/files/extracted/`; the game reads romfs/
    in place, runtime/services/fs.c), resuming a partial copy.
@@ -45,10 +59,11 @@ is still the faster way, and makes the same library (same game code id).
      Snapdragon 865, the little ones too), the longest files first, new compilers held back while memory is low (see
      "Build time");
    - `liblaspython.so files/ondevice/tools/gen.py sdk ...`, then `... main ...` (one after the other: main alone
-     peaks at ~1.7 GB), with `gamelib_id.sh --gen-args` (`--simd asm --shift 0x6000000000 --split-dispatch 512`);
-     chunks are compiled as soon as they're written;
+     peaks at ~1.7 GB), with `gamelib_id.sh --gen-args` (`--simd asm --shift 0x6000000000 --split-dispatch 512
+     --hot hot_functions.txt`); chunks are compiled as soon as they're written;
    - `libzig.so clang -target aarch64-linux-android30 <gamelib flags> <cc22 flags> -nostdinc -isystem cckit/...`,
-     split-dispatch files with `-mllvm -disable-licm-promotion`;
+     split-dispatch files with `-mllvm -disable-licm-promotion`, files of cold functions (`/* lasgen: cold */`) at
+     `-O0` (see "Build time");
    - `libzig.so ld.lld @cckit/link.rsp ... -L<native lib dir> -lmain ...`, published by the build cache, then copied to
      internal storage (`files/liblasgame.so` + `.id`, where runtime/gamelib.c looks first).
 4. The progress overlay shows "Recompiling the game", the step, percent and "about N minutes left" (from the progress
@@ -61,8 +76,35 @@ is still the faster way, and makes the same library (same game code id).
 
 ## Build time
 
-Measured on the S20 FE before the changes below: **27 min** (4 jobs on the big cores, 813 objects, phone skin 42 C,
-throttled). The work is the compiles (generator ~2 min, overlapped). Measured on the M1 with zig clang 22 (the phone's
+**Now: 649 s (10.8 min)** on the S20 FE from a cold phone on USB power (+ 33 s extracting an .xci first), against
+**1594 s (26.6 min)** the same way before the hot/cold split below. The phone reaches thermal status 4 within minutes
+either way (big cores capped at ~1.5 GHz): the time is CPU work under a fixed power budget, so less work is what helps.
+
+### Hot and cold functions (tools/gen.py --hot)
+
+Most of the game's code never runs in play. A profile (an instrumented library, `build_game.sh --pgo-gen`, played on
+the phone through 122 places - every overworld region, the 76 houses and caves, 4 rooms of each of the 10 dungeons -
+with walking, sword, shield, items, the menu and the map; LARECOMP_WARP_AT + LARECOMP_INPUT, 8 sessions merged) saw
+28684 of the 121651 functions run, and 99.999% of the basic blocks executed were in **12862** of them.
+`tools/hot_functions.py <profraw...>` writes those (module + offset, addresses only) to `tools/hot_functions.txt`;
+`gen.py --hot` puts every other function in files of their own whose first line is `/* lasgen: cold */`, compiled at
+`-O0` (runtime/gamebuild.c, build_game.sh), the hot ones as before. The list is part of the game code id.
+
+| | CPU time, whole library, zig clang 22 (the phone's), PC |
+|---|---|
+| all -O2 (before) | 5062 s |
+| cold functions `optnone` inside the -O2 files | 2631 s (first session's list: functions that ran at all) |
+| cold functions in their own `-O0` files, 99.999%-of-blocks list | **1767 s (-65%)** - cold files 807 s for 362 MB, hot 604 s, hot split-dispatch 356 s |
+
+A cold file at -O0 is ~1.8x faster than the same functions `optnone` in an -O2 file (module passes, SelectionDAG and
+the greedy allocator still run for those). The library grows: 95 -> 175 MB (unoptimized code). Game speed, the 5-minute
+play script (village, beach, enemies) from a cold phone, game thread busy per frame: **16.98 ms with the cold functions
+unoptimized, 17.02 ms with everything at -O2** (both 30 fps, 100% speed); the app's CPU time over 120 s of it: 42.8 s
+(the phone's own build, zig clang 22) against 47.7 s (all -O2, the NDK's clang 18 on a PC) - no slowdown to see.
+
+### Before: flags, cores and order
+
+Measured on the S20 FE before these: **27 min** (4 jobs on the big cores, 813 objects, phone skin 42 C, throttled). The work is the compiles (generator ~2 min, overlapped). Measured on the M1 with zig clang 22 (the phone's
 compiler), CPU time per file, then modelled for the phone (per-file time x 2.6 on a big core, calibrated on the 27 min;
 x 2.7 again on a little core at 1.8 GHz against the big cores' 1.75 GHz cap):
 
@@ -75,7 +117,8 @@ x 2.7 again on a little core at 1.8 GHz against the big cores' 1.75 GHz cap):
 | Together | **~ -18%, 40 -> ~33 CPU-min**; the library's code is the same (806/812 objects identical to before, all identical between the two clang-22-only options on and off) |
 | 8 jobs on all cores instead of 4 on the big ones, longest file first | model: 21.4 -> 15.6 min for the new flags (FIFO with 8 jobs: 15.9-17.6 - a big split file written late, main_522, would run alone at the end on a little core) |
 
-Expected: **~15-16 min** (27 x 0.82 for the flags, x ~0.73 for the cores and the order), cooler per unit of work (the
+Expected: **~15-16 min** (27 x 0.82 for the flags, x ~0.73 for the cores and the order) - measured with them on the
+S20 FE: 26.6 min (thermal status 4 after 3 minutes, big cores at ~1.5 GHz: the model's per-core speed didn't hold), cooler per unit of work (the
 little cores do ~1/3 of a big core's work for a fraction of its power). `LARECOMP_BUILD_JOBS=N` in env.txt tries other
 job counts; the log has `[gamebuild] generated main ... at Ns`, `compiled at Ns`, `lowest MemAvailable`.
 

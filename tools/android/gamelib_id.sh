@@ -18,7 +18,9 @@ GENFLAGS="-O2 -fno-strict-aliasing -fsigned-char -Wno-return-type -Wno-unused-la
 # the generator's huge jump-table functions in files of their own, compiled without LICM promotion (tools/gen.py
 # --split-dispatch: minutes per file otherwise, an hour+ on a phone)
 SPLITFLAGS="-mllvm -disable-licm-promotion"
-GENARGS="--simd asm --shift 0x6000000000 --split-dispatch 512"
+# --hot: the functions a play profile saw run keep -O2, all others are compiled unoptimized (tools/gen.py COLD_FN,
+# tools/hot_functions.py): on the phone most of the compile time went into code the game never runs
+GENARGS="--simd asm --shift 0x6000000000 --split-dispatch 512 --hot hot_functions.txt"
 # Compile time only, the same code (checked: byte-identical objects for a 59-file sample and the whole library with
 # zig clang 22; clang 18, the NDK's, has neither option): no LoopLoadElimination (it finds nothing to forward in this
 # code, but builds loop-simplified form and memory dependences for the dispatch loops: 50-60% of a split-dispatch
@@ -34,6 +36,6 @@ case "${1:-}" in
 esac
 SRCS="tools/game_addresses.py runtime/game_addresses/patches_v1_0_0.h tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/simd_c.py
       tools/rando/patch_variants.json tools/gamelib_entry.c runtime/hle/hle_symbols.txt runtime/cpu.h runtime/simd.h
-      runtime/simd_fp.h runtime/gamelib.h"
+      runtime/simd_fp.h runtime/gamelib.h tools/hot_functions.txt"
 # (+ the shift: the same sources make another library on Android, runtime/cpu.h GUEST_SHIFT)
 (cat $SRCS; echo "$GENFLAGS android shift=0x6000000000"; echo "split $SPLITFLAGS gen $GENARGS cc22 $CC22FLAGS") | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16

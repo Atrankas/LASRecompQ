@@ -4,7 +4,8 @@
 # it to the APK's assets):
 #   ondevice.zip   unpacked into files/ondevice by LasActivity.buildTools, once per app version:
 #                    pyhome/                 the generator's Python: standard library + modules (build_python.sh)
-#                    tools/                  the generator (tools/gen.py and its modules, rando/patch_variants.json)
+#                    tools/                  the generator (tools/gen.py and its modules, rando/patch_variants.json,
+#                                            hot_functions.txt)
 #                    runtime/game_addresses/ patches_v1_0_0.h (tools/game_addresses.py reads it from ../runtime)
 #                    cckit/                  the NDK pieces the compiler needs (build_cckit.sh)
 #   licenses/      the license texts of everything the on-phone build adds to the APK (+ README.txt: versions and
@@ -20,7 +21,7 @@ mkdir -p $O/licenses $W/tools/rando $W/runtime/game_addresses
 
 cp -R $S/pyhome $S/cckit $W/
 cp tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/simd_c.py \
-   tools/game_addresses.py $W/tools/
+   tools/game_addresses.py tools/hot_functions.txt $W/tools/
 cp tools/rando/patch_variants.json $W/tools/rando/
 cp runtime/game_addresses/patches_v1_0_0.h $W/runtime/game_addresses/
 # (fixed dates and order: the same archive from the same inputs)

@@ -83,6 +83,9 @@ void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
 #else
 #define FN_ENTER(a) do { if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30], c->x[0]); } while (0)
 #endif
+// Functions the play profile never saw run (tools/gen.py --hot): not optimized, so building the game code on a phone
+// takes far less time; musttail still holds at optnone
+#define COLD_FN __attribute__((optnone, noinline))
 // Generated functions take their Cpu as `Cpu *CPU_RESTRICT c`: guest memory never overlaps the host's Cpu, so stores
 // to guest memory don't make the compiler reload guest registers.
 #define CPU_RESTRICT __restrict
