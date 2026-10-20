@@ -34,10 +34,14 @@ static volatile uint64_t g_dm_frame, g_dm_obj;
 
 RT_ON_RESET(chaos_overlay_reset) { g_dm_frame = g_dm_obj = 0; }
 
+extern "C" void tracker_dgnmap_takeover(uint64_t obj);  // runtime/ui/tracker_overlay.mm
 extern "C" void rt_dgnmap_tick(Cpu *c) {
     g_dm_frame = renderer_present_count();
     g_dm_obj = c->x[0];
+    tracker_dgnmap_takeover(g_dm_obj);
 }
+extern "C" void rt_dgnmap_end(Cpu *c) { (void)c; tracker_dgnmap_takeover(g_dm_obj); }  // (DGN_MAP_END_SITE)
+extern "C" bool chaos_dgnmap_shown(void) { return g_dm_obj && renderer_present_count() - g_dm_frame <= 2; }
 
 extern "C" uint64_t chaos_dgnmap_obj(void) { return g_dm_obj; }  // (LARECOMP_PANE_SCAN)
 
@@ -109,6 +113,30 @@ static void label_text(int i, char *out) {  // A..Z, then AA, AB...
     if (i < 26) snprintf(out, 4, "%c", 'A' + i);
     else snprintf(out, 4, "%c%c", 'A' + i / 26 - 1, 'A' + i % 26);
 }
+
+// the page's view of its room grid (for the check tracker's room bullets): v = map translate x, y, scale, origin
+// translate x, y, scale, floor shift x, y (layout units, y up); false = the panes aren't there
+extern "C" bool chaos_dgnmap_view(float v[8]) {
+    if (!g_dm_obj) return false;
+    uint64_t p1 = LD64(g_dm_obj + 0x8);
+    uint64_t p2 = p1 ? LD64(p1 + 0x10) : 0;
+    uint64_t grid = p2 ? LD64(p2 + 0xf0) : 0;
+    uint64_t map = p2 ? pane(LD64(p2 + 0x70), "N_Map_00") : 0;
+    uint64_t pos = p2 ? pane(LD64(p2 + 0x7a8), "N_MapPosition_00") : 0;
+    uint64_t org = grid ? pane(LD64(grid + 0x6a8), "N_MapOrigin_00") : 0;
+    if (!map || !pos) return false;
+    const float *mf = (const float *)(uintptr_t)map, *pf = (const float *)(uintptr_t)pos;
+    v[0] = mf[0x30 / 4], v[1] = mf[0x34 / 4], v[2] = mf[0x48 / 4];
+    if (!(v[2] > 0.1f && v[2] < 20)) v[0] = v[1] = 0, v[2] = 1;
+    v[3] = v[4] = 0, v[5] = 1;
+    if (org) {
+        const float *of = (const float *)(uintptr_t)org;
+        if (of[0x48 / 4] > 0.1f && of[0x48 / 4] < 20) v[3] = of[0x30 / 4], v[4] = of[0x34 / 4], v[5] = of[0x48 / 4];
+    }
+    v[6] = pf[0x30 / 4], v[7] = pf[0x34 / 4];
+    return true;
+}
+extern "C" const char *chaos_current_level(void) { return current_level(); }
 
 extern "C" void chaos_overlay_draw(ImVec2 display, ImFont *font) {
     uint64_t p1 = LD64(g_dm_obj + 0x8);

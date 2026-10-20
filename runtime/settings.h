@@ -57,6 +57,7 @@ typedef struct {
     int menu_confirm;    // MENU_CONFIRM_*: game layout (right confirms, bottom goes back) or the controller's convention
     bool inv_keys;       // randomizer: show every dungeon's keys on the pause menu's Items page
     bool tracker;        // randomizer: check tracker on the pause menu's Map page
+    int tracker_filters; // its filter bar (runtime/ui/tracker_overlay.mm bits), -1 = the defaults; no menu row
     int chaos_letters;   // CHAOS_LETTERS_*: room-shuffle doorway letters on the dungeon map
     bool aspect_asked;   // the start screen's one-time "authentic 16:9 or unlocked?" question was answered
     bool menu_tip_seen;  // the start screen's one-time "how to open the menu" note was shown (first PLAY ever)

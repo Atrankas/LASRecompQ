@@ -658,6 +658,10 @@ static void fill_state(Cpu *c) {
         extern uint64_t pets_menu_input(uint64_t b, int32_t st[4]);
         int32_t st[4] = {lx, ly, rx, ry};
         b = pets_menu_input(b, st);
+        // the check tracker drives the Map page in randomizer seeds (runtime/ui/tracker_overlay.mm): its cursor takes
+        // the d-pad / left stick / A / Y (and B while one of its panels is open)
+        extern uint64_t tracker_map_input(uint64_t b, int32_t st[4]);
+        b = tracker_map_input(b, st);
         lx = st[0], ly = st[1], rx = st[2], ry = st[3];
     }
     *(uint64_t *)(s + 8) = b;

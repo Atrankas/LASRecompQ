@@ -723,6 +723,8 @@ extern "C" void translation_rows(void) {  // (difficulty.mm: under the Language 
 
 extern "C" bool inventory_overlay_wanted(void);
 extern "C" bool tracker_overlay_wanted(void);
+extern "C" bool tracker_dungeon_wanted(void);
+extern "C" void tracker_dungeon_draw(ImVec2 display, ImFont *font);
 extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font);
 extern "C" bool chaos_overlay_wanted(void);
 extern "C" void chaos_overlay_draw(ImVec2 display, ImFont *font);
@@ -931,11 +933,12 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load();
     bool inv = !open && inventory_overlay_wanted();
     bool trk = !open && tracker_overlay_wanted();
+    bool trkd = !open && tracker_dungeon_wanted();
     bool chaos = !open && chaos_overlay_wanted();
     bool kbd = g_kbd.load() == 1;
     bool touch = !open && !kbd && touch_visible();
     g_menu_drawn = false;
-    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos && !touch) {
+    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !trkd && !chaos && !touch) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -999,6 +1002,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     if (touch) touch_draw(ImGui::GetBackgroundDrawList(), io.DisplaySize.x, io.DisplaySize.y, g_font_big ? g_font_big : ImGui::GetFont());
     if (trk) tracker_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (chaos) chaos_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
+    if (trkd) tracker_dungeon_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (inv) {
         inventory_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     }
