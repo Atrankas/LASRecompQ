@@ -20,7 +20,7 @@ the phone itself from your own game package.
 
 ## Download
 
-Get the latest APK from the **[Releases page](https://github.com/Nycolazs/LASRecomp/releases/latest)**.
+Get the latest APK from the **[Releases page](https://github.com/Nycolazs/LASRecomp-Android-Plus/releases/latest)**.
 
 ## How it runs - Galaxy S20 FE (Snapdragon 865)
 
@@ -76,7 +76,7 @@ blur removal, cheats, the warp menu, the save editor and more.
 
 ## Installing
 
-1. Download the APK from the [Releases page](https://github.com/Nycolazs/LASRecomp/releases/latest) and install it
+1. Download the APK from the [Releases page](https://github.com/Nycolazs/LASRecomp-Android-Plus/releases/latest) and install it
    (allow installing from your browser / file manager when Android asks).
 2. Copy your game package (`.xci` or `.nsp`) and your `prod.keys` into one folder on the phone, for example
    `Download/LAS`.
