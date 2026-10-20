@@ -193,6 +193,10 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
       GPU": baía de Martha de quedas a 40 para 60 constantes; 10 min a 60 na tela e 100% de velocidade. Calor: pele
       46.6 °C (status 4) depois de 10 min partindo de 33 °C - a GPU agora trabalha quase sem pausas
 - [x] Ambientes internos com a resolução larga do jogo (luz sem bordas retas, salas sem esticar) e na tela inteira
+- [x] Calor com 60 constantes (10 min no Campo, partindo de ~34 °C, geração de quadros ligada): 1080p nativo +
+      "Desempenho da GPU" 46.6 °C (status 4); 1.25x + SGSR + "Desempenho da GPU" 44.5 °C (status 3); 1.25x + SGSR +
+      "Equilibrado" 43.2 °C (status 3). 1.25x + SGSR custa 5.4 ms a menos que 1.5x na baía e a imagem é quase igual
+      (o desfoque de profundidade do jogo amacia tudo); o SGSR custa ~0 ms
 - Tentado e descartado (rodada 2): LRZ ligado (o "ganho" era o bug da água), primeiro nível de brilho em 1x (perdia
   os brilhos da água), sombras 0.375 (sem ganho), DONT_CARE nos passes de tela cheia (sem ganho)
 - Tentado e descartado: stencil para achar personagens (o capim tem o mesmo valor), meia precisão com resultado f32
