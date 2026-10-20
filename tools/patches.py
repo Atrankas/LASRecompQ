@@ -297,7 +297,7 @@ MAP_PAGE_END_SITE = A.MAP_PAGE_END_SITE
 
 
 def _map_page_end(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
     assert w == 0x910203ff, hex(w)  # add sp, sp, #0x80
     return ('{ extern void rt_map_page_end(Cpu *); rt_map_page_end(c); c->sp += 0x80; }'
             f'  /* {a:#x}: add sp, sp, #0x80 (map page updated) */')
@@ -327,7 +327,7 @@ DGN_MAP_END_SITE = A.DGN_MAP_END_SITE
 
 
 def _dgn_map_end(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.cbase)[0]
     assert w == 0x910243ff, hex(w)  # add sp, sp, #0x90
     return ('{ extern void rt_dgnmap_end(Cpu *); rt_dgnmap_end(c); c->sp += 0x90; }'
             f'  /* {a:#x}: add sp, sp, #0x90 (dungeon map page updated) */')

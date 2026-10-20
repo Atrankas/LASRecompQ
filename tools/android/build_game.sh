@@ -94,6 +94,11 @@ export CC FLAGS SPLITFLAGS PGOFILE
     xargs -P "$JOBS" -n 2 bash -c 'compile "$0" "$1" || exit 255'
 "$CC" $FLAGS -DGAMELIB_ID="\"$ID\"" -c tools/gamelib_entry.c -o "$OBJ/gamelib_entry.o"
 
+# (objects of chunks the generator no longer writes - another split into files - would define functions twice)
+for o in "$OBJ"/main_main_*.o "$OBJ"/sdk_sdk_*.o; do
+    b=$(basename "$o" .o); m=${b%%_*}
+    [ -e "$o" ] && [ ! -e "$GEN/$m/${b#*_}.c" ] && rm -f "$o"
+done
 echo "== linking"
 # DT_NEEDED libmain.so: the runtime functions the game code calls are the app's own (it is loaded first)
 "$CC" -shared -fuse-ld=lld $LINKPGO -Wl,-z,max-page-size=16384 -Wl,-Bsymbolic -Wl,-soname,liblasgame.so \
