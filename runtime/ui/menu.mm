@@ -920,6 +920,7 @@ void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, v
     g_font = f0, g_font_big = f1;
 }
 
+static bool g_menu_drawn;  // menu_render drew overlays this frame (menu_redraw)
 #ifdef __APPLE__
 void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> target) {
     const double tw = target.width, th = target.height;
@@ -933,6 +934,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool chaos = !open && chaos_overlay_wanted();
     bool kbd = g_kbd.load() == 1;
     bool touch = !open && !kbd && touch_visible();
+    g_menu_drawn = false;
     if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos && !touch) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
@@ -1059,5 +1061,14 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     [enc endEncoding];
 #else
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering
+    g_menu_drawn = true;
 #endif
 }
+
+#ifndef __APPLE__
+// The last menu_render's overlays drawn again as they were (the in-between frame of frame generation): no new UI
+// frame - a second menu_render per game frame fed the touch controls twice and the stick snapped back to centre
+void menu_redraw(void *cmd) {
+    if (g_menu_drawn && ImGui::GetDrawData()) ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);
+}
+#endif
