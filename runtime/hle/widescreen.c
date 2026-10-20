@@ -214,6 +214,10 @@ void widescreen_scene_ubo(const float *u, uint64_t size) {
 
 // The camera's view-projection (rows) of that frame, if its scene was drawn (vulkan/framegen.c)
 bool widescreen_camera(uint64_t frame, float vp[16]) {
+    static int lg = -1;
+    if (lg < 0) lg = getenv("LARECOMP_LOG_FGCAM") != NULL;
+    if (lg) LOG("[fgcam] present %llu camera of %llu: %.4f %.4f %.4f %.4f\n", (unsigned long long)frame, (unsigned long long)g_vp_frame,
+                g_vp[3], g_vp[7], g_vp[11], g_vp[15]);
     if (g_vp_frame != frame) return false;
     memcpy(vp, g_vp, sizeof g_vp);
     return true;

@@ -41,8 +41,8 @@ static const char kWarp[] =
     "layout(location = 0) in vec2 uv;\n"
     "layout(location = 0) out vec4 o;\n"
     // m0..m3: rows of (generated view-projection) x inverse(this frame's); rect: the game picture in the window (uv);
-    // crop: the part of the presented picture shown there; a: flags (1 y flip: game NDC up = image top, 2 depth in
-    // [-1, 1], 4 present flip), Link's radius (uv, 0 = none), his depth, the mode; b: Link (uv), the depth's scale (zw)
+    // crop: the part of the presented picture shown there; a: flags (1 y flip: game NDC up = the image's first row, 2 depth in
+    // [-1, 1], 4 present flip, 8 comp in the game's layout, 16 sRGB-encoded picture), Link's radius (uv, 0 = none), his depth, the mode; b: Link (uv), the depth's scale (zw)
     "layout(push_constant) uniform P { vec4 m0; vec4 m1; vec4 m2; vec4 m3; vec4 rect; vec4 crop; vec4 a; vec4 b; } p;\n"
     "bool flag(uint f) { return (uint(p.a.x) & f) != 0u; }\n"
     // (flag 8: comp is the presented picture in the game's texture layout, sampled at game uv; else the window picture)
@@ -50,9 +50,23 @@ static const char kWarp[] =
     "vec2 toWin(vec2 g);\n"
     "vec4 compAt(vec2 g) { return flag(8u) ? textureLod(comp, g, 0.0) : textureLod(comp, toWin(g), 0.0); }\n"
     "vec2 toWin(vec2 g) { vec2 q = (g - p.crop.xy) / p.crop.zw; if (flag(4u)) q.y = 1.0 - q.y; return p.rect.xy + q * p.rect.zw; }\n"
+    // the scene before the HUD as the presented picture has it: that copy is the composite's linear (HDR) colour, the
+    // presented picture sRGB-encoded (sampled raw: exec.c raw_view). Pasted in linear it was much darker - a dark line
+    // under the hearts where the scenery moved out from under them
+    "vec3 sceneAt(vec2 g) {\n"
+    "  vec3 c = clamp(textureLod(scene, g, 0.0).rgb, 0.0, 1.0);\n"
+    "  if (!flag(16u)) return c;\n"
+    "  return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));\n"
+    "}\n"
     "layout(set = 0, binding = 4) uniform sampler2D hudMask;\n"  // where the HUD is: a quarter of the presented picture
-    // (bilinear: also a texel around it)
-    "bool hudAt(vec2 g) { return textureLod(hudMask, g, 0.0).r > 0.01; }\n"
+    // how much of the HUD's neighbourhood g is in (0..1): the mask a quarter texel further around (the faint edge of
+    // the hearts' soft shadow is under the mask's threshold - moved with the scenery it left a dark line under them)
+    "float hudW(vec2 g) {\n"
+    "  vec2 t = 1.0 / vec2(textureSize(hudMask, 0));\n"
+    "  float w = textureLod(hudMask, g, 0.0).r;\n"
+    "  for (int i = 0; i < 4; i++) w = max(w, textureLod(hudMask, g + t * vec2((i & 1) == 0 ? -1.0 : 1.0, (i & 2) == 0 ? -1.0 : 1.0), 0.0).r);\n"
+    "  return clamp(w * 2.0, 0.0, 1.0);\n"
+    "}\n"
     // where the scene point at g lands in the generated picture
     "vec2 moved(vec2 g) {\n"
     "  vec2 n = g;\n"
@@ -89,13 +103,20 @@ static const char kWarp[] =
     "  if (p.a.w > 0.5 && p.a.w < 1.5) { o = flag(8u) ? compAt(toGame(uv)) : textureLod(comp, uv, 0.0); return; }\n"  // (LARECOMP_FRAMEGEN_PLAIN: the cost without the warp)
     "  if (any(lessThan(uv, p.rect.xy)) || any(greaterThan(uv, p.rect.xy + p.rect.zw))) { o = flag(8u) ? vec4(0.0, 0.0, 0.0, 1.0) : textureLod(comp, uv, 0.0); return; }\n"
     "  vec2 g = toGame(uv);\n"
+    "  if (p.a.w > 5.5) { o = vec4(sceneAt(g), 1.0); return; }\n"  // (=scene: the scene before the HUD)
+    "  if (p.a.w > 4.5) { o = vec4(compAt(g).rgb * (1.0 - 0.6 * hudW(g)) + vec3(0.6 * hudW(g), 0.0, 0.0), 1.0); return; }\n"  // (=mask)
+    "  if (p.a.w > 3.5) { o = vec4(abs(compAt(g).rgb - sceneAt(g)) * 4.0, 1.0); return; }\n"  // (=diff)
     "  if (p.a.w > 2.5) { o = compAt(g); o.r = max(o.r, linkW(g)); return; }\n"  // (LARECOMP_FRAMEGEN_DEBUG=link)
-    "  if (hudAt(g)) { o = compAt(g); return; }\n"
+    "  float w = hudW(g);\n"
+    "  if (w >= 1.0) { o = compAt(g); return; }\n"
     "  vec2 lo = p.crop.xy, hi = p.crop.xy + p.crop.zw;\n"
     "  vec2 s = g;\n"
     "  for (int i = 0; i < 2; i++) s = clamp(g - (moved(s) - s), lo, hi);\n"  // (the source pixel that lands here)
     "  s = mix(s, g, linkW(g));\n"
-    "  o = hudAt(s) ? vec4(textureLod(scene, s, 0.0).rgb, 1.0) : compAt(s);\n"
+    // the scenery: where the source is near the HUD, from the scene before it (soft: a quarter of the size)
+    "  vec3 bg = mix(compAt(s).rgb, sceneAt(s), hudW(s));\n"
+    // the HUD and its surroundings stay as in the real frame, fading into the moved scenery over a quarter texel
+    "  o = vec4(mix(bg, compAt(g).rgb, w), 1.0);\n"
     "}\n";
 
 // the HUD mask: each texel covers 4x4 pixels of the presented picture, set where it differs from the scene's copy
@@ -529,14 +550,23 @@ bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBack
     memcpy(pc.m, m, sizeof m);
     pc.rect[0] = rect[0] / ww, pc.rect[1] = rect[1] / wh, pc.rect[2] = rect[2] / ww, pc.rect[3] = rect[3] / wh;
     memcpy(pc.crop, crop, sizeof pc.crop);
-    pc.a[0] = (float)((nvn_window_origin() == 0 ? 1 : 0) | (nvn_depth_mode() == 0 ? 2 : 0) | (flip_present ? 4 : 0) | (psrc ? 8 : 0));
+    // (flag 1: the game's lower-left origin is drawn flipped and presented flipped back, so in the presented picture's and
+    // the depth's own layout NDC up is the image's bottom row - no y flip. With it the in-between frame moved the
+    // scenery backwards when the camera moved vertically: -5 / +17 pixels per shown frame instead of +6 / +6, S20 FE)
+    bool srgb = fin->format == VK_FORMAT_R8G8B8A8_SRGB || fin->format == VK_FORMAT_B8G8R8A8_SRGB;
+    pc.a[0] = (float)((nvn_window_origin() != 0 ? 1 : 0) | (nvn_depth_mode() == 0 ? 2 : 0) | (flip_present ? 4 : 0) | (psrc ? 8 : 0) |
+                      (srgb ? 16 : 0));
     pc.a[1] = 0, pc.a[2] = 0, pc.b[0] = pc.b[1] = 0;
     link_on_screen(pc.a[0], pc.b, &pc.a[1], &pc.a[2]);
     // a camera that didn't move: the real picture again, without the per-pixel reprojection
     float still = 0;
     for (int i = 0; i < 16; i++) still = fmaxf(still, fabsf(g_vp[i] - g_vp_prev[i]) / (fabsf(g_vp[i]) + 1e-3f));
     const char *dbg = getenv("LARECOMP_FRAMEGEN_DEBUG");
-    pc.a[3] = dbg && !strcmp(dbg, "link") ? 3.0f : dbg ? 2.0f : getenv("LARECOMP_FRAMEGEN_PLAIN") || still < 1e-5f ? 1.0f : 0.0f;
+    // (LARECOMP_FRAMEGEN_DEBUG=depth / link / diff: the picture against the scene before the HUD / mask: the HUD's /
+    // scene: the scene before the HUD)
+    static const char *const modes[] = {"link", "diff", "mask", "scene"};
+    pc.a[3] = dbg ? 2.0f : getenv("LARECOMP_FRAMEGEN_PLAIN") || still < 1e-5f ? 1.0f : 0.0f;
+    for (int i = 0; dbg && i < 4; i++) if (!strcmp(dbg, modes[i])) pc.a[3] = 3.0f + i;
     static int nlog;
     if (getenv("LARECOMP_FRAMEGEN_DEBUG") && nlog++ < 3)
         LOG("[framegen] depth %ux%u scale %.3f %.3f, picture %ux%u, rect %.0f %.0f %.0f %.0f crop %.3f %.3f %.3f %.3f\n", db->width, db->height,
