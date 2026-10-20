@@ -57,7 +57,9 @@ Faster phones (Snapdragon 8 Gen 1 and newer) should have room for higher resolut
   the HUD kept still.
 - Snapdragon Game Super Resolution upscaler, dynamic resolution, pre-rotated swapchain, power modes (Balanced / GPU
   performance / maximum performance on rooted phones), custom Turnip driver loading (adrenotools).
-- Brazilian Portuguese menus; the game's text in any language it has (and fan translations you bring yourself).
+- **Brazilian Portuguese**: the app's menus, and the game itself through the fan translation by **Projeto Zelda Brasil
+  - Heroes of Time** - optional, under Settings > Language. The APK carries it only as a patch: the app makes the
+  translated text from your own game files, so nothing of the game ships with it.
 
 **From LAS Recomp** (see [the original project](https://github.com/peiikai/LASRecomp) for the full list): the in-game
 overlay menu, the randomizer (seeds made on a computer can be played), unlocked aspect ratio, 360-degree movement,
@@ -115,6 +117,7 @@ code on a computer instead (a personal APK): `tools/android/build_game.sh <game 
 - **[mamcjr/LASRecompAndroid](https://github.com/mamcjr/LASRecompAndroid)** (MIT) - another Android port; ideas from
   it are used here (the shader translator's jump-table windows and tables, CPU-only performance hints, render-thread
   savings).
+- **Projeto Zelda Brasil - Heroes of Time** - the Brazilian Portuguese fan translation of the game.
 - **Mesa / Turnip** (MIT) - the open-source Adreno Vulkan driver bundled with the app, loaded with
   [libadrenotools](https://github.com/bylaws/libadrenotools) (BSD-2-Clause).
 - **Snapdragon Game Super Resolution** (BSD-3-Clause), Qualcomm.
