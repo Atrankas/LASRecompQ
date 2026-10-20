@@ -33,8 +33,11 @@ int maxwell_precise_pos = 1;
 int maxwell_scalar_cbuf;
 int maxwell_ieee_minmax;
 int maxwell_robust_cbuf;
-bool maxwell_static_stacks = false;  // (off until the phone restarts are cleared; LARECOMP_DYN_STACKS=0: on)
-bool maxwell_brx_table = false;      // (off until the phone restarts are cleared; LARECOMP_VK_BRX_TABLE=1: on)
+// (both were turned off on 2026-10-18 as a precaution while the phone's restarts were looked into; those were frame
+// generation's depth textureGather (08bbaef). Back on with brx_table reading only the table itself: the Field 24.66 ->
+// 24.45 ms of GPU, S20 FE. LARECOMP_DYN_STACKS=1 / LARECOMP_VK_BRX_TABLE=0: off)
+bool maxwell_static_stacks = true;
+bool maxwell_brx_table = true;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -1963,40 +1966,48 @@ static int flow_kind(uint64_t w) {
 }
 static bool flow_leaves(int k) { return k == FLOW_BRA || k == FLOW_EXIT || k == FLOW_SYNC || k == FLOW_BRK || k == FLOW_CONT; }
 
-// (from mamcjr/LASRecompAndroid, MIT) A BRX whose register was just loaded from cbuf 1 - the compiler's constants,
-// stored after the shader code (blob + max_size) - jumps through a table in it: every target is pc + 8 + imm + one
-// of its words. All its words that land on an instruction after the BRX become labels (a superset of the table's),
-// for the state machine, structure_body and the label dataflow alike. Without it every instruction is a label.
+// (from mamcjr/LASRecompAndroid, MIT; the table read as upstream's #237 brx_table_labels does) A BRX whose register
+// was just loaded by an LDC c[0x1][Rx + table] - the compiler's constants, stored after the shader code (blob +
+// max_size) - jumps through that table: each target is pc + 8 + imm + one of its words. The LDC must be a 32-bit load
+// from cb1 within the 32 instructions before, with no branch and nothing else writing the register between; the
+// entries are read from its offset until one doesn't land on an instruction of this shader after the BRX (the end of
+// the table), at most 256. The targets become labels and c->brx (resolve_stacks, st_switch). The earlier version took
+// every word of the first 4 KB of cb1 that looked like a target: words past the table made false cases, and it read
+// past the constants. False: another shape - the caller labels a window, or every instruction.
 static bool brx_table(Ctx *c, const uint64_t *code, size_t i, size_t end, const uint32_t *cb1, uint8_t *label) {
     if (!cb1 || c->nbrx == 4) return false;
     uint64_t w = code[i];
     int ra = (int)bits(w, 8, 8);
     if (ra == RZ) return false;
-    bool from_cb1 = false;
-    for (size_t k = i; k-- > 0;) {  // the nearest earlier write of ra, in straight code
-        if (k % 4 == 0) continue;
+    int64_t table = -1;
+    for (size_t k = i, seen = 0; k-- > 0 && seen < 32;) {
+        if (k % 4 == 0) continue;  // (scheduling words)
+        seen++;
         uint64_t wk = code[k];
         uint32_t top = (uint32_t)(wk >> 52);
-        if ((top >= 0xe20 && top <= 0xe3f) || (wk & 0xfff8000000000000ull) == 0xf0f8000000000000ull) break;
-        if ((int)bits(wk, 0, 8) != ra) continue;
-        from_cb1 = (wk & 0xfff8000000000000ull) == 0xef90000000000000ull && bits(wk, 36, 5) == 1;
-        break;
+        if ((top >= 0xe20 && top <= 0xe35) || (wk & 0xfff8000000000000ull) == 0xf0f8000000000000ull) return false;
+        if ((wk & 0xfff8000000000000ull) == 0xef90000000000000ull && (int)bits(wk, 0, 8) == ra) {  // LDC ra, c[idx][Rx + off]
+            if (bits(wk, 36, 5) != 1 || bits(wk, 48, 3) != 4) return false;  // (cb1, 32-bit)
+            table = (int64_t)bits(wk, 20, 16);
+            break;
+        }
+        if ((int)bits(wk, 0, 8) == ra) return false;  // (something else may write ra: unknown)
     }
-    if (!from_cb1) return false;
+    if (table < 0 || (table & 3)) return false;
     int64_t imm = sbits(w, 20, 24);
     int n = 0;
     uint32_t *t = c->brx[c->nbrx].t;
-    for (int j = 0; j < 1024; j++) {
-        uint32_t tt = (uint32_t)((int64_t)i * 8 + 8 + (int64_t)cb1[j] + imm);
-        if (((tt >> 3) & 3u) == 0u) tt += 8u;
-        if (tt & 7u || tt <= i * 8 || tt / 8 >= end) continue;
+    for (int j = 0; j < 256; j++) {
+        int64_t tt = (int64_t)i * 8 + 8 + (int64_t)(int32_t)cb1[table / 4 + j] + imm;
+        if (tt <= (int64_t)i * 8 || (tt & 7) || (size_t)(tt / 8) >= end) break;  // (the end of the table)
+        tt = norm_target(tt);  // (as the BRX itself does at run time)
+        if ((size_t)(tt / 8) >= end) break;
         bool dup = false;
-        for (int q = 0; q < n && !dup; q++) dup = t[q] == tt;
+        for (int q = 0; q < n && !dup; q++) dup = t[q] == (uint32_t)tt;
         if (dup) continue;
-        if (n == 256) return false;
         int q = n++;
-        while (q > 0 && t[q - 1] > tt) { t[q] = t[q - 1]; q--; }  // (ascending)
-        t[q] = tt;
+        while (q > 0 && t[q - 1] > (uint32_t)tt) { t[q] = t[q - 1]; q--; }  // (ascending)
+        t[q] = (uint32_t)tt;
     }
     if (!n) return false;
     c->brx[c->nbrx].at = (uint32_t)i, c->brx[c->nbrx].n = n;
@@ -3267,10 +3278,27 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         }
         if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: its table's targets, else any instruction
             any_branch = true;
-            static int table_on = -1;
+            static int table_on = -1, window_on = -1;
             if (table_on < 0) table_on = getenv("LARECOMP_VK_BRX_TABLE") ? atoi(getenv("LARECOMP_VK_BRX_TABLE")) != 0 : maxwell_brx_table;
-            if (!(table_on && c->glsl && max_size < 0x10000 && brx_table(c, (const uint64_t *)code, i, end, (const uint32_t *)(blob + max_size), label)))
-                memset(label, 1, end);
+            // LARECOMP_VK_BRX_WINDOW=0: without a table, every instruction a label (as before). With it, only those
+            // between the BRX and the join of the nearest PBK / SSY pushed before it that lies past it - where the
+            // compiler puts a switch's cases (from the mamcjr Android port, caa833c: an SSAO pass on Adreno 20 ms ->
+            // under 1). Labels everywhere else split the straight code after it into blocks the GPU's compiler can't
+            // schedule, and reset what is known of the registers at each one.
+            if (window_on < 0) window_on = getenv("LARECOMP_VK_BRX_WINDOW") ? atoi(getenv("LARECOMP_VK_BRX_WINDOW")) != 0 : 1;
+            if (!(table_on && c->glsl && max_size < 0x10000 && brx_table(c, (const uint64_t *)code, i, end, (const uint32_t *)(blob + max_size), label))) {
+                size_t hi = 0;
+                for (size_t k = i; window_on && k-- > 0;) {
+                    if (k % 4 == 0) continue;
+                    uint64_t wk = ((const uint64_t *)code)[k];
+                    if ((wk & 0xfff0000000000020ull) != 0xe2a0000000000000ull && (wk & 0xfff0000000000020ull) != 0xe290000000000000ull)
+                        continue;  // (PBK, SSY)
+                    int64_t t = norm_target((int64_t)k * 8 + 8 + sbits(wk, 20, 24));
+                    if (t > (int64_t)pc && (size_t)(t / 8) < end) { hi = (size_t)(t / 8); break; }
+                }
+                if (hi) for (size_t k = i + 1; k <= hi; k++) label[k] = 1;
+                else memset(label, 1, end);
+            }
         }
         if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || (w & 0xfff0000000000000ull) == 0xe340000000000000ull ||
             (w & 0xfff0000000000000ull) == 0xe350000000000000ull)

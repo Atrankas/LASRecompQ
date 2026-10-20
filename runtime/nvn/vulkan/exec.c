@@ -265,8 +265,11 @@ static void vk_pace_adjust(double *busy, bool slow) {
     last_gpu = gb;
     extern _Atomic uint64_t g_render_frame_busy_ns;
     if (gt_on()) { double rb = atomic_load(&g_render_frame_busy_ns) / 1e6; if (rb > *busy) *busy = rb; }
-    if (gpu && gpu / 1e6 > *busy) *busy = gpu / 1e6;
+    // (Android's hints get the CPU threads' work only: with the GPU's time in it a GPU-bound frame read as CPU work
+    // over its target, and the CPU clocks went up for nothing - heat out of the budget the GPU shares on a phone. Seen
+    // in the mamcjr Android port, which reports the two apart)
     plat_frame_work((uint64_t)(*busy * 1e6), slow ? 33333333u : 16666667u);
+    if (gpu && gpu / 1e6 > *busy) *busy = gpu / 1e6;
 }
 static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: its counters get their GPU times
     CounterQ *q = &cq[i];
@@ -2281,6 +2284,23 @@ static uint64_t pipe_key_hash(const PipeKey *k) {
     uint64_t ph = hash_words(0xcbf29ce484222325ull, k, sizeof *k);
     return ph ? ph : 1;
 }
+// The largest index of a draw (what part of its vertex streams it reads). Without primitive restart a plain maximum,
+// which the compiler vectorizes; with it the restart value is skipped (the mamcjr Android port's 327ce07: the per-index
+// test was ~9% of its render thread)
+static uint32_t index_max(const void *src, uint32_t isz, uint32_t count, bool restart_on, uint32_t restart, uint32_t m) {
+    if (isz == 2) {
+        const uint16_t *s = src;
+        uint16_t r = (uint16_t)restart, mx = 0;
+        if (restart_on) { for (uint32_t i = 0; i < count; i++) if (s[i] > mx && s[i] != r) mx = s[i]; }
+        else for (uint32_t i = 0; i < count; i++) mx = s[i] > mx ? s[i] : mx;
+        return mx > m ? mx : m;
+    }
+    const uint32_t *s = src;
+    uint32_t mx = 0;
+    if (restart_on) { for (uint32_t i = 0; i < count; i++) if (s[i] > mx && s[i] != restart) mx = s[i]; }
+    else for (uint32_t i = 0; i < count; i++) mx = s[i] > mx ? s[i] : mx;
+    return mx > m ? mx : m;
+}
 static Pipe *hs_pipe_take(uint64_t ph) {
     pthread_mutex_lock(&hs_lock);
     uint32_t slot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
@@ -3831,9 +3851,8 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     VkDescriptorImageInfo ii[MAX_BIND];
     int n = 0;
     int sg = stage == 1 ? 1 : 0;
-    float rs[66][4] = {{1, 1, 0, 0}};  // ([65]: mirror mode, renderer.m)
-    if (rscale_row0) memcpy(rs[0], rscale_row0, 16);
-    rs[65][0] = g_mirror_w;
+    float rs[66][4];  // ([65]: mirror mode, renderer.m) - filled only for a shader that binds it (the 1 KB cleared on every
+                      // call before: the mamcjr Android port's 7cdb67e)
     if (si->uses_gmem && g_debug_frame && getenv("LARECOMP_LOG_SBUF")) {  // (debug) a gmem shader's storage buffers
         LOG("[sbuf] stage %d code %llx%s:", stage, (unsigned long long)st.program->stages[stage].code_addr,
             si->uses_gmem_store ? " (stores)" : "");
@@ -3880,6 +3899,10 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             if (vk_gmem_mirror()) mirror_table(stage, si->uses_gmem_store, stage == 5 ? vk_cmd() : NULL, mt);  // (every stage)
             bi[n] = ubo_span(vk_transient_copy(vk_gmem_mirror() ? mt : gmap_tab, sizeof gmap_tab, 256), sizeof gmap_tab);
         } else if (b->binding == 18) {
+            memset(rs, 0, sizeof rs);
+            rs[0][0] = rs[0][1] = 1;
+            if (rscale_row0) memcpy(rs[0], rscale_row0, 16);
+            rs[65][0] = g_mirror_w;
             for (int t = 0; t < si->ntex && t < 64; t++) { rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; }
             bi[n] = ubo_span(copy_dedupe(sg ? DEDUPE_RSCALE_F : DEDUPE_RSCALE_V, rs, sizeof rs, 256), sizeof rs);
         } else {
@@ -4441,8 +4464,17 @@ static void draw_(CmdRec *r, bool indexed) {
                        st.color_state[0], (const uint8_t (*)[8])st.blend, st.ms[0xC] != 0, cls, st.poly[2] != 1};
     PipeKey k;
     pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples);
-    uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
-    if (!ph) ph = 1;
+    // (the last key's hash kept: consecutive draws mostly share one, and a memcmp is far cheaper than hashing the ~700
+    // bytes again - the mamcjr Android port's 5430bd8. draw_ runs on the recording thread alone)
+    static PipeKey last_k;
+    static uint64_t last_ph;
+    uint64_t ph;
+    if (last_ph && !memcmp(&k, &last_k, sizeof k)) ph = last_ph;
+    else {
+        ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
+        if (!ph) ph = 1;
+        last_k = k, last_ph = ph;
+    }
     uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
     while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
     Pipe *pp = pipe_tab[pslot].pipe;
@@ -4734,8 +4766,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 scan_src = src; scan_isz = isz; scan_restart = restart;  // max_index only if a stream gets copied
             } else {
                 ib = vk_transient_copy(src, (uint64_t)count * isz + 4, 4);
-                if (isz == 2) { const uint16_t *s = src; for (uint32_t i = 0; i < count; i++) if (s[i] > max_index && s[i] != (uint16_t)restart) max_index = s[i]; }
-                else { const uint32_t *s = src; for (uint32_t i = 0; i < count; i++) if (s[i] > max_index && s[i] != restart) max_index = s[i]; }
+                max_index = index_max(src, isz, count, st.prim_restart, restart, max_index);
             }
         } else if (native) {  // 8-bit indices: widen to 16
             ib = vk_transient((uint64_t)count * 2 + 4, 4);
@@ -4777,8 +4808,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 continue;
             }
             if (scan_src) {  // copying after all: the index scan bounds the copy
-                if (scan_isz == 2) { const uint16_t *q = scan_src; for (uint32_t i = 0; i < icount; i++) if (q[i] > max_index && q[i] != (uint16_t)scan_restart) max_index = q[i]; }
-                else { const uint32_t *q = scan_src; for (uint32_t i = 0; i < icount; i++) if (q[i] > max_index && q[i] != scan_restart) max_index = q[i]; }
+                max_index = index_max(scan_src, scan_isz, icount, st.prim_restart, scan_restart, max_index);
                 max_index += 1;
                 if (base_vertex > 0) max_index += (uint32_t)base_vertex;
                 scan_src = NULL;
