@@ -369,18 +369,20 @@ static void link_tick(uint64_t frame) {
     static char level[64];
     static uint64_t since, pc;
     static bool scanned;
+    static int tries;  // (a level's scans: one that ran before its player existed is tried again, up to 10 times)
     if (!fg_enabled || !fg_enabled()) { g_link_ok = false; return; }
     uint64_t ps = LD64(GUEST(GA_PLAYER_STATUS_PTR));
     const char *lv = ps ? (const char *)(uintptr_t)ps : "";
     int st = __atomic_load_n(&g_async_state, __ATOMIC_ACQUIRE);
     if (strncmp(level, lv, sizeof level - 1)) {  // new level: scan once it has settled (the old one's player lingers)
         strlcpy(level, lv, sizeof level);
-        since = frame, pc = 0, scanned = false;
+        since = frame, pc = 0, scanned = false, tries = 0;
     }
     if (st == 2) {
         pc = g_async_found;
         g_async_state = 0;
         LOG("[framegen] %s: Link %s\n", lv, pc ? "found" : "not found");
+        if (!pc && ++tries < 10) scanned = false, since = frame;  // (too early, maybe: again in 30 frames)
     }
     if (pc && !is_player_collision(pc)) pc = 0, scanned = false, since = frame;  // (gone: look again)
     if (!pc && !scanned && st == 0 && frame - since >= 30) {

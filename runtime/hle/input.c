@@ -510,8 +510,93 @@ static void host_test_frame(uint64_t frame) {
 static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A/B skip the opening on rando seeds)
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
+// LARECOMP_ROUTE=<step>;<step>;... with LARECOMP_ROUTE_AT=<frame> (videos, tests): an autopilot after that frame,
+// steering by Link's real place (runtime/hle/doorjump.c doorjump_link_pos) - x,z walks there (screen right = +x, down =
+// +z; x,z,r: within r, default 0.6; no closer for 45 frames: a sword swing, twice, then on to the next step); A / B / X / Y / L / R / PLUS / MINUS
+// / UP / DOWN / LEFT / RIGHT presses it; hB:N holds it N frames; sDEG:N the stick at that angle (0 right, 90 up) N
+// frames; wN waits; @Level waits until that level is loaded (a door, a loading zone), @!Level until it is left, then
+// 40 frames more.
+static void route_tick(uint64_t frame, uint64_t *b, int32_t *lx, int32_t *ly) {
+    static const char *spec;
+    static long at = -1;
+    static int step;
+    static uint64_t step_frame, best_frame, swing_until;
+    static int swings;
+    static float best;
+    static bool done;
+    if (at < 0) {
+        spec = getenv("LARECOMP_ROUTE");
+        at = getenv("LARECOMP_ROUTE_AT") ? atol(getenv("LARECOMP_ROUTE_AT")) : 0;
+        if (!spec) done = true;
+    }
+    if (done || (long)frame < at) return;
+    extern bool doorjump_link_pos(float p[3]);
+    extern const char *game_level_name(void);
+    char tok[96] = "";
+    {  // step `step` of the list
+        const char *q = spec;
+        for (int i = 0; i < step && q; i++) { q = strchr(q, ';'); if (q) q++; }
+        if (!q || !*q) { done = true; LOG("[route] done at frame %llu\n", (unsigned long long)frame); return; }
+        size_t n = strcspn(q, ";");
+        if (n >= sizeof tok) n = sizeof tok - 1;
+        memcpy(tok, q, n);
+        tok[n] = 0;
+    }
+    if (!step_frame) { step_frame = frame, best = 1e9f, best_frame = frame, swings = 0; LOG("[route] step %d: %s (frame %llu)\n", step, tok, (unsigned long long)frame); }
+    uint64_t t = frame - step_frame;
+    bool next = false;
+    static const char *const bn[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
+    float x, z, r = 0.6f;
+    int deg, n;
+    char nm[32];
+    if (tok[0] == '@') {
+        const char *lv = game_level_name();
+        static uint64_t seen;
+        bool neg = tok[1] == '!', ok = lv && (neg ? strcmp(lv, tok + 2) && *lv : !strcmp(lv, tok + 1));  // (@!Level: until it's left)
+        if (ok) { if (!seen) seen = frame; if (frame - seen > 40) next = true, seen = 0; }
+        if (t > 900) next = true, seen = 0;
+    } else if (tok[0] == 'w' && sscanf(tok + 1, "%d", &n) == 1) {
+        next = t >= (uint64_t)n;
+    } else if (tok[0] == 's' && sscanf(tok + 1, "%d:%d", &deg, &n) == 2) {
+        double a = deg * 3.14159265358979 / 180;
+        *lx = (int32_t)lround(cos(a) * 32767), *ly = (int32_t)lround(sin(a) * 32767);
+        next = t >= (uint64_t)n;
+    } else if (tok[0] == 'h' && sscanf(tok + 1, "%31[A-Z]:%d", nm, &n) == 2) {
+        for (int i = 0; i < 16; i++) if (!strcmp(nm, bn[i])) *b |= 1ull << i;
+        next = t >= (uint64_t)n;
+    } else if (sscanf(tok, "%f,%f,%f", &x, &z, &r) >= 2) {
+        float p[3];
+        if (!doorjump_link_pos(p) || (p[0] == 0 && p[2] == 0)) { next = t > 300; best_frame = frame; }  // (a level loading)
+        else {
+            float dx = x - p[0], dz = z - p[2], d = sqrtf(dx * dx + dz * dz);
+            if (d < best - 0.15f) best = d, best_frame = frame;
+            if (d <= r) next = true;
+            else if (frame - best_frame > 45 && swings < 2) {  // (stuck: a bush or grass in the way - the sword, as a player)
+                swings++, best_frame = frame, swing_until = frame + 8;
+            } else if (frame - best_frame > 45) { next = true; LOG("[route] step %d stuck %.2f from %.1f,%.1f at %.1f,%.1f\n", step, d, x, z, p[0], p[2]); }
+            if (!next) {
+                float k = 32767.0f / d;
+                *lx = (int32_t)lroundf(dx * k), *ly = (int32_t)lroundf(-dz * k);
+                if (frame < swing_until) *b |= 1ull << 1;  // (B)
+            }
+        }
+    } else {
+        for (int i = 0; i < 16; i++) if (!strcmp(tok, bn[i]) && t < 8) *b |= 1ull << i;
+        next = t >= 16;
+    }
+    if (next) step++, step_frame = 0;
+}
+
 void input_frame(uint64_t frame) {
     atomic_store(&rumble_frame_ms, SDL_GetTicks());
+    static int log_link = -1;  // LARECOMP_LOG_LINK=<frames>: Link's place and the level that often (scripted routes, videos)
+    if (log_link < 0) log_link = getenv("LARECOMP_LOG_LINK") ? atoi(getenv("LARECOMP_LOG_LINK")) : 0;
+    if (log_link > 0 && frame % (uint64_t)log_link == 0) {
+        extern bool doorjump_link_pos(float p[3]);
+        extern const char *game_level_name(void);
+        float p[3];
+        if (doorjump_link_pos(p)) LOG("[link] frame %llu %s %.1f %.1f %.1f\n", (unsigned long long)frame, game_level_name(), p[0], p[1], p[2]);
+    }
     if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
         const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
         LOG("[pad] mgr %llx 4e0=%u 4e4=%u 4e8=%u 548=%#x 54c..=%02x %02x %02x 56c=%02x\n", g_pad_obj - 0x98,
@@ -562,6 +647,7 @@ void input_frame(uint64_t frame) {
         extern uint64_t g_test_buttons, g_test_buttons_until;  // (LARECOMP_PLACE action script)
         if (frame < g_test_buttons_until) b |= g_test_buttons;
     }
+    route_tick(frame, &b, &lx, &ly);
     script_buttons = b;
     script_lx = lx;
     script_ly = ly;
