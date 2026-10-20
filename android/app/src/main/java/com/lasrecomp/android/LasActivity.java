@@ -45,6 +45,45 @@ public class LasActivity extends SDLActivity {
         String saved = getPreferences(MODE_PRIVATE).getString("tree", null);
         if (saved != null) sTree = Uri.parse(saved);
         immersive();
+        installBundledTranslation();
+    }
+
+    // A personal build can carry the Brazilian Portuguese fan translation (assets/translations/pt-BR, build_game.sh
+    // --apk): copied once into the data folder, where the Language row finds it (runtime/settings.c). Choosing the
+    // language stays up to the player.
+    private void installBundledTranslation() {
+        final File base = getExternalFilesDir(null);
+        if (base == null) return;
+        final File marker = new File(base, "translations/pt-BR/.bundled");
+        try {
+            String[] top = getAssets().list("translations/pt-BR");
+            if (top == null || top.length == 0 || marker.exists()) return;
+        } catch (Exception e) { return; }
+        new Thread(() -> {
+            try {
+                copyAssetTree("translations/pt-BR", new File(base, "translations/pt-BR"));
+                //noinspection ResultOfMethodCallIgnored
+                marker.createNewFile();
+                Log.i(TAG, "bundled translation installed");
+            } catch (Exception e) {
+                Log.e(TAG, "bundled translation", e);
+            }
+        }).start();
+    }
+
+    private void copyAssetTree(String path, File dest) throws Exception {
+        String[] kids = getAssets().list(path);
+        if (kids == null || kids.length == 0) {  // a file
+            File dir = dest.getParentFile();
+            if (dir != null && !dir.isDirectory() && !dir.mkdirs()) throw new Exception("mkdir " + dir);
+            byte[] buf = new byte[1 << 16];
+            try (InputStream in = getAssets().open(path); OutputStream os = new FileOutputStream(dest)) {
+                int n;
+                while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+            }
+            return;
+        }
+        for (String k : kids) copyAssetTree(path + "/" + k, new File(dest, k));
     }
 
     // SDL sets its fullscreen through the old system UI flags (Android 15+ ignores them, and they bring the bars back

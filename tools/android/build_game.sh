@@ -99,7 +99,9 @@ ls -la "$OUT/liblasgame.so"
 
 if [ $APK = 1 ]; then
     echo "== personal APK"
-    (cd android && ./gradlew assembleDebug -q -PlasGameLib="$ROOT/build/android/gamelib")
+    # (your own copy of the Brazilian Portuguese fan translation, when present: inside this personal APK only)
+    TR=; [ -d translations/pt-BR/romfs ] && TR="-PlasTranslation=$ROOT/translations/pt-BR"
+    (cd android && ./gradlew assembleDebug -q -PlasGameLib="$ROOT/build/android/gamelib" $TR)
     ls -la android/app/build/outputs/apk/debug/app-debug.apk
 fi
 if [ $PUSH = 1 ]; then

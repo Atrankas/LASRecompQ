@@ -83,6 +83,9 @@ android {
             assets.srcDirs += ["$buildDir/generated/las-assets"]
             // a personal build with the game code inside (tools/android/build_game.sh --apk)
             if (project.hasProperty('lasGameLib')) jniLibs.srcDirs += [project.property('lasGameLib')]
+            // a personal build with the Brazilian Portuguese fan translation inside (build_game.sh --apk, when
+            // translations/pt-BR exists): LasActivity installs it on first start. Never in the public APK.
+            if (project.hasProperty('lasTranslation')) assets.srcDirs += ["$buildDir/generated/las-translation"]
             if (onDevice) {
                 jniLibs.srcDirs += ["$ondev/stage/jniLibs"]
                 assets.srcDirs += ["$ondev/assets"]
@@ -114,6 +117,14 @@ tasks.register('lasAssets', Sync) {  // (Sync: a file gone from the sources goes
     into "$buildDir/generated/las-assets"
 }
 preBuild.dependsOn lasAssets
+
+if (project.hasProperty('lasTranslation')) {
+    tasks.register('lasTranslationAssets', Sync) {
+        from(project.property('lasTranslation')) { into 'translations/pt-BR' }
+        into "$buildDir/generated/las-translation"
+    }
+    preBuild.dependsOn lasTranslationAssets
+}
 
 // The on-phone build's kit and asset archive again from this checkout's sources (quick: python and zig stay built), so
 // the headers and the generator inside the APK are the ones its game code id (tools/android/gamelib_id.sh) is made from
