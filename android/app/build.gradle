@@ -86,6 +86,10 @@ android {
             // a personal build with the Brazilian Portuguese fan translation inside (build_game.sh --apk, when
             // translations/pt-BR exists): LasActivity installs it on first start. Never in the public APK.
             if (project.hasProperty('lasTranslation')) assets.srcDirs += ["$buildDir/generated/las-translation"]
+            // the Brazilian Portuguese fan translation as a patch against the player's own game files
+            // (tools/translation_patch.py): nothing of the game inside, so the public APK can carry it - the app makes
+            // the translated files from the player's own once they are set up (LasActivity.applyTranslationPatch)
+            if (project.hasProperty('lasTranslationPatch')) assets.srcDirs += ["$buildDir/generated/las-translation-patch"]
             if (onDevice) {
                 jniLibs.srcDirs += ["$ondev/stage/jniLibs"]
                 assets.srcDirs += ["$ondev/assets"]
@@ -117,6 +121,14 @@ tasks.register('lasAssets', Sync) {  // (Sync: a file gone from the sources goes
     into "$buildDir/generated/las-assets"
 }
 preBuild.dependsOn lasAssets
+
+if (project.hasProperty('lasTranslationPatch')) {
+    tasks.register('lasTranslationPatchAssets', Sync) {
+        from(project.property('lasTranslationPatch')) { into 'translation'; rename { 'pt-BR.lasp' } }
+        into "$buildDir/generated/las-translation-patch"
+    }
+    preBuild.dependsOn lasTranslationPatchAssets
+}
 
 if (project.hasProperty('lasTranslation')) {
     tasks.register('lasTranslationAssets', Sync) {

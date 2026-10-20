@@ -48,6 +48,7 @@ public class LasActivity extends SDLActivity {
         if (saved != null) sTree = Uri.parse(saved);
         immersive();
         installBundledTranslation();
+        new Thread(() -> applyTranslationPatch(this), "translation patch").start();
     }
 
     // A personal build can carry the Brazilian Portuguese fan translation (assets/translations/pt-BR, build_game.sh
@@ -71,6 +72,79 @@ public class LasActivity extends SDLActivity {
                 Log.e(TAG, "bundled translation", e);
             }
         }).start();
+    }
+
+    // The public APK's fan translation (assets/translation/pt-BR.lasp, tools/translation_patch.py): a patch against the
+    // player's own game files - copy ranges of their file, add the translated bytes - applied once those files are set
+    // up (at start, and after a setup), into translations/pt-BR/ where the Language setting offers it. Each file is
+    // made only from an original whose SHA-256 is the one the patch was made against (v1.0.0); the others are left out.
+    private static final Object sPatchLock = new Object();
+    static void applyTranslationPatch(android.content.Context ctx) {
+        synchronized (sPatchLock) {
+            File base = ctx.getExternalFilesDir(null);
+            if (base == null) return;
+            File romfs = new File(base, "extracted/romfs"), out = new File(base, "translations/pt-BR");
+            File marker = new File(out, ".patched");
+            if (!new File(romfs, "region_common").isDirectory() || marker.exists()) return;
+            byte[] data;
+            try (InputStream raw = ctx.getAssets().open("translation/pt-BR.lasp");
+                 java.util.zip.InflaterInputStream in = new java.util.zip.InflaterInputStream(raw)) {
+                java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[1 << 16];
+                for (int n; (n = in.read(buf)) > 0; ) bo.write(buf, 0, n);
+                data = bo.toByteArray();
+            } catch (java.io.FileNotFoundException e) {
+                return;  // (no patch in this APK)
+            } catch (Exception e) {
+                Log.e(TAG, "translation patch", e);
+                return;
+            }
+            try {
+                java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                byte[] magic = new byte[5];
+                b.get(magic);
+                if (!new String(magic, java.nio.charset.StandardCharsets.US_ASCII).equals("LASP1")) throw new Exception("not a patch");
+                int nf = b.getInt(), made = 0;
+                for (int f = 0; f < nf; f++) {
+                    byte[] pb = new byte[b.getShort() & 0xffff];
+                    b.get(pb);
+                    String rel = new String(pb, java.nio.charset.StandardCharsets.UTF_8);
+                    byte[] want = new byte[32];
+                    b.get(want);
+                    int size = b.getInt(), nops = b.getInt();
+                    File src = new File(base, "extracted/" + rel);
+                    byte[] orig = src.isFile() ? java.nio.file.Files.readAllBytes(src.toPath()) : null;
+                    boolean ok = orig != null && java.util.Arrays.equals(want, java.security.MessageDigest.getInstance("SHA-256").digest(orig))
+                                 && !rel.contains("..");
+                    byte[] res = new byte[size];
+                    int at = 0;
+                    for (int k = 0; k < nops; k++) {
+                        int kind = b.get();
+                        if (kind == 1) {
+                            int o = b.getInt(), n = b.getInt();
+                            if (ok && o >= 0 && n >= 0 && o + n <= orig.length && at + n <= size) System.arraycopy(orig, o, res, at, n);
+                            else ok = false;
+                            at += n;
+                        } else {
+                            int n = b.getInt();
+                            if (ok && at + n <= size) b.get(res, at, n); else { ok = false; b.position(b.position() + n); }
+                            at += n;
+                        }
+                    }
+                    if (!ok || at != size) { Log.w(TAG, "translation patch: " + rel + " left out (not the v1.0.0 file)"); continue; }
+                    File dst = new File(out, rel);
+                    File dir = dst.getParentFile();
+                    if (dir != null && !dir.isDirectory() && !dir.mkdirs()) throw new Exception("mkdir " + dir);
+                    try (OutputStream os = new FileOutputStream(dst)) { os.write(res); }
+                    made++;
+                }
+                //noinspection ResultOfMethodCallIgnored
+                marker.createNewFile();
+                Log.i(TAG, "translation patch: " + made + " of " + nf + " files made");
+            } catch (Exception e) {
+                Log.e(TAG, "translation patch", e);
+            }
+        }
     }
 
     private void copyAssetTree(String path, File dest) throws Exception {
@@ -261,6 +335,7 @@ public class LasActivity extends SDLActivity {
                 }
             }
             nativeImportProgress(total, total);
+            applyTranslationPatch(a);  // (the files it applies to are there now)
             return null;
         } catch (Exception e) {
             Log.e(TAG, "import", e);
@@ -301,6 +376,7 @@ public class LasActivity extends SDLActivity {
                 long t0 = System.nanoTime();
                 String r = NxPackage.extract(ch, keys, new File(dest), buildId, LasActivity::nativeImportProgress);
                 Log.i(TAG, "package " + pkg.name + ": " + (r == null ? "extracted" : r) + " in " + (System.nanoTime() - t0) / 1000000 + " ms");
+                if (r == null) applyTranslationPatch(a);
                 return r;
             }
         } catch (Exception e) {
