@@ -44,6 +44,19 @@ on it and open your pull request against it. Before you start, and again before 
 your change with what's already on that branch: it moves quickly, and the fix or feature you have in mind may
 already be there or in progress. Rebase onto it if it has moved since you branched.
 
+## Which branch to work from
+
+`main` holds the last release and isn't where development happens, so don't base your work on it. Work happens on
+the current development branch:
+
+- during the beta period: the latest `beta_<n>` branch (for example `beta_5`)
+- after 1.0: the latest `vX.Y.Zb` branch, for the next version (for example `v1.1.0b`)
+
+Pick the highest-numbered one in the [branch list](https://github.com/peiikai/LASRecomp/branches). Base your branch
+on it and open your pull request against it. Before you start, and again before opening the pull request, compare
+your change with what's already on that branch: it moves quickly, and the fix or feature you have in mind may
+already be there or in progress. Rebase onto it if it has moved since you branched.
+
 ## Building
 
 See the README's "Building from source" for macOS and [docs/BUILD-windows.md](docs/BUILD-windows.md) for Windows.
