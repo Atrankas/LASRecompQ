@@ -26,12 +26,14 @@ import java.util.Locale;
 
 // SDL's activity running libmain.so (the runtime: runtime/main.c is its SDL_main), plus what SDL doesn't do on
 // Android: choosing the folder with the player's own game files (the system's folder picker hands out a tree of
-// documents, not a path) and copying exefs/ and romfs/ out of it into the app's data folder (runtime/ui/launcher.mm).
+// documents, not a path) and copying exefs/ and romfs/ out of it into the app's data folder (runtime/ui/launcher.mm) -
+// or taking them out of the player's .xci / .nsp with their prod.keys (NxPackage).
 public class LasActivity extends SDLActivity {
     private static final String TAG = "LASRecomp";
     private static final int PICK_FOLDER = 4100;
     private static final int PICK_DRIVER = 4101;
     private static final int PICK_TRANSLATION = 4102;
+    private static final int PICK_KEYS = 4103;
     private static Uri sTree;  // the folder picked last (read permission kept across restarts)
 
     @Override
@@ -165,6 +167,7 @@ public class LasActivity extends SDLActivity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         if (request == PICK_DRIVER) { driverPicked(result == RESULT_OK && data != null ? data.getData() : null); return; }
+        if (request == PICK_KEYS) { keysPicked(result == RESULT_OK && data != null ? data.getData() : null); return; }
         if (request == PICK_TRANSLATION) { translationPicked(result == RESULT_OK && data != null ? data.getData() : null); return; }
         if (request != PICK_FOLDER) { super.onActivityResult(request, result, data); return; }
         Uri tree = result == RESULT_OK && data != null ? data.getData() : null;
@@ -202,9 +205,10 @@ public class LasActivity extends SDLActivity {
         a.runOnUiThread(() -> a.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
         try {
             Doc root = new Doc(DocumentsContract.getTreeDocumentId(sTree), describe(sTree), true, 0);
-            Doc[] found = new Doc[2];
+            Doc[] found = new Doc[5];  // exefs, romfs, a game package (.xci / .nsp), prod.keys, title.keys
             boolean[] unusable = new boolean[1];
             find(cr, root, 0, found, unusable);
+            if ((found[0] == null || found[1] == null) && found[2] != null) return importPackage(a, cr, found, dest, buildId);
             if (found[0] == null || found[1] == null) return unusable[0] ? "unusable" : "notfound";
             // the version first (exefs/main's build id at 0x40: runtime/ui/launcher.mm BUILD_ID), before ~6 GB of copy
             if (buildId != null && !buildId.isEmpty()) {
@@ -264,6 +268,73 @@ public class LasActivity extends SDLActivity {
         } finally {
             a.runOnUiThread(() -> a.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
         }
+    }
+
+    // The game's files out of the player's .xci / .nsp (NxPackage) with their prod.keys: the one in the same folder, or
+    // one they choose in the file picker (asked here, waited for). Results as importGameFiles, plus "nokeys" (no keys
+    // chosen), "badkeys", "keys:<name>", "notgame", "updateonly" and "corrupt:<what>". A title.keys beside them is read
+    // too (an eShop package without its ticket).
+    private static String importPackage(LasActivity a, ContentResolver cr, Doc[] found, String dest, String buildId) {
+        Doc pkg = found[2];
+        java.util.Map<String, byte[]> keys;
+        Uri ku = found[3] != null ? DocumentsContract.buildDocumentUriUsingTree(sTree, found[3].id) : pickKeys(a);
+        if (ku == null) return "nokeys";
+        try (InputStream in = cr.openInputStream(ku)) {
+            if (in == null) return "nokeys";
+            keys = NxPackage.parseKeys(in);
+        } catch (Exception e) {
+            Log.e(TAG, "keys", e);
+            return "nokeys";
+        }
+        if (!keys.containsKey("header_key")) return "badkeys";
+        if (found[4] != null)
+            try (InputStream in = cr.openInputStream(DocumentsContract.buildDocumentUriUsingTree(sTree, found[4].id))) {
+                if (in != null) for (java.util.Map.Entry<String, byte[]> e : NxPackage.parseKeys(in).entrySet()) keys.putIfAbsent(e.getKey(), e.getValue());
+            } catch (Exception e) {
+                Log.w(TAG, "title.keys", e);
+            }
+        Uri u = DocumentsContract.buildDocumentUriUsingTree(sTree, pkg.id);
+        try (android.os.ParcelFileDescriptor fd = cr.openFileDescriptor(u, "r")) {
+            if (fd == null) return "copy:" + pkg.name;
+            try (java.io.FileInputStream fin = new java.io.FileInputStream(fd.getFileDescriptor());
+                 java.nio.channels.FileChannel ch = fin.getChannel()) {
+                long t0 = System.nanoTime();
+                String r = NxPackage.extract(ch, keys, new File(dest), buildId, LasActivity::nativeImportProgress);
+                Log.i(TAG, "package " + pkg.name + ": " + (r == null ? "extracted" : r) + " in " + (System.nanoTime() - t0) / 1000000 + " ms");
+                return r;
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "package", e);
+            return "copy:" + e.getMessage();
+        }
+    }
+
+    // The system's file picker for prod.keys, from the import's (native) thread: waits for the choice
+    private static final Object sKeysLock = new Object();
+    private static Uri sKeysPicked;
+    private static boolean sKeysDone;
+    private static Uri pickKeys(LasActivity a) {
+        synchronized (sKeysLock) { sKeysDone = false; sKeysPicked = null; }
+        a.runOnUiThread(() -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            try {
+                a.startActivityForResult(i, PICK_KEYS);
+            } catch (Exception e) {
+                Log.e(TAG, "keys picker", e);
+                a.keysPicked(null);
+            }
+        });
+        synchronized (sKeysLock) {
+            while (!sKeysDone) {
+                try { sKeysLock.wait(); } catch (InterruptedException e) { return null; }
+            }
+            return sKeysPicked;
+        }
+    }
+    private void keysPicked(Uri uri) {
+        synchronized (sKeysLock) { sKeysPicked = uri; sKeysDone = true; sKeysLock.notifyAll(); }
     }
 
     // ---- building the game code on the phone (runtime/gamebuild.c; docs/android-ondevice-build.md)
@@ -513,6 +584,8 @@ public class LasActivity extends SDLActivity {
     }
 
     // as runtime/ui/launcher.mm find_game: in the folder or a few levels below it (dump tools nest them)
+    // (found: exefs, romfs, the largest .xci / .nsp - the game rather than an update of it, prod.keys - or keys.txt,
+    // title.keys)
     private static void find(ContentResolver cr, Doc d, int depth, Doc[] found, boolean[] unusable) {
         if (depth > 4 || (found[0] != null && found[1] != null)) return;
         List<Doc> kids = children(cr, d);
@@ -522,8 +595,10 @@ public class LasActivity extends SDLActivity {
             if (!k.dir && k.name.equals("main")) main = true;
             if (!k.dir && k.name.equals("main.npdm")) npdm = true;
             if (k.dir && k.name.equals("region_common")) region = true;
-            if (!k.dir && (low.endsWith(".nsp") || low.endsWith(".xci") || low.endsWith(".nca") || low.endsWith(".nsz")
-                           || low.endsWith(".xcz"))) unusable[0] = true;
+            if (!k.dir && (low.endsWith(".nca") || low.endsWith(".nsz") || low.endsWith(".xcz"))) unusable[0] = true;
+            if (!k.dir && (low.endsWith(".nsp") || low.endsWith(".xci")) && (found[2] == null || k.size > found[2].size)) found[2] = k;
+            if (!k.dir && (low.equals("prod.keys") || (low.equals("keys.txt") && found[3] == null))) found[3] = k;
+            if (!k.dir && low.equals("title.keys")) found[4] = k;
         }
         if (found[0] == null && main && npdm) found[0] = d;
         if (found[1] == null && region) found[1] = d;

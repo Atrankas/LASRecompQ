@@ -287,21 +287,37 @@ static void set_job(const std::string &s, bool failed = false, const std::string
 }
 
 // Setup failures: a short headline and what to do next (also LARECOMP_LAUNCHER_SHOT=<f>:fail<1-6>, screenshots)
-enum { FAIL_NOT_FOUND = 1, FAIL_UNUSABLE, FAIL_COPY, FAIL_VERSION, FAIL_MISSING, FAIL_BUILD };
+enum { FAIL_NOT_FOUND = 1, FAIL_UNUSABLE, FAIL_COPY, FAIL_VERSION, FAIL_MISSING, FAIL_BUILD, FAIL_NOKEYS, FAIL_KEYS, FAIL_PACKAGE,
+       FAIL_UPDATE_ONLY };
 static void set_failure(int k, int have = -1) {
     static const char *const head[] = {"", "No game files found in that folder", "Those are game packages, not game files",
                                        "Setup didn't finish", "Wrong version of the game", "Your game files are incomplete",
-                                       "The game code didn't build"};
+                                       "The game code didn't build", "Your keys are needed",
+                                       "Your keys can't open the game", "The game package couldn't be read",
+                                       "That package is only an update"};
     static const char *const hint[] = {
         "",
+#ifdef __ANDROID__
+        "Choose the folder with your game: its .xci or .nsp (with your prod.keys), or its exefs and romfs folders.",
+        "LAS Recomp can't read compressed packages (.xcz / .nsz) or loose .nca files. Use the .xci or .nsp, or the "
+        "exefs and romfs folders.",
+#else
         "Choose the folder that has the game's exefs and romfs folders in it.",
         "LAS Recomp needs the game's own files (the exefs and romfs folders), not .xci / .nsp / .nca files.",
+#endif
         "Make sure there's about 12 GB free and try again.",
         "LAS Recomp needs version 1.0.0 of the game, without updates.",
         "Some of the game's files are missing - usually a copy or unzip that stopped partway. Copy the game files "
         "again so none are missing, then choose the folder again.",
-        "Make sure there's about 2 GB free and try again. If it keeps happening, report it on GitHub."};
-    if (k < 1 || k > 6) return;
+        "Make sure there's about 2 GB free and try again. If it keeps happening, report it on GitHub.",
+        "Opening the .xci / .nsp needs the prod.keys dumped from your own Switch. Put it in the game's folder, or choose "
+        "it when asked.",
+        "These keys don't open this game. Use the prod.keys dumped from your own Switch, from a system version at least "
+        "as new as the game's.",
+        "The .xci / .nsp seems damaged or incomplete. Dump or copy it again and choose the folder again.",
+        "Choose the folder with the game itself (its .xci, or the base game's .nsp). Updates aren't needed: LAS Recomp "
+        "uses version 1.0.0."};
+    if (k < 1 || k > 10) return;
     if (k == FAIL_MISSING && have >= 0) {
         char b[320];
         snprintf(b, sizeof b, T("The romfs folder has %d of the game's %d files - some are missing, usually from a copy or "
@@ -496,6 +512,11 @@ static void *extract_thread(void *) {
             if (!strcmp(err, "notfound") || !strcmp(err, "nofolder")) set_failure(FAIL_NOT_FOUND);
             else if (!strcmp(err, "version")) set_failure(FAIL_VERSION);
             else if (!strcmp(err, "unusable")) set_failure(FAIL_UNUSABLE);
+            else if (!strcmp(err, "nokeys")) set_failure(FAIL_NOKEYS);
+            else if (!strcmp(err, "badkeys") || !strncmp(err, "keys:", 5)) set_failure(FAIL_KEYS);
+            else if (!strcmp(err, "notgame")) set_failure(FAIL_NOT_FOUND);
+            else if (!strcmp(err, "updateonly")) set_failure(FAIL_UPDATE_ONLY);
+            else if (!strncmp(err, "corrupt:", 8)) set_failure(FAIL_PACKAGE);
             else if (!strncmp(err, "space:", 6))
                 set_job("Not enough free space", true, T("The game files need about ") +
                         std::to_string((unsigned long long)(atof(err + 6) / 1e9 + 1)) + T(" GB more. Free some space and try again."));
@@ -1745,6 +1766,9 @@ extern "C" void launcher_run(const char *root) {
                 std::string src_d = T("The folder with your own game folders (exefs/romfs) of The Legend of Zelda: Link's "
                                       "Awakening for Nintendo Switch, version 1.0.0. The game isn't included with LAS Recomp.");
 #ifdef __ANDROID__
+                src_d = T("The folder with your own copy of The Legend of Zelda: Link's Awakening for Nintendo Switch, "
+                          "version 1.0.0: its .xci or .nsp together with the prod.keys from your Switch (asked for if it "
+                          "isn't there), or its extracted exefs and romfs folders. The game isn't included with LAS Recomp.");
                 src_d += T("\n\nOr copy exefs and romfs from a computer over USB into ") + std::string(rt_data_root()) +
                          T("/extracted and choose Set up.");
 #endif
