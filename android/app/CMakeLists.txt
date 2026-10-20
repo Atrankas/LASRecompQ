@@ -44,6 +44,9 @@ execute_process(COMMAND ${ROOT}/tools/android/gamelib_id.sh --split-flags OUTPUT
                 OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
 execute_process(COMMAND ${ROOT}/tools/android/gamelib_id.sh --gen-args OUTPUT_VARIABLE GAMELIB_GENARGS
                 OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+# (+ the compile-time-only options of the phone's compiler, zig clang 22: the same code, faster to build)
+execute_process(COMMAND ${ROOT}/tools/android/gamelib_id.sh --cc22-flags OUTPUT_VARIABLE GAMELIB_CC22
+                OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
 foreach(f tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/simd_c.py
           tools/rando/patch_variants.json tools/gamelib_entry.c runtime/hle/hle_symbols.txt runtime/cpu.h runtime/simd.h
           runtime/simd_fp.h runtime/gamelib.h tools/android/gamelib_id.sh)
@@ -83,7 +86,7 @@ target_include_directories(main PRIVATE ${ROOT}/runtime ${ROOT}/runtime/nvn ${IM
 # Vulkan through volk: entry points loaded at run time (drivers older than 1.3, whose 1.3 functions are extensions,
 # and Android's libvulkan, which exports only the API level's core functions)
 target_compile_definitions(main PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_ANDROID_KHR IMGUI_IMPL_VULKAN_USE_VOLK
-                                        "GAMELIB_ID=\"${GAMELIB_ID}\"" "GAMELIB_CFLAGS=\"${GAMELIB_FLAGS}\""
+                                        "GAMELIB_ID=\"${GAMELIB_ID}\"" "GAMELIB_CFLAGS=\"${GAMELIB_FLAGS} ${GAMELIB_CC22}\""
                                         "GAMELIB_SHARED=\"-shared\"" "GAMELIB_SPLIT_FLAGS=\"${GAMELIB_SPLIT}\""
                                         "GAMELIB_GEN_ARGS=\"${GAMELIB_GENARGS}\"")
 target_compile_options(main PRIVATE -fsigned-char -fno-strict-aliasing

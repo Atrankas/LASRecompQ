@@ -450,7 +450,8 @@ static bool build_game_code(void) {
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
     GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1, build_cancelled};
 #ifdef __ANDROID__
-    o.jobs = 4;  // (phones: the big and mid cores - runtime/gamebuild.c keeps the compilers on those, at a lower priority)
+    o.jobs = cores;  // (phones: every core, the little ones too, at a lower priority; runtime/gamebuild.c holds new
+                     // compilers back when memory runs low)
 #endif
     char why[256] = "";
     g_build_frac = 0;

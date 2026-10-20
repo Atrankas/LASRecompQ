@@ -175,6 +175,10 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
       em arquivos próprios sem LICM: Mac 43.8 -> 35.5 min de CPU). APK público: `./gradlew assembleRelease
       -PonDeviceBuild=true` (76 MB), conferido por `tools/android/ondevice/check_public_apk.sh`
       (`docs/android-ondevice-build.md`)
+- [ ] Build no celular mais rápido (meta <= 15 min, a medir no S20 FE): flags só de tempo de compilação, mesmo código
+      (`-dag-maps-huge-region=500`; no clang 22 do celular `-opt-disable=loop-load-elim`,
+      `-has-predecessor-max-steps=2048`: 40 -> ~33 min de CPU no M1, 806/812 objetos idênticos), 8 jobs em todos os
+      núcleos (os pequenos também), o arquivo mais longo primeiro, freio por memória; modelo: ~15-16 min
 - [x] 1.4x (1008 linhas) + geração no modo "Desempenho da GPU": 60 na tela por 8 min, 100% de velocidade, 41.6 °C
 - [x] Cópias de textura que ninguém lê (captura HDR do quadro a cada frame) viram alias e são puladas: 1080p -1 ms
 - [x] Leituras de memória global nos celulares: uma leitura sem o desvio do heap, último intervalo reaproveitado: baía

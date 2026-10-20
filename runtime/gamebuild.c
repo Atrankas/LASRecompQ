@@ -293,7 +293,23 @@ static void log_tail(const char *path, char *out, size_t n) {  // the last line 
 typedef struct {
     char src[1100], obj[1100], tmp[1100], log[1100], stem[64], source_hash[65];
     unsigned long long bytes;
+    bool split;  // a split-dispatch file (split_dispatch)
+    double cost;  // its expected compile time, in bytes of ordinary C (the longest go first: next_unit)
 } Unit;
+
+// The generator's split-dispatch files (tools/gen.py --split-dispatch) say so on their first line
+static bool split_dispatch(const char *src) {
+    char head[64] = {0};
+    FILE *f = fopen(src, "rb");
+    if (!f) return false;
+    size_t n = fread(head, 1, sizeof head - 1, f);
+    fclose(f);
+    head[n] = 0;
+    return !strncmp(head, SPLIT_MARK, strlen(SPLIT_MARK));
+}
+// (a split-dispatch file takes ~8x the time per byte of the rest: one huge jump-table function; measured over the
+// whole library with zig clang 22, 25.6 vs 3.1 CPU-seconds per MB on an M1)
+#define SPLIT_COST 8.0
 
 typedef struct {
     Unit *u;
@@ -313,6 +329,23 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
     snprintf(u->log, sizeof u->log, "%s" SEP "%s.log", work, stem);
     struct stat st;
     u->bytes = stat(src, &st) == 0 ? (unsigned long long)st.st_size : 0;
+    u->split = GAMELIB_SPLIT_FLAGS[0] && split_dispatch(src);
+    u->cost = (double)u->bytes * (u->split ? SPLIT_COST : 1.0);
+}
+
+// The next file to compile: of those written so far (from..n), the longest (longest processing time first: no big
+// file is left running alone at the end while the other cores wait; the generator writes them in address order, and
+// a phone takes minutes over the biggest ones). Swapped into place `from`; the gamelib entry, unit 0, goes first.
+static void next_unit(Units *us, int from) {
+    if (from < 1) return;
+    int best = from;
+    for (int i = from + 1; i < us->n; i++)
+        if (us->u[i].cost > us->u[best].cost) best = i;
+    if (best != from) {
+        Unit t = us->u[from];
+        us->u[from] = us->u[best];
+        us->u[best] = t;
+    }
 }
 
 // The flags the game code was built with (GAMELIB_CFLAGS, part of its id). zig cc reads -march=<cpu> with its own CPU
@@ -337,22 +370,11 @@ static void add_cflags(Args *a, const Tools *t) {
     }
 }
 
-// The generator's split-dispatch files (tools/gen.py --split-dispatch) say so on their first line
-static bool split_dispatch(const char *src) {
-    char head[64] = {0};
-    FILE *f = fopen(src, "rb");
-    if (!f) return false;
-    size_t n = fread(head, 1, sizeof head - 1, f);
-    fclose(f);
-    head[n] = 0;
-    return !strncmp(head, SPLIT_MARK, strlen(SPLIT_MARK));
-}
-
 static PlatProc start_compile(const Tools *t, const Unit *u) {
     Args a = {0};
     compiler(&a, t);
     add_cflags(&a, t);
-    if (GAMELIB_SPLIT_FLAGS[0] && split_dispatch(u->src)) add_split(&a, GAMELIB_SPLIT_FLAGS);
+    if (u->split) add_split(&a, GAMELIB_SPLIT_FLAGS);
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
@@ -367,6 +389,18 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
 }
 
 #ifdef __ANDROID__
+// MemAvailable in MB (/proc/meminfo), -1 if unknown
+static long android_mem_available_mb(void) {
+    FILE *f = fopen("/proc/meminfo", "rb");
+    if (!f) return -1;
+    char line[128];
+    long kb = -1;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "MemAvailable: %ld kB", &kb) == 1) break;
+    fclose(f);
+    return kb < 0 ? -1 : kb / 1024;
+}
+
 static bool copy_file(const char *from, const char *to) {
     FILE *in = fopen(from, "rb"), *out = in ? fopen(to, "wb") : NULL;
     bool ok = in && out;
@@ -450,28 +484,22 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         return false;
     }
 #ifdef __ANDROID__
+    int android_jobs = 0;
     {
-        // A phone stays usable and cooler: the compilers (they inherit this thread's niceness and CPUs) at a lower
-        // priority, on the faster cores only (the little ones take 3-4x as long per file and heat the same).
+        // A phone stays usable: the compilers (they inherit this thread's niceness and CPUs) at a lower priority, one
+        // per core, the little ones too. A little core takes ~3x as long per file but at a fraction of a big one's
+        // power, so it adds throughput for little heat (the build is heat-bound: a Snapdragon 865 with 4 jobs on its
+        // big cores reached 42 C and throttled); the biggest files go first (next_unit), the little cores end up with
+        // the small ones. (An affinity mask from an earlier build is undone: all cores.)
         setpriority(PRIO_PROCESS, (id_t)gettid(), 10);
-        long fmax[16] = {0}, lo = 0;
-        int ncpu = 0;
-        for (; ncpu < 16; ncpu++) {
-            char p[96];
-            snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", ncpu);
-            FILE *f = fopen(p, "rb");
-            if (!f) break;
-            if (fscanf(f, "%ld", &fmax[ncpu]) != 1) fmax[ncpu] = 0;
-            fclose(f);
-            if (!lo || (fmax[ncpu] && fmax[ncpu] < lo)) lo = fmax[ncpu];
-        }
+        long n = sysconf(_SC_NPROCESSORS_CONF);
+        int ncpu = n < 1 ? 1 : n > 64 ? 64 : (int)n;
         cpu_set_t set;
         CPU_ZERO(&set);
-        int nbig = 0;
-        for (int i = 0; i < ncpu; i++)
-            if (fmax[i] > lo) { CPU_SET(i, &set); nbig++; }
-        if (nbig >= 2) sched_setaffinity(0, sizeof set, &set);
-        LOG("[gamebuild] nice 10, %d faster cores of %d\n", nbig, ncpu);
+        for (int i = 0; i < ncpu; i++) CPU_SET(i, &set);
+        sched_setaffinity(0, sizeof set, &set);
+        android_jobs = ncpu;
+        LOG("[gamebuild] nice 10, %d jobs on all cores\n", ncpu);
         // the generator's Python (tools/android/ondevice/pylauncher.c) and its modules' libraries (ctypes)
         char v[2400];
         snprintf(v, sizeof v, "%s/pyhome", ondev);
@@ -528,8 +556,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         setenv("ZIG_LOCAL_CACHE_DIR", zc, 1);
 #endif
     }
-    LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
-        t.cc, t.zig ? " cc" : "", o->jobs);
+    LOG("[gamebuild] generator %s%s%s, compiler %s%s\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
+        t.cc, t.zig ? " cc" : "");
 
     // 1. the generator, both modules at once (phones: one after the other, sdk first - main alone peaks at ~1.7 GB);
     // their finished files are compiled while it goes on
@@ -560,10 +588,21 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     int queued[2] = {0, 0};  // chunk files of each module put in units so far
     bool tables[2] = {false, false};
     int next = 0, jobs = o->jobs < 1 ? 1 : o->jobs > 64 ? 64 : o->jobs;
+#ifdef __ANDROID__
+    if (android_jobs > jobs) jobs = android_jobs;
+    uint64_t last_start = 0;  // (memory: see below)
+    long low_mem = -1;        // the lowest MemAvailable seen while starting compilers (the log, for tuning)
+    int held = 0;             // compiler starts put off for memory
+#endif
+    {  // (testing / tuning on a device: LARECOMP_BUILD_JOBS in env.txt)
+        const char *e = getenv("LARECOMP_BUILD_JOBS");
+        if (e && atoi(e) > 0) jobs = atoi(e) > 64 ? 64 : atoi(e);
+    }
+    LOG("[gamebuild] %d compile jobs\n", jobs);
     struct { PlatProc p; int unit; } run[64];
     int nrun = 0;
     int reused = 0, compiled = 0;
-    unsigned long long done_bytes = 0;
+    double done_cost = 0;  // (progress in compile time - Unit cost - rather than bytes: the slow files go first)
     double shown = 0;
     {
         add_unit(&units, t.entry, work, "gamelib_entry");
@@ -575,7 +614,6 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         // generator progress, newly finished files
         bool gens_done = true;
         double gen_frac = 0;
-        unsigned long long written = 0;
         if (gen_waiting && gens[1].exit == 0) {  // (sdk done: main's turn)
             gen_waiting = false;
             if (!start_gen(&t, &gens[0], game_dir, base[0], false)) {
@@ -600,6 +638,9 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                         ok = false;
                     } else if (!build_cache_save_generation(cache, g->name, g->files, why, why_size)) {
                         ok = false;
+                    } else {
+                        LOG("[gamebuild] generated %s: %d chunks, at %.0fs\n", g->name, g->files,
+                            (double)(plat_now_ns() - t0) / 1e9);
                     }
                 }
             }
@@ -622,18 +663,35 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             gen_frac += g->exit == 0 ? w : g->n ? w * (double)g->ci / (double)g->n : 0;
         }
         if (!ok) break;
-        for (int k = 0; k < units.n; k++) written += units.u[k].bytes;
+        double written_cost = 0;
+        for (int k = 0; k < units.n; k++) written_cost += units.u[k].cost;
 
         // compiles
         while (nrun < jobs && next < units.n) {
+#ifdef __ANDROID__
+            // Memory: the generator of main alone takes ~1.7 GB and the biggest compiles 300-500 MB each (they go
+            // first), on phones with 6 GB. Below 1.5 GB available a new compiler starts at most once a second (its
+            // memory shows in MemAvailable by then), below 700 MB not at all while two still run - the build slows
+            // down instead of the system killing it.
+            if (nrun >= 2) {
+                long avail = android_mem_available_mb();
+                uint64_t now = plat_now_ns();
+                if (avail >= 0 && (low_mem < 0 || avail < low_mem)) low_mem = avail;
+                if (avail >= 0 && (avail < 700 || (avail < 1500 && now - last_start < 1000000000ull))) { ++held; break; }
+            }
+#endif
+            next_unit(&units, next);
             Unit *u = &units.u[next];
             int cached = build_cache_object(cache, u->stem, u->src, u->source_hash);
             if (cached < 0) { snprintf(why, why_size, "A generated source file is missing or unreadable."); ok = false; break; }
-            if (cached && next != 0) { done_bytes += u->bytes; ++reused; ++next; continue; }
+            if (cached && next != 0) { done_cost += u->cost; ++reused; ++next; continue; }
             PlatProc p = start_compile(&t, &units.u[next]);
             if (!p) { snprintf(why, why_size, "the compiler didn't start"); ok = false; break; }
             run[nrun].p = p, run[nrun].unit = next++;
             nrun++;
+#ifdef __ANDROID__
+            last_start = plat_now_ns();
+#endif
         }
         for (int k = 0; k < nrun; k++) {
             int r = finished(run[k].p);
@@ -650,16 +708,22 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             } else {
                 ++compiled;
             }
-            done_bytes += u->bytes;
+            done_cost += u->cost;
             run[k--] = run[--nrun];
         }
         if (!ok) break;
-        if (gens_done && next == units.n && nrun == 0) break;
+        if (gens_done && next == units.n && nrun == 0) {
+            LOG("[gamebuild] compiled at %.0fs\n", (double)(plat_now_ns() - t0) / 1e9);
+#ifdef __ANDROID__
+            LOG("[gamebuild] lowest MemAvailable %ld MB, %d compiler starts put off for memory\n", low_mem, held);
+#endif
+            break;
+        }
 
-        // progress: the generator's share (its functions written), the compiler's (bytes of C compiled, of an
-        // estimate of all of it while the generator still writes)
-        double est_total = gens_done ? (double)written : gen_frac > 0.02 ? (double)written / gen_frac : 0;
-        double comp_frac = est_total > 0 ? (double)done_bytes / est_total : 0;
+        // progress: the generator's share (its functions written), the compiler's (the expected compile time of the
+        // files done - Unit cost - of an estimate of all of it while the generator still writes)
+        double est_total = gens_done ? written_cost : gen_frac > 0.02 ? written_cost / gen_frac : 0;
+        double comp_frac = est_total > 0 ? done_cost / est_total : 0;
         if (comp_frac > 1) comp_frac = 1;
         // (an update that keeps the last build's pieces compiles little: generating the C is most of its time)
         double f = update ? 0.85 * gen_frac + 0.1 * comp_frac : 0.2 * gen_frac + 0.75 * comp_frac;

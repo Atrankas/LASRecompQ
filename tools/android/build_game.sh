@@ -48,6 +48,12 @@ ID=$(tools/android/gamelib_id.sh)
 FLAGS=$(tools/android/gamelib_id.sh --flags)
 SPLITFLAGS=$(tools/android/gamelib_id.sh --split-flags)
 GENARGS=$(tools/android/gamelib_id.sh --gen-args)
+# (compile-time-only options of newer clangs, the same code: the phone's zig clang 22 has them, the NDK's clang 18 not)
+CC22=$(tools/android/gamelib_id.sh --cc22-flags)
+# (clang 18 prints "Unknown command line argument" for them - and may still exit 0 - so: no output at all)
+PROBE=$(mktemp -t lasprobe.XXXXXX)
+[ -z "$(echo 'int x;' | "$CC" $CC22 -x c -c - -o "$PROBE" 2>&1)" ] && FLAGS="$FLAGS $CC22"
+rm -f "$PROBE"
 GEN=build/android/gen
 OBJ=build/android/gen-obj
 LINKPGO=
@@ -77,7 +83,9 @@ compile() {  # <source> <object>
 export -f compile
 PGOFILE=$([ -n "$PGO" ] && [ "$PGO" != gen ] && echo "$PGO" || true)
 export CC FLAGS SPLITFLAGS PGOFILE
-ls "$GEN"/sdk/*.c "$GEN"/main/*.c | while read -r c; do echo "$c $OBJ/$(basename "$(dirname "$c")")_$(basename "$c" .c).o"; done |
+# the slowest first (no long file left alone at the end): the split-dispatch files (~8x the time per byte), then by size
+{ grep -l 'lasgen: split-dispatch' "$GEN"/sdk/*.c "$GEN"/main/*.c | xargs ls -S; ls -S "$GEN"/sdk/*.c "$GEN"/main/*.c; } | awk '!seen[$0]++' |
+    while read -r c; do echo "$c $OBJ/$(basename "$(dirname "$c")")_$(basename "$c" .c).o"; done |
     xargs -P "$JOBS" -n 2 bash -c 'compile "$0" "$1" || exit 255'
 "$CC" $FLAGS -DGAMELIB_ID="\"$ID\"" -c tools/gamelib_entry.c -o "$OBJ/gamelib_entry.o"
 

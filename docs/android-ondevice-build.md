@@ -41,13 +41,14 @@ is still the faster way, and makes the same library (same game code id).
    partial wake lock and a notification with the step, percent and time left, so the build continues with the screen
    off or another app in front. `gamebuild_run` (runtime/gamebuild.c, Android branch):
    - `LasActivity.buildTools` unpacks `assets/ondevice.zip` into `files/ondevice/` (once per app version);
-   - the build thread (and so every compiler, which inherit it) goes to nice 10 and the faster cores (those whose
-     `cpuinfo_max_freq` is above the slowest's: 4 of 8 on a Snapdragon 865); 4 compile jobs;
+   - the build thread (and so every compiler, which inherit it) goes to nice 10, one compile job per core (all 8 on a
+     Snapdragon 865, the little ones too), the longest files first, new compilers held back while memory is low (see
+     "Build time");
    - `liblaspython.so files/ondevice/tools/gen.py sdk ...`, then `... main ...` (one after the other: main alone
      peaks at ~1.7 GB), with `gamelib_id.sh --gen-args` (`--simd asm --shift 0x6000000000 --split-dispatch 512`);
      chunks are compiled as soon as they're written;
-   - `libzig.so clang -target aarch64-linux-android30 <gamelib flags> -nostdinc -isystem cckit/...`, split-dispatch
-     files with `-mllvm -disable-licm-promotion`;
+   - `libzig.so clang -target aarch64-linux-android30 <gamelib flags> <cc22 flags> -nostdinc -isystem cckit/...`,
+     split-dispatch files with `-mllvm -disable-licm-promotion`;
    - `libzig.so ld.lld @cckit/link.rsp ... -L<native lib dir> -lmain ...`, published by the build cache, then copied to
      internal storage (`files/liblasgame.so` + `.id`, where runtime/gamelib.c looks first).
 4. The progress overlay shows "Recompiling the game", the step, percent and "about N minutes left" (from the progress
@@ -57,6 +58,34 @@ is still the faster way, and makes the same library (same game code id).
    the start screen sees the copied files without game code and starts the build again by itself, reusing every
    finished object (runtime/build_cache.cpp; tested: a build killed partway reused what was done, a second run
    reused all 14 objects).
+
+## Build time
+
+Measured on the S20 FE before the changes below: **27 min** (4 jobs on the big cores, 813 objects, phone skin 42 C,
+throttled). The work is the compiles (generator ~2 min, overlapped). Measured on the M1 with zig clang 22 (the phone's
+compiler), CPU time per file, then modelled for the phone (per-file time x 2.6 on a big core, calibrated on the 27 min;
+x 2.7 again on a little core at 1.8 GHz against the big cores' 1.75 GHz cap):
+
+| Change | Effect (M1 CPU time) |
+|---|---|
+| Full library before | 40 CPU-min (normal files 27, the 148 split-dispatch files 13) |
+| `-mllvm -dag-maps-huge-region=500` (both compilers): the schedulers' dependency graph of a block with 500+ memory operations gets coarser chains - quadratic before (long store runs: object constructors); main_012.c 4.3 s -> 0.7 s | normal files -14% (4 E-core sample of 40 files: 270 -> 232 s). 806 of 812 objects byte-identical, the rest an instruction order inside such blocks |
+| `-mllvm -opt-disable=loop-load-elim` (clang 22): LoopLoadElimination forwards nothing in this code but builds loop-simplified form and LAA for the dispatch loops - 50-60% of a split file's time | split files -20% (19-file sample: 402 -> 322 s); **all 812 objects byte-identical** |
+| `-mllvm -has-predecessor-max-steps=2048` (clang 22; default 8192): the DAG combiner's pre/post-indexed load/store search over the Cpu pointer's thousands of uses | -10% on the heaviest files (main_058.c), ~0 on average; all objects identical (512 would be faster but changed 19 objects) |
+| Together | **~ -18%, 40 -> ~33 CPU-min**; the library's code is the same (806/812 objects identical to before, all identical between the two clang-22-only options on and off) |
+| 8 jobs on all cores instead of 4 on the big ones, longest file first | model: 21.4 -> 15.6 min for the new flags (FIFO with 8 jobs: 15.9-17.6 - a big split file written late, main_522, would run alone at the end on a little core) |
+
+Expected: **~15-16 min** (27 x 0.82 for the flags, x ~0.73 for the cores and the order), cooler per unit of work (the
+little cores do ~1/3 of a big core's work for a fraction of its power). `LARECOMP_BUILD_JOBS=N` in env.txt tries other
+job counts; the log has `[gamebuild] generated main ... at Ns`, `compiled at Ns`, `lowest MemAvailable`.
+
+Tried and left out (they change the code of the whole library): no machine schedulers (-10% more on normal files, every
+object different), no post-RA scheduler (-3.5%), `-O1` for the split files (-43% for them, +7% code; they hold 13% of
+the profile's block counts - main_439's function is among the hottest), `-large-interval-freq-threshold=20` for the
+coalescer (split files -18%, +7% code), `-fno-vectorize -fno-slp-vectorize` (no gain). No-ops on this code but cheap
+anyway: loop-vectorize, loop-distribute, float2int... The generator (`gen.py`, 27 s on the M1, ~2 min on the phone)
+overlaps the compiles and has no single hot spot (cProfile: emit_asm_batch, lift, scan spread out). The rest of the
+compile time is the ordinary -O2 pipeline over ~445 MB of C (InstCombine 11%, instruction selection 16%, parsing 10%).
 
 ## Testing it
 
@@ -310,8 +339,11 @@ is small (the Java side only unpacks the assets, copies the game files and runs 
   (both from gamelib_id.sh through CMakeLists, also part of the build cache's spec).
 - Generators one after the other (sdk first), progress weighted by their share of the C (main 78%, sdk 22%; also on
   desktop, where they still run together).
-- nice 10 + the faster cores for the build thread (the compilers inherit both), `LASPY_*` / `LIB*_PATH` / `TMPDIR`
-  in the environment.
+- nice 10 + every core for the build thread (the compilers inherit both), one job per core (`LARECOMP_BUILD_JOBS`
+  in env.txt overrides it), `LASPY_*` / `LIB*_PATH` / `TMPDIR` in the environment.
+- `next_unit`: the next file is the longest of those written so far (bytes, x8 for a split-dispatch file); progress
+  counts that expected time instead of bytes. Android: no new compiler while MemAvailable < 700 MB (with two still
+  running), at most one a second below 1.5 GB.
 - The link with `libzig.so ld.lld @cckit/link.rsp` against `<native lib dir>/libmain.so`; after `build_cache_publish`
   (which now accepts `liblasgame.so`) the library is copied to internal storage and the external copy removed.
 - `LARECOMP_ONDEVICE_DIR` (tests) replaces the unpacked assets' folder, so `phone_gamebuild_test.sh` can run it
@@ -360,7 +392,7 @@ Output: `build/ondevice/stage/` (`jniLibs/arm64-v8a/*.so`, `pyhome/`, `cckit/`, 
 
 1. **The on-phone end-to-end test** with the installed APK and real game files (not done here: no APK installs on the
    shared phone yet): the copy, the real generator's time and memory on the phone, the whole build's time and
-   thermals with 4 jobs at nice 10, the notification with the screen off, resume after swiping the app away, and the
+   thermals with 8 jobs at nice 10, the notification with the screen off, resume after swiping the app away, and the
    game running from the phone-built library (clang 22 code vs the NDK's clang 18).
 2. The library from `build_game.sh` with the split (computer) to be checked in the game too (same code id as the
    phone's).
