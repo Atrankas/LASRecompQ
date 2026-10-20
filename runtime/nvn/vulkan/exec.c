@@ -944,13 +944,15 @@ uint32_t nvn_window_origin(void);
 uint32_t nvn_depth_mode(void);
 bool renderer_origin_lower_left(void) { return nvn_window_origin() == 0; }
 
-// (LARECOMP_VK_PROF) called once per presented frame: frames over 50 ms are logged with where their time went.
+// (LARECOMP_VK_PROF) called once per presented frame: frames over 50 ms (LARECOMP_HITCH_MS) are logged with where their time went.
 // present_ns: time in backend_present's acquire/blit/present.
 void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
     if (!prof) return;
     static uint64_t last_t, l_exec, l_wait, l_draws, l_subs;
     uint64_t now = SDL_GetTicksNS();
-    if (last_t && now - last_t > 50000000) {
+    static uint64_t limit;  // LARECOMP_HITCH_MS=<ms>: the threshold (default 50)
+    if (!limit) limit = (getenv("LARECOMP_HITCH_MS") ? (uint64_t)atoi(getenv("LARECOMP_HITCH_MS")) : 50) * 1000000ull;
+    if (last_t && now - last_t > limit) {
         uint64_t dt = now - last_t, ex = cum_exec - l_exec, wt = cum_wait - l_wait;
         LOG("[hitch] frame %llu: %.0f ms = backend exec %.1f (of which GPU waits %.1f) + present %.1f + other %.1f; %llu draws, "
             "%llu submits, compiles %d pending\n", (unsigned long long)frame, dt / 1e6, ex / 1e6, wt / 1e6, present_ns / 1e6,
