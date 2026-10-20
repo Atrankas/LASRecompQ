@@ -185,6 +185,16 @@ a partir da recompilação estática que já roda no macOS / Windows / Linux. Le
       56-60 / baía de Martha ~32 na tela (a 1.5 sem geração a baía já fica em ~29 fps, GPU 29-30 ms). A água da baía
       (1530 instruções, 32 registros, 2 waves; já estruturada) é o maior custo; faltam ~15% de GPU ali. Em 1x a baía
       custa 19 ms (60 com geração sobrando)
+- [x] Pré-rotação do swapchain (imagem na orientação do painel): o SurfaceFlinger não compõe mais a camada com a GPU
+      (era CLIENT + ROT_90 a cada apresentação): ocupação da GPU 91 -> 84%, -2.2 ms por quadro
+- [x] Geração de quadros mais barata: sem cópia da janela (o quadro gerado sai da imagem apresentada, a interface é
+      redesenhada) e a cena antes da HUD guardada em 1/4: ~4.5 -> ~1.4 ms
+- [x] Espera da GPU do jogo um quadro atrás (dois quadros em andamento): 1080p (1.5) + geração no modo "Desempenho da
+      GPU": baía de Martha de quedas a 40 para 60 constantes; 10 min a 60 na tela e 100% de velocidade. Calor: pele
+      46.6 °C (status 4) depois de 10 min partindo de 33 °C - a GPU agora trabalha quase sem pausas
+- [x] Ambientes internos com a resolução larga do jogo (luz sem bordas retas, salas sem esticar) e na tela inteira
+- Tentado e descartado (rodada 2): LRZ ligado (o "ganho" era o bug da água), primeiro nível de brilho em 1x (perdia
+  os brilhos da água), sombras 0.375 (sem ganho), DONT_CARE nos passes de tela cheia (sem ganho)
 - Tentado e descartado: stencil para achar personagens (o capim tem o mesmo valor), meia precisão com resultado f32
   (Fable 8: 0.06 ms, ruído), interpolantes puros (tiram o prefetch de textura: mais lento), forçar gmem (+4 ms) ou
   sysmem (igual)
