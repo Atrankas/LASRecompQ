@@ -582,6 +582,15 @@ uint64_t renderer_fence_seq(void) {
     return q;
 }
 
+// The work up to submission seq submitted (copies of guest data taken), without waiting for the GPU (objects.c)
+void renderer_submit_upto(uint64_t seq) {
+    pthread_mutex_lock(&seq_lock);
+    uint64_t s = submit_seq;
+    pthread_mutex_unlock(&seq_lock);
+    if (seq > s && gt_on()) gt_call(submit_upto, &seq);
+    else if (seq > s) renderer_submit();
+}
+
 void renderer_wait_seq(uint64_t seq) {
     if (!seq) return;
     pthread_mutex_lock(&seq_lock);

@@ -175,9 +175,29 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     if (flush || whole) gt_drain();
     else gt_sync_wait(sync_of(A(0))->ticket);  // (render thread: up to where it's signaled)
     if (log) t1 = plat_now_ns();
-    if (flush) renderer_flush();
+    // The GPU wait one frame behind (phones): the game's per-frame fence waits for the GPU to finish the frame
+    // before; everything the GPU reads from guest memory is copied when submitted, so the wait for the newest fence
+    // only needs it submitted, and the GPU is waited for up to the fence before it - two frames in flight, so a frame
+    // heavier than its 33 ms no longer misses its refresh (S20 FE at 1080p + frame generation: Martha's Bay from
+    // dips to 40 to a steady 60, 10 min at 100% speed). GPU writes the game reads come back a frame later.
+    // LARECOMP_SYNC_LAG=0/1.
+    static int lag = -1;
+#ifdef __ANDROID__
+    if (lag < 0) lag = getenv("LARECOMP_SYNC_LAG") ? atoi(getenv("LARECOMP_SYNC_LAG")) != 0 : 1;
+#else
+    if (lag < 0) lag = getenv("LARECOMP_SYNC_LAG") ? atoi(getenv("LARECOMP_SYNC_LAG")) != 0 : 0;
+#endif
+    uint64_t seq = sync_of(A(0))->seq;
+    if (lag && seq && !flush && !whole) {
+        static uint64_t prev;
+        extern void renderer_submit_upto(uint64_t seq);
+        renderer_submit_upto(seq);           // (copies of what it reads taken: the game may rewrite it)
+        uint64_t w = prev && prev < seq ? prev : 0;
+        if (seq > prev) prev = seq;
+        if (w) renderer_wait_seq(w);
+    } else if (flush) renderer_flush();
     else if (whole) renderer_sync();
-    else renderer_wait_seq(sync_of(A(0))->seq);  // only the submission that holds this fence
+    else renderer_wait_seq(seq);  // only the submission that holds this fence
     if (log) {
         extern uint64_t renderer_present_count(void);
         LOG("[sync] f%llu wait %llx (lr %llx) seq %llu: queue %.2f ms, gpu %.2f ms\n", (unsigned long long)renderer_present_count(),
