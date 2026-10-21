@@ -98,6 +98,7 @@ typedef struct {
     char livesplit_host[64];  // host:port of the LiveSplit Server ("localhost:16834")
     // touch screens (runtime/ui/touch_controls.mm)
     int touch_mode;      // 0 Auto (while no controller is connected), 1 Always, 2 Off
+    bool touch_stick_fixed;  // the touch stick stays in its place (else its base comes to the thumb)
     bool touch_all;      // every play button on screen, not only those the game uses now (touch_controls.mm wanted)
     float touch_opacity; // 0.15 .. 1
     float touch_size;    // 0.6 .. 1.6 (1 = the default layout)

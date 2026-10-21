@@ -335,6 +335,7 @@ static void pick_device(void) {
         if ((int)i == want) score = 100;
         if (score > best_score) { best_score = score; best = (int)i; }
     }
+    if (getenv("LARECOMP_TEST_NO_DEVICE")) best = -1;  // (test: the start screen's driver error and its dialog)
     if (best < 0) FATAL("no Vulkan 1.3 device\n");
     g_vk.phys = pd[best];
     free(pd);

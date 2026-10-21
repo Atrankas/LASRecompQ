@@ -295,6 +295,14 @@ extern "C" void controls_tab_draw(float scale) {
                            "R with the shield, X / Y with the items you equip. All: every button, all the time."))
                 g_settings.touch_all = v != 0;
         }
+        {
+            static const char *const stick[] = {"Follows the thumb", "Fixed"};
+            int v = g_settings.touch_stick_fixed ? 1 : 0;
+            if (opt_choice("Stick", &v, stick, 2, 0,
+                           "Follows the thumb: the stick comes to where your thumb lands, anywhere on the lower left. "
+                           "Fixed: it stays where it is (move it in Edit touch layout) and answers to touches on it."))
+                g_settings.touch_stick_fixed = v != 0;
+        }
         float sz = roundf(g_settings.touch_size * 100), op = roundf(g_settings.touch_opacity * 100);
         if (opt_slider("Size", &sz, 60, 160, 5, 100, "%.0f%%", "The on-screen buttons' size.")) g_settings.touch_size = sz / 100;
         if (opt_slider("Opacity", &op, 15, 100, 5, 60, "%.0f%%", "How see-through the on-screen buttons are.")) g_settings.touch_opacity = op / 100;

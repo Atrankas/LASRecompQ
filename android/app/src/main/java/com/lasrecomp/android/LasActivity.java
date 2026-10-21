@@ -836,7 +836,10 @@ public class LasActivity extends SDLActivity {
     }
 
     private void showDriverError(String extra) {
-        String msg = sDlgText + (extra != null ? "\n\n" + extra : "");
+        String body = sDlgText;
+        int cut = body.indexOf("\n\n");  // (its first line is the headline: the dialog's title already)
+        if (cut > 0) body = body.substring(cut + 2);
+        String msg = body + (extra != null ? "\n\n" + extra : "");
         android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle(R.string.driver_error_title).setMessage(msg).setCancelable(false)
             .setPositiveButton(R.string.driver_install, (d, w) -> {

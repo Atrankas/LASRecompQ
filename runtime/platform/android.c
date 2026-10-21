@@ -262,7 +262,8 @@ void plat_fatal_notice(void) {
     rt_crash_explain(text, sizeof text, g_log_path[0] ? g_log_path : "logcat (tag LASRecomp)");
     // (a graphics driver the game can't run on: the player can install one right here - the settings that have that
     // row are out of reach when the driver fails at the start screen)
-    if (strstr(text, "graphics driver") && android_driver_error_dialog(text)) return;
+    // (any case: the headline is "Graphics driver error" - matched as "graphics driver" only, it never showed)
+    if (strcasestr(text, "graphics driver") && android_driver_error_dialog(text)) return;
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp", text, NULL);
 }
 

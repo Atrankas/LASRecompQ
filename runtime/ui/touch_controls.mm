@@ -174,6 +174,8 @@ static bool inside(const Control &c, float x, float y, float slack) {
 static int hit(float x, float y) {
     for (int i = C_A; i < C_COUNT; i++)
         if (shown(i) && inside(g_ctl[i], x, y, 1.3f)) return i;
+    if (shown(C_STICK) && g_settings.touch_stick_fixed)  // (fixed: its own circle, a little beyond its rim)
+        return inside(g_ctl[C_STICK], x, y, 1.6f) ? C_STICK : -1;
     if (shown(C_STICK) && x < g_w * 0.42f && y > g_h * 0.30f) return C_STICK;
     return -1;
 }
@@ -428,9 +430,10 @@ static bool handle(const SDL_Event *e, bool *toggle_menu) {
             if (c == C_B && g_title_step > 0) g_title_step--;
             if (c == C_START && g_title_step < 2) g_title_step++;
         }
-        if (c == C_STICK) {  // the base comes to the thumb (kept on screen)
+        if (c == C_STICK) {  // the base comes to the thumb (kept on screen) - or stays where it is (Fixed)
             float r = g_ctl[C_STICK].r;
-            g_stick_cx = clampf(x, r, g_w * 0.42f), g_stick_cy = clampf(y, g_h * 0.30f + r * 0.5f, g_h - r);
+            if (!g_settings.touch_stick_fixed)
+                g_stick_cx = clampf(x, r, g_w * 0.42f), g_stick_cy = clampf(y, g_h * 0.30f + r * 0.5f, g_h - r);
             stick_to(x, y);
         } else if (c == C_MENU) {
             g_menu_down = true;
