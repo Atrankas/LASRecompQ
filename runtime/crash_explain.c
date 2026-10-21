@@ -51,7 +51,12 @@ static bool in_gpu_driver(uint64_t pc) {
     static const char *const drivers[] = {"nvoglv", "nvgpucomp", "nvwgf", "libnvidia", "amdvlk", "amdxc", "atiumd",
                                           "atig6", "igvk", "igc64", "igd", "libvulkan_radeon", "libvulkan_intel",
                                           "libvulkan_nouveau", "libvulkan_lvp", "libvulkan_virtio", "AGXMetal",
-                                          "MTLCompiler", "libLLVM", "radeonsi"};
+                                          "MTLCompiler", "libLLVM", "radeonsi",
+                                          // Android: Turnip / Qualcomm's (vulkan.adreno.so, vulkan.ad07xx.so), Mali,
+                                          // PanVK, Xclipse, PowerVR
+                                          "libvulkan_freedreno", "vulkan.ad", "libGLES_mali", "vulkan.mali",
+                                          "libvulkan_panfrost", "vulkan.samsung", "libvulkan_sgpu", "vulkan.powervr",
+                                          "libllvm-glnext", "libllvm-qgl"};
     for (size_t i = 0; i < sizeof drivers / sizeof *drivers; i++)
         if (contains_nocase(m, drivers[i])) return true;
     return false;
@@ -85,12 +90,25 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
         snprintf(what, sizeof what, "This is a bug in LAS Recomp, not a problem with your game files or PC. %s", report);
     } else if (in_gpu_driver(g_pc)) {
         snprintf(head, sizeof head, "Your graphics driver crashed");
+#ifdef __ANDROID__
+        snprintf(what, sizeof what, "Try another GPU driver: install one (Mesa Turnip for Adreno, Mesa PanVK for Mali), "
+                 "or go back to the system driver if one is installed. If it keeps happening, please report it with "
+                 "the log file below.");
+#else
         snprintf(what, sizeof what, "Update your graphics driver (NVIDIA, AMD or Intel) and try again. If it keeps "
                  "happening, please report it with the log file below.");
+#endif
     } else if (has("VK_") || has("Vulkan")) {
         snprintf(head, sizeof head, "Graphics driver error");
+#ifdef __ANDROID__
+        snprintf(what, sizeof what, "LAS Recomp needs a Vulkan driver with Vulkan 1.3 (or 1.1 with its extensions), "
+                 "and your phone's own driver didn't start the game. Install a GPU driver (a .zip as emulators use "
+                 "them): Mesa Turnip for Adreno, Mesa PanVK for Mali. If one is installed already, try the system "
+                 "driver. If it keeps happening, please report it with the log file below.");
+#else
         snprintf(what, sizeof what, "LAS Recomp needs a graphics driver with Vulkan 1.3: install the latest driver for "
                  "your GPU (NVIDIA, AMD or Intel). If it keeps happening, please report it with the log file below.");
+#endif
     } else if (has("out of memory") || has("cannot allocate") || has("alloc failed")) {
         snprintf(head, sizeof head, "Out of memory");
         snprintf(what, sizeof what, "Close other programs and try again.");

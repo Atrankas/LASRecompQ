@@ -15,6 +15,7 @@
 
 #include "../hle.h"
 #include "../platform.h"
+#include "../settings.h"
 
 extern volatile uint64_t g_vsync_count;  // runtime/hle/vi.c
 uint64_t g_frame_steps_late;             // (stats) frames that advanced more than one step
@@ -75,6 +76,9 @@ uint32_t rt_interval_choice(uint32_t v, uint64_t obj, uint64_t gpu, uint64_t cpu
     if (log < 0) log = ENV("LARECOMP_LOG_INTERVAL") != NULL;
     uint32_t lo = LD8(obj + 0x4e2), hi = LD8(obj + 0x4e3), was = LD8(obj + 0x4e1), out = v;
     if (g_pace_slow && v == 0 && hi >= 1) out = 1;
+    // (the Frame rate setting: its 60 fps mode whenever its range has it, or its 30)
+    if (g_settings.frame_rate == FRAME_RATE_NATIVE_60 && lo == 0) out = 0;
+    else if (g_settings.frame_rate == FRAME_RATE_FIXED_30 && hi >= 1 && out == 0) out = 1;
     // (Never past its range: Link walks 3 steps a frame at interval 3, but other things don't take it - Madam
     // MeowMeow's little chain chomps' chains flew apart. Below 30 fps the resolution gives way instead.)
     static int force = -1;  // LARECOMP_FORCE_INTERVAL=<n> (test): always n

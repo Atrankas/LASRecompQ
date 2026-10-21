@@ -12,7 +12,10 @@ extern "C" {
 // Opens the folder picker; cb gets the picked folder's name (shown on the start screen), or NULL if none, on the UI
 // thread.
 void android_pick_game_folder(void (*cb)(const char *name));
-// The folder picked in an earlier session (still readable), or NULL
+void android_pick_game_package(void (*cb)(const char *name));  // the game's .xci / .nsp, then its prod.keys
+void android_pick_game_keys(void (*cb)(const char *name));     // prod.keys alone
+const char *android_game_keys_name(void);  // the prod.keys chosen for the game file ("": not yet), NULL: a folder
+// The folder (or game file) picked in an earlier session (still readable), or NULL
 const char *android_saved_game_folder(void);
 // Copies exefs/ and romfs/ out of the picked folder into dest (blocking; any thread). build_id: exefs/main's at 0x40
 // (16 hex digits) - another version is refused before anything is copied. NULL = done, else what went wrong:
@@ -46,6 +49,16 @@ const char *android_gpu_driver_failed(void);
 // driver works (left behind, the next start runs the system driver).
 typedef struct { char dir[512], lib[128], hook_dir[512], tmp_dir[512], probe[512]; } AndroidGpuDriver;
 bool android_gpu_driver_config(AndroidGpuDriver *out);
+bool android_driver_error_dialog(const char *text);
+// The game files' storage (the start screen's Storage row): the memory card's data folder (NULL: none), the data folder
+// the game files are in when it's the card's (NULL: internal storage), and the choice (from the next start on)
+const char *android_sd_card_path(void);
+const char *android_game_storage_root(void);
+void android_set_game_storage(bool sd);
+// Saves to (importing false) or from a folder the player picks (a Switch emulator's save folder for the game)
+void android_transfer_saves(bool importing, const char *save_dir, void (*cb)(const char *result));
+// The player's Switch fonts (known: the game's font file names, one per line) copied into fonts_dir
+void android_import_fonts(const char *fonts_dir, const char *known, void (*cb)(int ok, int skipped));  // a graphics error that stops the app: install / system / close
 
 #ifdef __cplusplus
 }

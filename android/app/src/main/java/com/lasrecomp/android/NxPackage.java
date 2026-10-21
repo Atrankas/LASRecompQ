@@ -42,6 +42,7 @@ final class NxPackage {
             return e.getMessage().equals("badkeys") ? "badkeys" : "keys:" + e.getMessage();
         } catch (Corrupt e) {
             String m = e.getMessage();
+            if (m.equals("compressed")) return "unusable";  // (an .nsz / .xcz renamed: zstd-compressed NCAs)
             return m.equals("notgame") || m.equals("updateonly") ? m : "corrupt:" + m;
         } catch (Exception e) {
             return "copy:" + e;
@@ -75,6 +76,7 @@ final class NxPackage {
     private final FileChannel pkg;
     private final Map<String, byte[]> keys;
     private final List<Entry> ncas = new ArrayList<>(), tickets = new ArrayList<>();
+    private boolean compressed;
 
     private static final class Entry {
         final String name;
@@ -137,8 +139,9 @@ final class NxPackage {
             String low = e.name.toLowerCase(Locale.ROOT);
             if (low.endsWith(".nca")) ncas.add(e);
             else if (low.endsWith(".tik")) tickets.add(e);
+            else if (low.endsWith(".ncz")) compressed = true;
         }
-        if (ncas.isEmpty()) throw new Corrupt("no NCA");
+        if (ncas.isEmpty()) throw new Corrupt(compressed ? "compressed" : "no NCA");
     }
 
     // ---- keys

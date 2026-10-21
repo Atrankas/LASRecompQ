@@ -155,6 +155,7 @@ void settings_load(void) {
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
         else if (!strcmp(key, "touch_controls")) g_settings.touch_mode = !strcmp(val, "always") ? 1 : !strcmp(val, "off") ? 2 : 0;
         else if (!strcmp(key, "touch_opacity")) g_settings.touch_opacity = (float)atof(val);
+        else if (!strcmp(key, "touch_all")) g_settings.touch_all = atoi(val) != 0;
         else if (!strcmp(key, "touch_size")) g_settings.touch_size = (float)atof(val);
         else if (!strncmp(key, "touch_ctl_", 10)) {  // (the layout editor: x, y, size, hidden)
             extern const char *touch_control_name(int i);
@@ -193,6 +194,7 @@ void settings_load(void) {
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
         else if (!strcmp(key, "frame_gen")) g_settings.frame_gen = atoi(val);
+        else if (!strcmp(key, "frame_rate")) g_settings.frame_rate = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
         else if (!strcmp(key, "power_mode")) g_settings.power_mode = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
         else if (!strcmp(key, "ui_language")) g_settings.ui_language = atoi(val) >= 0 && atoi(val) < N_UI_LANGUAGES ? atoi(val) : 0;
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
@@ -248,6 +250,7 @@ void settings_save(void) {
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
     fprintf(f, "touch_controls = %s\n", g_settings.touch_mode == 1 ? "always" : g_settings.touch_mode == 2 ? "off" : "auto");
     fprintf(f, "touch_opacity = %.2f\n", g_settings.touch_opacity);
+    fprintf(f, "touch_all = %d\n", g_settings.touch_all);
     fprintf(f, "touch_size = %.2f\n", g_settings.touch_size);
     {
         extern const char *touch_control_name(int i);
@@ -277,6 +280,7 @@ void settings_save(void) {
     fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\nframe_gen = %d\n", g_settings.move_360, g_settings.blur_removal,
             g_settings.hide_hero_icon, g_settings.frame_gen);
     fprintf(f, "ui_language = %d\npower_mode = %d\n", g_settings.ui_language, g_settings.power_mode);
+    fprintf(f, "frame_rate = %d\n", g_settings.frame_rate);
     static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation"};
     fprintf(f, "prompts = %s\n", prompts[g_settings.prompts & 3]);
     fprintf(f, "menu_confirm = %s\n", g_settings.menu_confirm == MENU_CONFIRM_CONTROLLER ? "controller" : "game");

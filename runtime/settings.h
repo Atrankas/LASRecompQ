@@ -18,6 +18,9 @@ enum { AA_OFF = 0, AA_SMAA = 1 };
 enum { PROMPTS_AUTO = 0, PROMPTS_NINTENDO = 1, PROMPTS_XBOX = 2, PROMPTS_PLAYSTATION = 3 };
 // Which face button confirms in our own menus (runtime/ui/pad_nav.mm); the game's input is never affected
 enum { MENU_CONFIRM_GAME = 0, MENU_CONFIRM_CONTROLLER = 1 };
+// The game's frame rate: AUTO its own choice (60 while frames fit, else 30 - with frame generation, 60 on the screen),
+// NATIVE_60 always its 60 fps mode (a device that can't keep up plays in slow motion), FIXED_30 always its 30.
+enum { FRAME_RATE_AUTO = 0, FRAME_RATE_NATIVE_60 = 1, FRAME_RATE_FIXED_30 = 2 };
 enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 /* explored, all with the Map */ };
 // System language served to the game (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
 // the game picks its text language from it, as it would from the Switch's own system setting. LANG_AUTO follows the
@@ -49,6 +52,7 @@ typedef struct {
     bool blur_removal;   // no tilt-shift blur at the top / bottom of the screen
     bool hide_hero_icon; // no Hero Mode icon on the HUD
     int frame_gen;       // 60 fps (generated): in-between frames while the game runs at 30 (Vulkan: framegen.c)
+    int frame_rate;      // FRAME_RATE_*: the game's own frame rate mode (runtime/hle/framepace.c, nvn/pace.c)
     int power_mode;      // phones with root: 0 balanced, 1 maximum performance, 2 GPU performance (RootBoost.java reads it)
     bool mirror_mode;    // the world mirrored left to right (Gameplay tab): renderers + runtime/hle/input.c
     int language;        // LANG_AUTO or an index into g_language_codes: the game's text language
@@ -78,6 +82,7 @@ typedef struct {
     int hearts;          // index into g_heart_colours (0 = Default red)
     // touch screens (runtime/ui/touch_controls.mm)
     int touch_mode;      // 0 Auto (while no controller is connected), 1 Always, 2 Off
+    bool touch_all;      // every play button on screen, not only those the game uses now (touch_controls.mm wanted)
     float touch_opacity; // 0.15 .. 1
     float touch_size;    // 0.6 .. 1.6 (1 = the default layout)
     // the layout editor (touch_controls.mm): per control, moved (its place: share of the screen), size (x), hidden;

@@ -37,6 +37,8 @@ int input_family_of_type(int sdl_gamepad_type); // runtime/hle/input.c: 0 Ninten
 int input_menu_family(uint32_t sdl_joystick_id); // runtime/hle/input.c: our menus' layout for that pad (0: any)
 void bind_reset(int dev);
 bool bind_is_default(int dev);
+bool bind_face_by_label(void);               // A / B / X / Y on the bottom / right / left / top buttons
+void bind_set_face_by_label(bool on);        // (else by position, the Switch's: A right, B bottom, X top, Y left)
 bool bind_is_default_slot(int dev, int slot);
 
 // "Click a binding, then press": begun from the UI; the next press (any thread's SDL event) is taken. Escape cancels,

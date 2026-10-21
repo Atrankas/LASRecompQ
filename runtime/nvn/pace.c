@@ -7,6 +7,7 @@
 
 #include "../rt.h"
 #include "pace.h"
+#include "../settings.h"
 
 // The game advances its world one fixed step per frame in its 60 fps mode, and two steps per frame in its 30 fps mode
 // (measured: Link walks twice as far per frame there) - so a 60-mode frame that takes 20 ms plays in slow motion, while
@@ -61,7 +62,11 @@ void pace_frame(void) {
     nover += o - over[idx];
     over[idx] = (uint8_t)o;
     idx = (idx + 1) % 60;
-    if (!on) return;  // (measured and counted all the same: LARECOMP_LOG_PACE, the stats)
+    if (!on || g_settings.frame_rate == FRAME_RATE_NATIVE_60) {  // (measured and counted all the same: LARECOMP_LOG_PACE, the stats)
+        extern volatile bool g_pace_slow;
+        pace_slow = g_pace_slow = false;  // (60 asked for: the counters as they are, the game's tries at 60 let through)
+        return;
+    }
     if (!pace_slow && back_at && backoff > 1 && now - back_at > 60000000000ull) {
         backoff = 1;
         LOG("[pace] a minute at 60: headroom needed back to normal\n");

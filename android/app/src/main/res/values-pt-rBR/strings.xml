@@ -5,4 +5,10 @@
     <string name="import_failed">Não foi possível copiar os arquivos do jogo: %1$s</string>
     <string name="build_channel">Compilação do código do jogo</string>
     <string name="build_title">Recompilando o jogo</string>
+    <string name="driver_error_title">Erro do driver gráfico</string>
+    <string name="driver_install">Instalar driver de GPU</string>
+    <string name="driver_system">Usar o driver do sistema</string>
+    <string name="driver_close">Fechar</string>
+    <string name="driver_installed">Driver instalado: o LAS Recomp abre de novo com ele.</string>
+    <string name="driver_install_failed">O driver não foi instalado: %1$s</string>
 </resources>

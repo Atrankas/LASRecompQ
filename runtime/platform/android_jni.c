@@ -33,6 +33,34 @@ void android_pick_game_folder(void (*cb)(const char *name)) {
     (*env)->DeleteLocalRef(env, cls);
 }
 
+// The game as a file: the picker for its .xci / .nsp, then for its prod.keys (LasActivity.pickGamePackage); the
+// file's name comes back through cb as for the folder
+void android_pick_game_package(void (*cb)(const char *name)) {
+    g_pick_cb = cb;
+    JNIEnv *env;
+    jclass cls;
+    jmethodID m = activity_method(&env, &cls, "pickGamePackage", "()V");
+    if (!m) { if (cb) cb(NULL); return; }
+    (*env)->CallStaticVoidMethod(env, cls, m);
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+void android_pick_game_keys(void (*cb)(const char *name)) {
+    g_pick_cb = cb;
+    JNIEnv *env;
+    jclass cls;
+    jmethodID m = activity_method(&env, &cls, "pickPackageKeys", "()V");
+    if (!m) { if (cb) cb(NULL); return; }
+    (*env)->CallStaticVoidMethod(env, cls, m);
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+static const char *call_string(const char *name, char *buf, size_t cap);
+const char *android_game_keys_name(void) {
+    static char name[256];
+    return call_string("gameKeysName", name, sizeof name);
+}
+
 const char *android_saved_game_folder(void) {
     static char name[512];
     JNIEnv *env;
@@ -226,4 +254,81 @@ JNIEXPORT void JNICALL Java_com_lasrecomp_android_LasActivity_nativeTranslationI
     const char *s = error ? (*env)->GetStringUTFChars(env, error, NULL) : NULL;
     if (g_translation_cb) g_translation_cb(s);
     if (s) (*env)->ReleaseStringUTFChars(env, error, s);
+}
+
+// A graphics driver error that stops the app (plat_fatal_notice): LasActivity's dialog - install a driver, go back to
+// the system's, or close - shown and waited for; the app restarts from there or closes. False: no dialog (no activity).
+bool android_driver_error_dialog(const char *text) {
+    JNIEnv *env;
+    jclass cls;
+    jmethodID m = activity_method(&env, &cls, "driverErrorDialog", "(Ljava/lang/String;)Z");
+    if (!m) return false;
+    jstring jt = (*env)->NewStringUTF(env, text);
+    jboolean r = (*env)->CallStaticBooleanMethod(env, cls, m, jt);
+    (*env)->DeleteLocalRef(env, jt);
+    (*env)->DeleteLocalRef(env, cls);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return false; }
+    return r;
+}
+
+// Where the game files go (LasActivity: the memory card's data folder, or internal storage)
+const char *android_sd_card_path(void) {
+    static char p[1024];
+    return call_string("sdCardPath", p, sizeof p);
+}
+
+const char *android_game_storage_root(void) {
+    static char p[1024];
+    return call_string("gameStorageRoot", p, sizeof p);
+}
+
+void android_set_game_storage(bool sd) {
+    JNIEnv *env;
+    jclass cls;
+    jmethodID m = activity_method(&env, &cls, "setGameStorage", "(Z)V");
+    if (!m) return;
+    (*env)->CallStaticVoidMethod(env, cls, m, (jboolean)sd);
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+// Saves to / from a Switch emulator's folder (LasActivity.transferSaves); cb gets "" (cancelled), "ok:<n>", "nosaves"
+// or an error, on another thread
+static void (*g_saves_cb)(const char *result);
+void android_transfer_saves(bool importing, const char *save_dir, void (*cb)(const char *result)) {
+    g_saves_cb = cb;
+    JNIEnv *env;
+    jclass cls;
+    jmethodID m = activity_method(&env, &cls, "transferSaves", "(ZLjava/lang/String;)V");
+    if (!m) { if (cb) cb("no activity"); return; }
+    jstring d = (*env)->NewStringUTF(env, save_dir);
+    (*env)->CallStaticVoidMethod(env, cls, m, (jboolean)importing, d);
+    (*env)->DeleteLocalRef(env, d);
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+JNIEXPORT void JNICALL Java_com_lasrecomp_android_LasActivity_nativeSavesDone(JNIEnv *env, jclass cls, jstring result) {
+    (void)cls;
+    const char *s = result ? (*env)->GetStringUTFChars(env, result, NULL) : NULL;
+    if (g_saves_cb) g_saves_cb(s ? s : "");
+    if (s) (*env)->ReleaseStringUTFChars(env, result, s);
+}
+
+// The player's Switch fonts copied into fonts_dir (LasActivity.importFonts); cb(ok, skipped) on another thread
+static void (*g_fonts_cb)(int ok, int skipped);
+void android_import_fonts(const char *fonts_dir, const char *known, void (*cb)(int ok, int skipped)) {
+    g_fonts_cb = cb;
+    JNIEnv *env;
+    jclass cls;
+    jmethodID m = activity_method(&env, &cls, "importFonts", "(Ljava/lang/String;Ljava/lang/String;)V");
+    if (!m) { if (cb) cb(0, 0); return; }
+    jstring d = (*env)->NewStringUTF(env, fonts_dir), k = (*env)->NewStringUTF(env, known);
+    (*env)->CallStaticVoidMethod(env, cls, m, d, k);
+    (*env)->DeleteLocalRef(env, d);
+    (*env)->DeleteLocalRef(env, k);
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+JNIEXPORT void JNICALL Java_com_lasrecomp_android_LasActivity_nativeFontsImported(JNIEnv *env, jclass cls, jint ok, jint skipped) {
+    (void)env, (void)cls;
+    if (g_fonts_cb) g_fonts_cb(ok, skipped);
 }

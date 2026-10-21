@@ -462,6 +462,15 @@ static void create_device(void) {
     g_vk.divisor = has_ext(ep, ne, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     if (g_vk.divisor) ext[n_ext++] = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
     g_vk.host_import = has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);  // guest heap as a GPU buffer (exec.c)
+#ifdef __ANDROID__
+    // Phones: the import pins all of the 3 GB heap. Samsung's Xclipse driver took it and then failed the first
+    // submission (VK_ERROR_UNKNOWN, Galaxy S26); Mali drivers have the extension too. The mirrored storage buffers
+    // Turnip uses run everywhere. LARECOMP_VK_HOST_IMPORT=1: the import where the driver offers it.
+    if (g_vk.host_import) {
+        const char *hi = getenv("LARECOMP_VK_HOST_IMPORT");
+        g_vk.host_import = hi && atoi(hi);
+    }
+#endif
     if (g_vk.host_import) ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
     maxwell_gmem_mirror = !g_vk.host_import;  // (exec.c mirror_table)
     {   // (shader.h) LARECOMP_VK_GMEM_ZERO=0 / LARECOMP_VK_GFIND_CACHE=0: the loads as before
@@ -1202,6 +1211,42 @@ static void present_game(void) {
 static bool menu_open(void) { extern bool menu_is_open(void); return menu_is_open(); }
 static uint32_t game_interval(void) { extern uint32_t g_game_interval; return g_game_interval; }
 
+// A frame of only the game's 16:9 UI box in a window of another shape (exec.c g_box_draw_frame): the target's rest is
+// another frame's picture - the bars are covered with the box's own edges, blurred and dimmed (one picture with the
+// game's, no flicker). The picture was drawn into (vx, vy, vw, vh) from the uv crop of b.
+static void bars_backdrop(VkCommandBuffer cb, TexBackend *b, double vx, double vy, double vw, double vh, const float crop[4],
+                          bool flip) {
+    extern uint64_t g_box_draw_frame, g_full_draw_frame;
+    extern void *g_box_rt;
+    extern float g_box_frac[4];
+    extern void vk_present_backdrop(VkCommandBuffer cb, float x, float y, float w, float h, const float uvr[4], bool flip,
+                                    float light);
+    static int on = -1;  // LARECOMP_BARS=0: the bars as the target has them
+    if (on < 0) on = !getenv("LARECOMP_BARS") || atoi(getenv("LARECOMP_BARS"));
+    if (!on || g_box_draw_frame != total_frames || g_full_draw_frame == total_frames || g_box_rt != (void *)b) return;
+    if (crop[2] <= 0 || crop[3] <= 0) return;
+    const float *f = g_box_frac;
+    double x0 = vx + (f[0] - crop[0]) / crop[2] * vw, x1 = vx + (f[1] - crop[0]) / crop[2] * vw;
+    double y0 = vy + (f[2] - crop[1]) / crop[3] * vh, y1 = vy + (f[3] - crop[1]) / crop[3] * vh;
+    float bw = f[1] - f[0], bh = f[3] - f[2], light = 0.42f;
+    if (x0 - vx >= 1) {  // left, from the box's left third; right, from its right third
+        float uv[4] = {f[0], f[2], bw * 0.3f, bh};
+        vk_present_backdrop(cb, (float)vx, (float)vy, (float)(x0 - vx), (float)vh, uv, flip, light);
+    }
+    if (vx + vw - x1 >= 1) {
+        float uv[4] = {f[1] - bw * 0.3f, f[2], bw * 0.3f, bh};
+        vk_present_backdrop(cb, (float)x1, (float)vy, (float)(vx + vw - x1), (float)vh, uv, flip, light);
+    }
+    if (y0 - vy >= 1) {  // (a taller window: above and below)
+        float uv[4] = {f[0], flip ? f[3] - bh * 0.3f : f[2], bw, bh * 0.3f};
+        vk_present_backdrop(cb, (float)x0, (float)vy, (float)(x1 - x0), (float)(y0 - vy), uv, flip, light);
+    }
+    if (vy + vh - y1 >= 1) {
+        float uv[4] = {f[0], flip ? f[2] : f[3] - bh * 0.3f, bw, bh * 0.3f};
+        vk_present_backdrop(cb, (float)x0, (float)y1, (float)(x1 - x0), (float)(vy + vh - y1), uv, flip, light);
+    }
+}
+
 void backend_present_gpu(NvnTexture *t);
 void backend_present(NvnTexture *t) {
     g_last_presented = t;
@@ -1256,6 +1301,7 @@ void backend_present_gpu(NvnTexture *t) {
         float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
         memcpy(g_shot_crop, crop, sizeof crop);
         vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
+        bars_backdrop(cb, b, vx, vy, vw, vh, crop, pv[0] > 0.5f);
         static long menu_at = -1;
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
         if (menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
@@ -1276,6 +1322,7 @@ void backend_present_gpu(NvnTexture *t) {
         if (gen && vk_frame_begin(black)) {  // the in-between frame: the next swapchain image, presented a refresh later
             float rect[4] = {(float)vx, (float)vy, (float)vw, (float)vh};
             fg_draw(vk_cmd(), g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height, b, rect, crop, pv[0] > 0.5f);
+            bars_backdrop(vk_cmd(), b, vx, vy, vw, vh, crop, pv[0] > 0.5f);
             extern bool fg_draws_overlays(void);  // (drawn from the presented picture: the window's overlays on top again)
             extern void menu_redraw(void *cmd);  // (the real frame's overlays again: no second UI frame - touch input)
             if (fg_draws_overlays()) menu_redraw((void *)vk_cmd());
@@ -1285,6 +1332,7 @@ void backend_present_gpu(NvnTexture *t) {
             // later - scrolling with a finger moves at 60 instead of with the game's frames
             cb = vk_cmd();
             vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
+            bars_backdrop(cb, b, vx, vy, vw, vh, crop, pv[0] > 0.5f);
             menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
             vk_frame_end(NULL);
         }

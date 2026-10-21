@@ -178,12 +178,21 @@ static const char *const GAME_FILES[] = {"exefs", "romfs", "romfs.bin", GAMELIB_
                                          ".zigcache", ".extract", "extract.log", "xci_secure", "nso_raw", "update_pfs",
                                          ".DS_Store"};
 
-// game_dir must be <data root>/extracted, a real folder (a dev worktree's symlinked extracted/ is refused)
+// The other data folder the game files may be in (Android: the memory card's; rt_paths_set_game_root)
+static char g_game_root[1024];
+void rt_paths_set_game_root(const char *root) { snprintf(g_game_root, sizeof g_game_root, "%s", root ? root : ""); }
+
+// game_dir must be <data root>/extracted (or <the game files' data folder>/extracted), a real folder (a dev
+// worktree's symlinked extracted/ is refused)
 static bool game_dir_ok(const char *game_dir) {
     char want[1100], got[1100];
     snprintf(want, sizeof want, "%s" SEP "extracted", g_root);
     if (!g_root[0] || is_link(game_dir) || !resolve(game_dir, got, sizeof got)) return false;
-    return path_eq(want, got);
+    if (path_eq(want, got)) return true;
+    if (!g_game_root[0]) return false;
+    snprintf(want, sizeof want, "%s" SEP "extracted", g_game_root);
+    char alt[1100];
+    return path_eq(resolve(want, alt, sizeof alt) ? alt : want, got);
 }
 
 bool rt_remove_game_file(const char *game_dir, const char *name) {

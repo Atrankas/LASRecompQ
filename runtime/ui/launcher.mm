@@ -290,7 +290,11 @@ static void set_job(const std::string &s, bool failed = false, const std::string
 enum { FAIL_NOT_FOUND = 1, FAIL_UNUSABLE, FAIL_COPY, FAIL_VERSION, FAIL_MISSING, FAIL_BUILD, FAIL_NOKEYS, FAIL_KEYS, FAIL_PACKAGE,
        FAIL_UPDATE_ONLY };
 static void set_failure(int k, int have = -1, const char *reason = NULL) {
+#ifdef __ANDROID__
+    static const char *const head[] = {"", "No game found there", "That file can't be used",
+#else
     static const char *const head[] = {"", "No game files found in that folder", "Those are game packages, not game files",
+#endif
                                        "Setup didn't finish", "Wrong version of the game", "Your game files are incomplete",
                                        "The game code didn't build", "Your keys are needed",
                                        "Your keys can't open the game", "The game package couldn't be read",
@@ -298,9 +302,9 @@ static void set_failure(int k, int have = -1, const char *reason = NULL) {
     static const char *const hint[] = {
         "",
 #ifdef __ANDROID__
-        "Choose the folder with your game: its .xci or .nsp (with your prod.keys), or its exefs and romfs folders.",
-        "LAS Recomp can't read compressed packages (.xcz / .nsz) or loose .nca files. Use the .xci or .nsp, or the "
-        "exefs and romfs folders.",
+        "Choose your game's .xci or .nsp file and your prod.keys - or a folder with its exefs and romfs folders.",
+        "LAS Recomp can't read compressed packages (.nsz / .xcz), loose .nca files or archives (.zip / .rar / .7z). "
+        "Choose the .xci or .nsp itself: unzip it first, or turn an .nsz back into an .nsp on a computer.",
 #else
         "Choose the folder that has the game's exefs and romfs folders in it.",
         "LAS Recomp needs the game's own files (the exefs and romfs folders), not .xci / .nsp / .nca files.",
@@ -310,13 +314,24 @@ static void set_failure(int k, int have = -1, const char *reason = NULL) {
         "Some of the game's files are missing - usually a copy or unzip that stopped partway. Copy the game files "
         "again so none are missing, then choose the folder again.",
         "Make sure there's about 2 GB free and try again. If it keeps happening, report it on GitHub.",
+#ifdef __ANDROID__
+        "Opening the .xci / .nsp needs the prod.keys dumped from your own Switch: choose it in the prod.keys row.",
+#else
         "Opening the .xci / .nsp needs the prod.keys dumped from your own Switch. Put it in the game's folder, or choose "
         "it when asked.",
+#endif
         "These keys don't open this game. Use the prod.keys dumped from your own Switch, from a system version at least "
         "as new as the game's.",
+#ifdef __ANDROID__
+        "The .xci / .nsp seems damaged or incomplete, or the file chosen isn't one. Dump or copy it again and choose it "
+        "again.",
+        "Choose the game itself (its .xci, or the base game's .nsp). Updates aren't needed: LAS Recomp uses version "
+        "1.0.0."};
+#else
         "The .xci / .nsp seems damaged or incomplete. Dump or copy it again and choose the folder again.",
         "Choose the folder with the game itself (its .xci, or the base game's .nsp). Updates aren't needed: LAS Recomp "
         "uses version 1.0.0."};
+#endif
     if (k < 1 || k > 10) return;
     if (k == FAIL_MISSING && have >= 0) {
         char b[320];
@@ -638,6 +653,30 @@ static void picked_android(const char *name) {
     const char *const files[] = {name, NULL};
     picked(NULL, files, 0);
 }
+// The game as a file (its .xci / .nsp) or a folder, and the prod.keys chosen for the file (LasActivity)
+static bool g_src_pkg;
+static std::string g_keys_name;
+static void refresh_game_choice(void) {
+    const char *k = android_game_keys_name();
+    pthread_mutex_lock(&g_lock);
+    g_src_pkg = k != NULL;
+    g_keys_name = k ? k : "";
+    pthread_mutex_unlock(&g_lock);
+}
+static void saves_done(const char *r) {  // (LasActivity's thread)
+    if (!r || !*r) return;  // (cancelled)
+    if (!strncmp(r, "ok:", 3)) {
+        char b[160];
+        snprintf(b, sizeof b, T("Saves copied (%d files)."), atoi(r + 3));
+        set_job(b);
+    } else if (!strcmp(r, "nosaves"))
+        set_job("No saves there", true, T("Choose the folder with savedata0.bin (the game's save folder in the emulator)."));
+    else set_job("The saves weren't copied", true, r);
+}
+static void picked_package(const char *name) {
+    picked_android(name);
+    refresh_game_choice();
+}
 #endif
 
 // ------------------------------------------------------------------ the user's own Nintendo fonts (not shipped)
@@ -696,6 +735,15 @@ static void import_fonts() {
     g_font_msg = std::to_string(ok) + T(" font file(s) imported") + (skipped ? ", " + std::to_string(skipped) + T(" not recognized") : "") +
                  T(". Used from the next game start.");
 }
+
+#ifdef __ANDROID__
+static void fonts_imported(int ok, int skipped) {  // (LasActivity's thread)
+    pthread_mutex_lock(&g_lock);
+    g_font_msg = std::to_string(ok) + T(" font file(s) imported") +
+                 (skipped ? ", " + std::to_string(skipped) + T(" not recognized") : "") + T(". Used from the next game start.");
+    pthread_mutex_unlock(&g_lock);
+}
+#endif
 
 static void remove_fonts() {
     for (auto n : FONT_STD) unlink((std::string("fonts/") + n).c_str());
@@ -1197,6 +1245,49 @@ static void prelaunch_tab(float sc) {
             ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
+#ifdef __ANDROID__
+    ImGui::Spacing();
+    ImGui::Spacing();
+    heading("Saves");
+    {
+        std::string sd = std::string(rt_data_root()) + "/save/save_0";
+        if (ImGui::Button(T("Import saves..."))) android_transfer_saves(true, sd.c_str(), saves_done);
+        ImGui::SameLine();
+        if (ImGui::Button(T("Export saves..."))) android_transfer_saves(false, sd.c_str(), saves_done);
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextDisabled("%s", T("Between LAS Recomp and a Switch emulator (yuzu, Eden, Citron, Sudachi, Ryujinx): choose the "
+                                    "emulator's save folder for Link's Awakening. Importing keeps the saves here in "
+                                    "save/backup-<date> first."));
+        pthread_mutex_lock(&g_lock);
+        std::string job = g_job;
+        bool failed = g_job_failed;
+        std::string hint = g_job_hint;
+        pthread_mutex_unlock(&g_lock);
+        if (!job.empty() && (job.rfind("Saves", 0) == 0 || job.rfind("No saves", 0) == 0 || job.rfind("The saves", 0) == 0))
+            ImGui::TextColored(failed ? ImVec4(1, 0.5f, 0.4f, 1) : ImVec4(0.45f, 0.95f, 0.55f, 1), "%s%s%s", T(job.c_str()),
+                               hint.empty() ? "" : ". ", T(hint.c_str()));
+        ImGui::PopTextWrapPos();
+    }
+    if (android_sd_card_path()) {
+        ImGui::Spacing();
+        ImGui::Spacing();
+        heading("Storage");
+        static int sd = -1, sd_at_start;
+        if (sd < 0) sd = sd_at_start = android_game_storage_root() != NULL;
+        ImGui::Text("%s", T("Game files storage"));
+        ImGui::SameLine();
+        if (ImGui::RadioButton(T("Internal storage"), sd == 0) && sd != 0) sd = 0, android_set_game_storage(false);
+        ImGui::SameLine();
+        if (ImGui::RadioButton(T("Memory card"), sd == 1) && sd != 1) sd = 1, android_set_game_storage(true);
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextDisabled("%s", T("Where the game files (about 6 GB) and the game code's build go. A memory card frees internal "
+                                    "storage; the game loads a little slower from a slow card. Changing it applies from the "
+                                    "next start of the app: set the game files up again there (delete the ones here first to "
+                                    "free their space)."));
+        if (sd != sd_at_start) ImGui::TextColored(gold, "%s", T("Restart LAS Recomp to use it."));
+        ImGui::PopTextWrapPos();
+    }
+#endif
     ImGui::Spacing();
     ImGui::Spacing();
     heading("Game font");
@@ -1212,9 +1303,22 @@ static void prelaunch_tab(float sc) {
                               "nintendo_udsg-r_ko_003) and nintendo_ext_003.bfttf (button icons). "
                               ".ttf versions with the same names work too."));
     ImGui::PopTextWrapPos();
-    if (!g_font_msg.empty()) ImGui::Text("%s", T(g_font_msg.c_str()));
+    pthread_mutex_lock(&g_lock);
+    std::string font_msg = g_font_msg;  // (set from the Android picker's thread too)
+    pthread_mutex_unlock(&g_lock);
+    if (!font_msg.empty()) ImGui::Text("%s", T(font_msg.c_str()));
+#ifdef __ANDROID__
+    if (ImGui::Button(T("Import fonts"))) {
+        std::string known;
+        for (auto n : FONT_STD) known += std::string(n) + "\n";
+        for (auto n : FONT_LANG) known += std::string(n) + "\n";
+        for (auto n : FONT_EXT) known += std::string(n) + "\n";
+        android_import_fonts((std::string(rt_data_root()) + "/fonts").c_str(), known.c_str(), fonts_imported);
+    }
+#else
     static const SDL_DialogFileFilter font_f[] = {{"Switch fonts", "bfttf;ttf"}};
     if (ImGui::Button(T("Import fonts"))) SDL_ShowOpenFileDialog(picked_fonts, NULL, g_launcher_win, font_f, 1, NULL, true);
+#endif
     if (fs || fl || fe) {
         ImGui::SameLine();
         if (ImGui::Button(T("Use substitute font"))) remove_fonts();
@@ -1228,6 +1332,7 @@ extern "C" void launcher_run(const char *root) {
         const char *saved = android_saved_game_folder();
         if (saved) g_src = saved;
     }
+    refresh_game_choice();
 #endif
     g_start_screen = 1;
     static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
@@ -1774,13 +1879,27 @@ extern "C" void launcher_run(const char *root) {
                 std::string src_d = T("The folder with your own game folders (exefs/romfs) of The Legend of Zelda: Link's "
                                       "Awakening for Nintendo Switch, version 1.0.0. The game isn't included with LAS Recomp.");
 #ifdef __ANDROID__
-                src_d = T("The folder with your own copy of The Legend of Zelda: Link's Awakening for Nintendo Switch, "
-                          "version 1.0.0: its .xci or .nsp together with the prod.keys from your Switch (asked for if it "
-                          "isn't there), or its extracted exefs and romfs folders. The game isn't included with LAS Recomp.");
-                src_d += T("\n\nOr copy exefs and romfs from a computer over USB into ") + std::string(rt_data_root()) +
+                pthread_mutex_lock(&g_lock);
+                bool src_pkg = g_src_pkg;
+                std::string keys_name = g_keys_name;
+                pthread_mutex_unlock(&g_lock);
+                src_d = T("Step 1: choose your own copy of The Legend of Zelda: Link's Awakening for Nintendo Switch, "
+                          "version 1.0.0 - its .xci or .nsp file. The game isn't included with LAS Recomp.");
+                std::string keys_d = T("Step 2: choose the prod.keys file dumped from your own Switch. It opens the .xci / "
+                                       ".nsp; it's asked for right after the game file.");
+                std::string dir_d = T("Instead of a game file: a folder with the game's extracted exefs and romfs folders.");
+                dir_d += T("\n\nOr copy exefs and romfs from a computer over USB into ") + std::string(rt_data_root()) +
                          T("/extracted and choose Set up.");
+                if (!src.empty() && src_pkg) src_d += T("\n\nChosen: ") + src;
+                if (!keys_name.empty()) keys_d += T("\n\nChosen: ") + keys_name;
+                if (!src.empty() && !src_pkg) dir_d += T("\n\nChosen: ") + src;
+                std::string pkg_v = src.empty() || !src_pkg ? "Choose..." : "Selected";
+                std::string keys_v = keys_name.empty() ? "Choose..." : "Selected";
+                std::string dir_v = src.empty() || src_pkg ? "Choose..." : "Selected";
 #endif
+#ifndef __ANDROID__
                 if (!src.empty()) src_d += T("\n\nChosen: ") + src;
+#endif
                 // the step that's running / its result, under the rows and in the Set up row's explanation
                 const std::string &job_line = job;
                 std::string ex_d = T("Copies the game files LAS Recomp needs and recompiles the game from them. This only "
@@ -1795,19 +1914,49 @@ extern "C" void launcher_run(const char *root) {
                     if (focus_first > 0 && focus_first--) ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
                 };
                 opt_begin("##files", sc);
+#ifdef __ANDROID__
+                {   // the game files (~6 GB, and the game code's build) on internal storage or a memory card
+                    static int have_sd = -1, sd, sd_at_start;
+                    if (have_sd < 0) {
+                        have_sd = android_sd_card_path() != NULL;
+                        sd = sd_at_start = android_game_storage_root() != NULL;
+                    }
+                    if (have_sd) {
+                        opt_section("Storage");
+                        static const char *const where[] = {"Internal storage", "Memory card"};
+                        std::string sd_d = T("Where the game files (about 6 GB) and the game code's build go. A memory card "
+                                             "frees internal storage; the game loads a little slower from a slow card. "
+                                             "Changing it applies from the next start of the app: set the game files up "
+                                             "again there (delete the ones here first to free their space).");
+                        if (sd != sd_at_start) sd_d += T("\n\nRestart LAS Recomp to use it.");
+                        if (busy) opt_disable_next();
+                        if (opt_choice("Game files storage", &sd, where, 2, 0, sd_d.c_str())) android_set_game_storage(sd != 0);
+                    }
+                }
+#endif
                 if (!ready) {
                     opt_section("Your copy of the game");
                     if (busy) opt_disable_next();
 #ifdef __ANDROID__
-                    if (opt_action("Game files folder", src_v.c_str(), src_d.c_str(), true)) android_pick_game_folder(picked_android);
+                    if (opt_action("Game file (.xci / .nsp)", pkg_v.c_str(), src_d.c_str(), true))
+                        android_pick_game_package(picked_package);
+                    check_left_of_value(pkg_v);
+                    first_row();
+                    if (busy) opt_disable_next();
+                    if (opt_action("prod.keys", keys_v.c_str(), keys_d.c_str(), true)) android_pick_game_keys(picked_package);
+                    check_left_of_value(keys_v);
+                    if (busy) opt_disable_next();
+                    if (opt_action("Or: extracted game folder", dir_v.c_str(), dir_d.c_str(), true))
+                        android_pick_game_folder(picked_package);
+                    check_left_of_value(dir_v);
                     bool have_files = in_place_files(g_root);
 #else
                     if (opt_action("Game files folder", src_v.c_str(), src_d.c_str(), true))
                         SDL_ShowOpenFolderDialog(picked, NULL, win, NULL, false);
                     bool have_files = false;
-#endif
                     check_left_of_value(src_v);
                     first_row();
+#endif
                     opt_section("Set up");
                     if (busy || (src.empty() && !have_files && !check_copied_files(g_root).empty())) opt_disable_next();
                     bool resume = !busy && src.empty() && resumable_build();
@@ -1848,6 +1997,21 @@ extern "C" void launcher_run(const char *root) {
                         if (opt_action("Cancel", "", "Keeps the game files.", true)) g_confirm_delete = false;
                     }
                 }
+#ifdef __ANDROID__
+                if (!busy) {  // the game's saves to and from a Switch emulator (LasActivity.transferSaves)
+                    opt_section("Saves");
+                    std::string sd = std::string(rt_data_root()) + "/save/save_0";
+                    if (opt_action("Import saves...", "", T("Copies the saves from a Switch emulator into LAS Recomp: choose "
+                                   "the emulator's save folder for Link's Awakening (yuzu, Eden, Citron, Sudachi: "
+                                   "nand/user/save/0000000000000000/<user>/01006BB00C6F0000; Ryujinx: bis/user/save/<id>/0). "
+                                   "The saves here now are kept in save/backup-<date> first."), true))
+                        android_transfer_saves(true, sd.c_str(), saves_done);
+                    if (opt_action("Export saves...", "", T("Copies LAS Recomp's saves into a folder you choose - an "
+                                   "emulator's save folder for Link's Awakening, to go on playing there (close the "
+                                   "emulator first)."), true))
+                        android_transfer_saves(false, sd.c_str(), saves_done);
+                }
+#endif
                 if (!busy && has_build_cache()) {
                     opt_section("Build cache");
                     if (opt_action("Clear build cache", "", "Removes the saved game-code build files. The next setup compiles "

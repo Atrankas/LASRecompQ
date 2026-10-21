@@ -265,6 +265,18 @@ extern "C" void controls_tab_draw(float scale) {
         g_sub = true, g_focus = FOCUS_DEVICE, g_in_right = false;
     }
     take_focus(FOCUS_CONFIGURE);
+    {
+        static const char *const face[] = {"Switch (by position)", "Xbox (A = A)"};
+        int v = bind_face_by_label() ? 1 : 0;
+        if (opt_choice("Face buttons", &v, face, 2, 0,
+                       "Which controller button is the game's A, B, X and Y. Switch: by position, as on a Switch - A is "
+                       "the right button, B the bottom one (on an Xbox-style pad: A and B swapped). Xbox: by the letters "
+                       "printed on an Xbox-style pad or handheld - A is the bottom button (Cross on a PlayStation pad). "
+                       "The button icons in the game follow.")) {
+            bind_set_face_by_label(v != 0);
+            settings_save();
+        }
+    }
     if (opt_toggle("Allow background inputs", &g_settings.bg_input, false,
                    "Controllers keep working while another window is in front. macOS may ask for Input Monitoring "
                    "permission."))
@@ -275,6 +287,14 @@ extern "C" void controls_tab_draw(float scale) {
         static const char *const modes[] = {"Auto (no controller)", "Always", "Off"};
         opt_choice("Show", &g_settings.touch_mode, modes, 3, 0,
                    "On-screen buttons for touch screens. The middle button at the top opens this menu.");
+        {
+            static const char *const which[] = {"What the game uses", "All"};
+            int v = g_settings.touch_all ? 1 : 0;
+            if (opt_choice("Buttons", &v, which, 2, 0,
+                           "What the game uses: only the buttons that do something right now - B once Link has the sword, "
+                           "R with the shield, X / Y with the items you equip. All: every button, all the time."))
+                g_settings.touch_all = v != 0;
+        }
         float sz = roundf(g_settings.touch_size * 100), op = roundf(g_settings.touch_opacity * 100);
         if (opt_slider("Size", &sz, 60, 160, 5, 100, "%.0f%%", "The on-screen buttons' size.")) g_settings.touch_size = sz / 100;
         if (opt_slider("Opacity", &op, 15, 100, 5, 60, "%.0f%%", "How see-through the on-screen buttons are.")) g_settings.touch_opacity = op / 100;

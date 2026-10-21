@@ -24,6 +24,7 @@
 #include <unwind.h>
 
 #include "../platform.h"
+#include "android.h"
 
 void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
 
@@ -61,9 +62,19 @@ static _Atomic uint8_t *wt_state;  // per heap page
 static _Atomic int wt_on = -1;      // (set once wt_state exists: other threads test it before touching the table)
 #define WT_PAGE 4096ull
 
+// A heap fault write tracking couldn't resolve (the page stayed read-only: an mprotect the system refused) left this
+// marker in the data folder (crash_handler): the runs after it go without tracking - every range then counts as
+// written, a little slower but nothing protected. (Reports: Poco X3 Pro, crashes in the game's allocator mutex at
+// HEAP_BASE+0x48 on starting the game.) LARECOMP_WRITE_TRACKING=1 turns it on again regardless.
+static char g_wt_marker[1100];
+
 static void wt_setup(void) {
     const char *e = getenv("LARECOMP_WRITE_TRACKING");
     bool on = (!e || atoi(e)) && sysconf(_SC_PAGESIZE) == (long)WT_PAGE;
+    if (on && !e && g_wt_marker[0] && access(g_wt_marker, F_OK) == 0) {
+        on = false;
+        fprintf(stderr, "[mem] heap write tracking off (a heap fault in an earlier run)\n");
+    }
     if (on) wt_state = calloc(HEAP_MAX / WT_PAGE, 1);
     atomic_store(&wt_on, on && wt_state ? 1 : 0);
 }
@@ -118,7 +129,23 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
 static bool wt_fault(uint64_t fa) {
     if (atomic_load(&wt_on) <= 0 || fa < HEAP_BASE || fa - HEAP_BASE >= HEAP_MAX) return false;
     uint64_t p = (fa - HEAP_BASE) / WT_PAGE;
-    if (mprotect((void *)(uintptr_t)(HEAP_BASE + p * WT_PAGE), WT_PAGE, PROT_READ | PROT_WRITE) != 0) return false;
+    void *pg = (void *)(uintptr_t)(HEAP_BASE + p * WT_PAGE);
+    // (an mprotect can fail for a moment - EAGAIN, or ENOMEM with the mapping split into too many pieces: tried
+    // again, then the page's whole 64 KB neighbourhood, which merges pieces back)
+    int r = -1;
+    for (int i = 0; i < 3 && r != 0; i++) r = mprotect(pg, WT_PAGE, PROT_READ | PROT_WRITE);
+    if (r != 0) {
+        uint64_t lo = (fa - HEAP_BASE) & ~0xFFFFull;
+        r = mprotect((void *)(uintptr_t)(HEAP_BASE + lo), 0x10000, PROT_READ | PROT_WRITE);
+        if (r == 0)
+            for (uint64_t q = lo / WT_PAGE; q < (lo + 0x10000) / WT_PAGE; q++) atomic_store(&wt_state[q], WT_WRITTEN);
+    }
+    if (r != 0) {
+        char m[96];
+        int n = snprintf(m, sizeof m, "[mem] write tracking: mprotect %p failed, errno %d\n", pg, errno);
+        write(2, m, n > 0 ? (size_t)n : 0);
+        return false;
+    }
     atomic_store(&wt_state[p], WT_WRITTEN);
     return true;
 }
@@ -193,6 +220,7 @@ static void log_start(void) {
     if (dir) {
         char prev[1100];
         snprintf(g_log_path, sizeof g_log_path, "%s/lasrecomp.log", dir);
+        snprintf(g_wt_marker, sizeof g_wt_marker, "%s/.no_write_tracking", dir);
         snprintf(prev, sizeof prev, "%s/lasrecomp.prev.log", dir);
         rename(g_log_path, prev);
         g_log_file = fopen(g_log_path, "w");
@@ -232,6 +260,9 @@ void plat_fatal_notice(void) {
     fflush(stderr);
     char text[1600];
     rt_crash_explain(text, sizeof text, g_log_path[0] ? g_log_path : "logcat (tag LASRecomp)");
+    // (a graphics driver the game can't run on: the player can install one right here - the settings that have that
+    // row are out of reach when the driver fails at the start screen)
+    if (strstr(text, "graphics driver") && android_driver_error_dialog(text)) return;
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp", text, NULL);
 }
 
@@ -281,6 +312,15 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     uint64_t pc = uc->uc_mcontext.pc, lr = uc->uc_mcontext.regs[30];
     if (sig == SIGSEGV && si->si_code == SEGV_ACCERR && wt_fault(fa)) return;
     if (rt_fault_watch(fa, pc)) return;
+    if (sig == SIGSEGV && fa >= HEAP_BASE && fa - HEAP_BASE < HEAP_MAX) {  // (see wt_setup)
+        char m[96];
+        int n = snprintf(m, sizeof m, "[mem] heap fault, si_code %d, tracking %d\n", si->si_code, (int)atomic_load(&wt_on));
+        write(2, m, n > 0 ? (size_t)n : 0);
+        if (atomic_load(&wt_on) > 0 && g_wt_marker[0]) {
+            int fd = open(g_wt_marker, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (fd >= 0) close(fd);
+        }
+    }
     char what[32];
     snprintf(what, sizeof what, "signal %d", sig);
     rt_fault_report(what, fa, pc, lr);  // (ends in abort(): the system's tombstone follows)

@@ -13,8 +13,15 @@ _Static_assert(PADB_LTRIGGER == SDL_GAMEPAD_BUTTON_COUNT, "trigger pseudo-button
 // Defaults: Nintendo layout by position (east = A, south = B, north = X, west = Y), triggers = ZL / ZR;
 // keyboard WASD left stick, arrows d-pad, K/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR, Enter / Backspace = Plus /
 // Minus, F / numpad 0 = stick clicks, numpad 8/5/4/6 right stick.
+// Android: by the letters (A = the bottom button, bind_set_face_by_label) - the pads and handhelds there are
+// Xbox-style, and by position read as A and B swapped (issue #3).
+#ifdef __ANDROID__
+#define DEF_FACE SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_WEST, SDL_GAMEPAD_BUTTON_NORTH
+#else
+#define DEF_FACE SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_NORTH, SDL_GAMEPAD_BUTTON_WEST
+#endif
 #define DEF_PAD { \
-    SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_NORTH, SDL_GAMEPAD_BUTTON_WEST, \
+    DEF_FACE, \
     SDL_GAMEPAD_BUTTON_LEFT_STICK, SDL_GAMEPAD_BUTTON_RIGHT_STICK, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, \
     SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PADB_LTRIGGER, PADB_RTRIGGER, SDL_GAMEPAD_BUTTON_START, SDL_GAMEPAD_BUTTON_BACK, \
     SDL_GAMEPAD_BUTTON_DPAD_LEFT, SDL_GAMEPAD_BUTTON_DPAD_UP, SDL_GAMEPAD_BUTTON_DPAD_RIGHT, SDL_GAMEPAD_BUTTON_DPAD_DOWN}
@@ -100,6 +107,24 @@ void bind_reset(int dev) {
     else memcpy(g_bind_key, k_def_key, sizeof g_bind_key);
     LOG("[input] %s bindings reset to the defaults\n", dev == BIND_DEV_PAD ? "controller" : "keyboard");
     result(5, dev, -1, -1);
+}
+
+// Face buttons by their letters on an Xbox-style pad (and the matching places on a PlayStation one): the button
+// labelled A (south) is the Switch's A, B (east) its B, X (west) X, Y (north) Y - instead of by position (the Switch's
+// A on the right). Handhelds (AYN, Retroid...) and Xbox pads read "A swapped with B" by position (issue #3).
+static const int16_t k_face_label[4] = {SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_WEST,
+                                        SDL_GAMEPAD_BUTTON_NORTH};
+bool bind_face_by_label(void) {
+    return g_bind_pad[BIND_A] == k_face_label[0] && g_bind_pad[BIND_B] == k_face_label[1] &&
+           g_bind_pad[BIND_X] == k_face_label[2] && g_bind_pad[BIND_Y] == k_face_label[3];
+}
+void bind_set_face_by_label(bool on) {
+    static const int16_t by_pos[4] = {SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_NORTH,
+                                      SDL_GAMEPAD_BUTTON_WEST};
+    const int16_t *f = on ? k_face_label : by_pos;
+    g_bind_pad[BIND_A] = f[0], g_bind_pad[BIND_B] = f[1], g_bind_pad[BIND_X] = f[2], g_bind_pad[BIND_Y] = f[3];
+    LOG("[input] face buttons %s\n", on ? "by label (A = the bottom button)" : "by position (A = the right button)");
+    result(5, BIND_DEV_PAD, -1, -1);
 }
 
 bool bind_is_default(int dev) {

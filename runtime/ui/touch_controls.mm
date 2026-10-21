@@ -144,13 +144,17 @@ extern "C" bool touch_visible(void) {
     if (g_settings.touch_mode == 2) return false;
     if (g_settings.touch_mode == 1) return true;
     // Auto: on a touch screen, while no controller is in use - a touch after its last button or stick brings them back
-    static int touchscreen = -1;
-    if (touchscreen < 0) {
+    // (Android: a phone has one, and SDL may list it only from its first touch on - a "no" kept from the start hid
+    // the controls for good on such phones; elsewhere asked again until there is one)
+#ifndef __ANDROID__
+    static bool touchscreen;
+    if (!touchscreen) {
         int n = 0;
         SDL_free(SDL_GetTouchDevices(&n));
         touchscreen = n > 0;
     }
     if (!touchscreen) return false;
+#endif
     return !input_gamepad_connected() || g_last_touch > g_last_pad;
 }
 
@@ -483,6 +487,11 @@ static uint32_t g_items_word;
 static int g_slot_x, g_slot_y;  // (0 / 1, the sword's and shield's slots, never sit on X / Y: an empty one reads 0)
 static uint32_t wanted(int ctx) {
     uint32_t m = kShown[ctx];
+    if (ctx == X_PLAY && g_settings.touch_all) {  // (every button, whatever Link has)
+        for (int i = 0; i < C_COUNT; i++)
+            if ((i == C_ZL || i == C_ZR) && g_settings.touch_moved[i] && !g_settings.touch_hidden[i]) m |= M(i);
+        return m;
+    }
     if (ctx == X_PLAY) {
         g_items_word = LD32(GUEST(GA_LIVE_SAVE) + 0x5568);
         g_slot_y = LD8(GUEST(GA_LIVE_SAVE) + 0x5562), g_slot_x = LD8(GUEST(GA_LIVE_SAVE) + 0x5563);
@@ -658,7 +667,9 @@ extern "C" void touch_draw(ImDrawList *dl, float w, float h, ImFont *font) {
     }
     if (ctx == X_TITLE && !g_editing) {  // what a tap does
         const char *t = g_title_step == 1 ? T("Tap a file to play") : T("Tap to start");
-        label_text(dl, font, 40 * th, ImVec2(w * 0.5f, h - 40 * th), t, IM_COL32(255, 255, 255, 255), true);
+        // (the title screen: between its "Press L + R" and the copyright line at the bottom, which it covered)
+        float ty = g_title_step == 1 ? h - 40 * th : h * 0.835f;
+        label_text(dl, font, 40 * th, ImVec2(w * 0.5f, ty), t, IM_COL32(255, 255, 255, 255), true);
     }
     if ((want & 1) && (g_editing || !hidden(C_STICK))) {
         const Control &s = g_ctl[C_STICK];

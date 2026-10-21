@@ -472,7 +472,7 @@ static bool toggle(const char *label, bool *v) {
 }
 
 #ifdef __ANDROID__
-// ---- the GPU driver (Adreno): the system's or one the player installed (GpuDrivers.java). The Vulkan driver is chosen
+// ---- the GPU driver (any GPU): the system's or one the player installed (GpuDrivers.java). The Vulkan driver is chosen
 // before anything is drawn, so a change applies at the next start. The Java side is asked once, and after a change.
 static std::atomic<bool> g_driver_reread{true};
 static pthread_mutex_t g_driver_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -504,8 +504,9 @@ static void gpu_driver_rows(void) {
     const char *failed;
     bool active = vk_gpu_driver_custom(&failed);
     std::string d = T("The Vulkan driver the game renders with. System: your device's own. An installed driver (such as "
-                      "Mesa Turnip for Adreno) can be faster or fix glitches - or be slower; one that doesn't start is "
-                      "replaced by System at the next start.\n\nChanges apply at the next start of the app. Running now: ");
+                      "Mesa Turnip for Adreno or Mesa PanVK for Mali) can be faster or fix glitches - or be slower; one "
+                      "that doesn't start is replaced by System at the next start.\n\nChanges apply at the next start of "
+                      "the app. Running now: ");
     d += active ? (name.empty() ? T("Turnip (built in)") : name) : T("System");  // (no installed one: the APK's own runs)
     if (failed) d += std::string(".\n\n") + failed + T(" didn't start: System runs instead");
     d += ".";
@@ -612,6 +613,12 @@ static void tab_display(void) {
                "and shown a refresh later. It pauses by itself when the game can't hold its 30. Takes effect at the "
                "next start of the app.");
 #endif
+    static const char *frn[] = {"Auto", "60 fps (native)", "30 fps"};
+    opt_choice("Frame rate", &g_settings.frame_rate, frn, 3, FRAME_RATE_AUTO,
+               "The game's own frame rate. Auto: 60 while your device keeps up, else the game's 30 (with frame "
+               "generation, 60 on the screen). 60 fps (native): always the game's 60 fps mode - smoothest on a fast "
+               "device; one that can't keep up plays in slow motion, then lower the resolution. 30 fps: always the "
+               "game's 30 - cooler and easier on the battery.");
 #ifdef __ANDROID__
     static const char *pwr[] = {"Balanced", "Maximum performance", "GPU performance"};
     opt_choice("Power", &g_settings.power_mode, pwr, 3, 0,
@@ -763,6 +770,14 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     static bool was_open, was_pad;
     bool pad = g_last_pad.load(), appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
     was_open = true, was_pad = pad;
+#ifdef __ANDROID__
+    // a phone without a controller: big keys on the screen to tap (the system keyboard over the game was easy to miss
+    // and had no way to confirm: players couldn't get past naming Link); a hardware keyboard still types into them
+    if (!pad) {
+        int r = osk_keys(g_kbd_text, sizeof g_kbd_text, g_kbd_max, appearing, scale, g_font_big, true, true);
+        if (r) g_kbd = r > 0 ? 2 : 3;
+    } else
+#endif
     if (!pad) {  // keyboard: type straight into the field
         if (appearing) ImGui::SetKeyboardFocusHere();
         ImGui::SetNextItemWidth(-1);
