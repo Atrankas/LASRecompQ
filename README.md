@@ -52,7 +52,8 @@ Faster phones (Snapdragon 8 Gen 1 and newer) should have room for higher resolut
   the sword, R with the shield, L with the Pegasus Boots, X / Y with the items you equip, each showing the game's own
   item icon. On the title screen a tap starts the game, on the file select a tap on a file loads it, on the Items page
   a tap on an item selects it.
-- **Your layout**: drag any button, resize or hide it (Settings > Controls > Edit touch layout).
+- **Your layout**: drag any button, resize or hide it (Settings > Controls > Edit touch layout). The stick can follow
+  your thumb or stay fixed in its place (Settings > Controls > Stick).
 - **Controllers**: Bluetooth / USB controllers are supported through SDL3 and play as on the Switch (not yet tested
   on the phone above - reports welcome); the touch controls hide while one is in use and come back with a touch. Face buttons go by their letters (A = the
   bottom button) by default, or by position as on a Switch (Settings > Controls > Face buttons); the in-game button
