@@ -1,5 +1,6 @@
 // User settings (larecomp.ini next to the executable's working directory), edited from the in-game menu.
 #pragma once
+#include "cosmetic_colour.h"
 #include <stdbool.h>
 
 enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
@@ -18,6 +19,7 @@ enum { AA_OFF = 0, AA_SMAA = 1 };
 enum { PROMPTS_AUTO = 0, PROMPTS_NINTENDO = 1, PROMPTS_XBOX = 2, PROMPTS_PLAYSTATION = 3 };
 // Which face button confirms in our own menus (runtime/ui/pad_nav.mm); the game's input is never affected
 enum { MENU_CONFIRM_GAME = 0, MENU_CONFIRM_CONTROLLER = 1 };
+enum { TIMER_POS_LEFT = 0, TIMER_POS_RIGHT = 1 };  // the run timer's corner (bottom left / right)
 enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 /* explored, all with the Map */ };
 // System language served to the game (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
 // the game picks its text language from it, as it would from the Switch's own system setting. LANG_AUTO follows the
@@ -34,7 +36,9 @@ typedef struct {
     int aspect;          // ASPECT_*: unlocked = fill the window (wider/taller views), original = 16:9 with bars
     bool fullscreen;
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_X125 / RES_X150 (1.25x / 1.5x), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
+    bool res_auto;       // never chosen: the default for this GPU (settings_resolve_defaults); saved as "auto"
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)
+    bool upscaler_auto;  // never chosen: the default for this GPU (settings_resolve_defaults); saved as "auto"
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect
@@ -73,9 +77,20 @@ typedef struct {
     bool walk_speed_dungeons;  // walk speed also indoors: houses, caves, dungeons (Gameplay tab, under Walk speed)
     bool diff_ohko;      // any hit kills
     bool diff_hero;      // Hero Mode flag forced on in the loaded save (2x damage, no recovery hearts)
-    // cosmetics (runtime/ui/cosmetics.mm; applied live by runtime/nvn/texpatch.c), never part of a seed
-    int tunic;           // index into g_tunic_colours (0 = Default: the game's / the seed's own)
-    int hearts;          // index into g_heart_colours (0 = Default red)
+    // cosmetics (Cosmetics tab, runtime/ui/menu.mm), live, never part of a seed: colour rows of the shared palette
+    // (runtime/cosmetic_colour.h; Default = the game's own, for the tunic also the seed's)
+    CosColour tunic, hearts;  // runtime/nvn/texpatch.c (tunic map, heart tints)
+    CosColour hair, shield;   // runtime/nvn/recolour_link.c
+    CosColour skin;           // runtime/nvn/texpatch.c skin_apply
+    CosColour leaves, grass;  // the overworld's foliage, runtime/nvn/recolour_seasons.c
+    CosColour sand;           // the beaches, the desert, the sandy south (recolour_seasons.c)
+    int enemy_colours;        // 0 Off, 1 Random per seed, 2 Random every load (runtime/nvn/recolour_enemies.c)
+    int screen_filter;        // 0 Off, 1 Game Boy, 2 Game Boy Color, 3 Grayscale (runtime/nvn/screen_filter.h)
+    // speedrun (Gameplay tab; runtime/hle/run_timer.c, runtime/livesplit.c)
+    bool timer;            // the in-game run timer in the corner (game time: level loads don't count)
+    int timer_pos;         // TIMER_POS_*: which bottom corner it sits in
+    bool livesplit;        // drive LiveSplit (its Server component) over TCP: start, splits, game time
+    char livesplit_host[64];  // host:port of the LiveSplit Server ("localhost:16834")
     // touch screens (runtime/ui/touch_controls.mm)
     int touch_mode;      // 0 Auto (while no controller is connected), 1 Always, 2 Off
     float touch_opacity; // 0.15 .. 1
@@ -88,16 +103,29 @@ typedef struct {
     float touch_scale[TOUCH_NCTL];
     bool touch_hidden[TOUCH_NCTL];
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
+    char rando_options[48];  // the Randomizer tab's New seed options: a seed ID without its random part (empty = defaults)
 } Settings;
 
-enum { N_TUNIC_COLOURS = 13, N_HEART_COLOURS = 9 };
-extern const char *const g_tunic_colours[N_TUNIC_COLOURS];
-extern const char *const g_heart_colours[N_HEART_COLOURS];
+
+enum { N_ENEMY_COLOUR_MODES = 3, N_SCREEN_FILTERS = 4 };
+extern const char *const g_screen_filters[N_SCREEN_FILTERS];  // (the menu's names)
+extern const char *const g_enemy_colour_modes[N_ENEMY_COLOUR_MODES];  // (the menu's names)
 
 extern Settings g_settings;
 
 void settings_load(void);
 void settings_save(void);
+// At device init: the defaults that depend on the GPU. integrated (Vulkan: an integrated GPU; never on macOS): plain
+// bilinear upscaling instead of the sharp upscaler, whose pass at the window's size costs as much as the game's frame
+// there (UHD 770: FSR 1 + SMAA 8 ms of GPU per frame at 1080p, 20 ms at 4K), and Dynamic resolution instead of Match
+// display. A player's own choice is kept. Anti-aliasing is off by default everywhere. LARECOMP_INTEGRATED=0/1 (test):
+// treat the GPU as dedicated / integrated.
+void settings_resolve_defaults(bool integrated);
+extern int g_default_upscaler;  // UPSCALE_*: what the menu shows as the default
+extern int g_default_res_mode;  // RES_*: likewise
+// An integrated GPU (as settings_resolve_defaults was told): the fixed 1x renders 1280x720 there, what the game itself
+// picked on such a GPU (runtime/nvn/output_scale.c)
+extern bool g_gpu_integrated;
 // The language code to serve the game ("es", "en-US", ...): the setting, or the host locale for LANG_AUTO
 const char *settings_language(void);
 // That code's name for the menu ("Spanish")

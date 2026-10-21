@@ -564,6 +564,18 @@ int rt_shadow_link_appear(uint64_t o) {  // (SHADOW_LINK_APPEAR_SITE: 1 = the re
     return 1;
 }
 
+// His music (SHADOW_LINK_BGM_SITE): his code starts BGM_PANEL_SHADOW_LINK through Dampe's chamber manager (the level's
+// music held until his defeat). Only the chamber is his; in seeds, everywhere else the area's own music plays on.
+int rt_shadow_link_bgm(void) {  // (1 = the call is skipped)
+    extern const char *rando_seed_dir(void);
+    uint64_t ps = LD64(GUEST(GA_PLAYER_STATUS_PTR));
+    if (!rando_seed_dir() || !ps || !strncmp((const char *)(uintptr_t)ps, "Panel", 5)) return 0;  // (Dampe's chamber: as is)
+    static uint64_t logged;
+    uint64_t f = renderer_present_count();
+    if (f - logged > 600) LOG("[miniboss] f%llu Shadow Link: no chamber music here\n", (unsigned long long)f), logged = f;
+    return 1;
+}
+
 static void shadow_link_sign(Cpu *c, uint64_t o) {
     static uint64_t mem;  // ({"Other", 5}, {"Sign", 4}: the tailor's channel and animation names)
     if (!mem) mem = (uint64_t)(uintptr_t)hle_alloc(0x20);

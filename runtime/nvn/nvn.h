@@ -32,6 +32,7 @@ typedef struct NvnTexture {
     void *backend;  // renderer-side texture
     uint64_t debug_id;
     uint32_t pool_refs;  // texture pool entries that name it (cleared when it is finalized: runtime/nvn/objects.c)
+    bool format_views;   // named through a view in a format the backend can only give with a flag (Metal: PixelFormatView)
     char label[64];
 } NvnTexture;
 
@@ -48,6 +49,13 @@ typedef struct {
     uint32_t format, target, ds_mode;
     uint8_t swizzle[4];
 } NvnTextureView;  // our layout of the guest NVNtextureView (0x28 bytes)
+
+// A view naming a texture (pool entry, render target, clear, copy): one in another format is told to the backend before
+// the texture is used through it.
+void backend_texture_view_format(NvnTexture *tex, uint32_t format);  // (runtime/nvn/metal.m, vulkan/textures.c)
+static inline void nvn_texture_note_view(NvnTexture *t, const NvnTextureView *v) {
+    if (t && v && (v->setmask & 4) && v->format != t->format) backend_texture_view_format(t, v->format);
+}
 
 typedef struct {
     NvnTexture *tex;
@@ -88,7 +96,6 @@ typedef struct NvnWindow {
 typedef struct NvnSync {
     volatile int signaled;
     volatile uint64_t seq;  // GPU submission this fence belongs to (renderer_fence_seq), 0 = none
-    uint64_t ticket;        // render thread (gpu_thread.c): the queued op that signals it, 0 = none
 } NvnSync;
 
 // ---- command recording (stored in guest command memory)
@@ -103,7 +110,7 @@ typedef struct {
     uint64_t guest;  // the guest NVNcommandBuffer*
 } NvnCmdBuf;
 // A list's first record (CMD_BARRIER) has x[6] == CMD_LIST_FENCES when the list has fences or calls other lists: the
-// render thread (gpu_thread.c mark_fences) looks through only those.
+// render thread (rqueue.c prescan) looks through only those.
 #define CMD_LIST_FENCES 0x46454e4345534cull
 
 // One recorded command: header, the call's integer and float arguments, then copied data.
@@ -142,14 +149,3 @@ void backend_present(NvnTexture *tex);            // show a texture in the windo
 void backend_texture_destroyed(NvnTexture *tex);
 void backend_pool_written(uint64_t addr, uint64_t size);
 
-// the render thread (runtime/nvn/gpu_thread.c): the game's side of the backend goes through these
-bool gt_on(void);
-void gt_submit(uint64_t handle);
-uint64_t gt_fence(uint64_t sync_guest);
-void gt_sync_wait(uint64_t ticket);
-void gt_finish(void);
-void gt_drain(void);
-void gt_call(void (*fn)(void *), void *arg);
-void gt_present(NvnTexture *t);
-void gt_texture_destroyed(NvnTexture *t);
-void gt_free(void *p);

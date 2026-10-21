@@ -458,6 +458,11 @@ void plat_frame_work(uint64_t busy_ns, uint64_t target_ns) {
     if (busy_ns) p_report(g_hint_session, (int64_t)busy_ns);
 }
 
+uint64_t plat_thread_cpu_ns(void) {  // (diagnostics: LARECOMP_LOG_PACE; pace.c's 30 fps frame cost)
+    struct timespec ts;
+    return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 ? (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec : 0;
+}
+
 void plat_thread_guest(int prio) { (void)prio; }  // (plat_thread_core places the threads on phones)
 
 int plat_cpu_count(void) {

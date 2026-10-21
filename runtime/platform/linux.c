@@ -93,6 +93,18 @@ static void wt_init(uint64_t lo, uint64_t hi) {
     g_wt_page = pg;
 }
 
+// Tracking off after all (the Vulkan backend at boot, before any query protected a page: nothing is protected yet), with
+// the reason logged; LARECOMP_WRITE_TRACKING=1 keeps it on. Closing the userfaultfd unregisters the window.
+void plat_write_tracking_off(const char *why) {
+    if (g_uffd < 0 && g_pagemap < 0) return;
+    const char *e = getenv("LARECOMP_WRITE_TRACKING");
+    if (e && atoi(e)) { fprintf(stderr, "[plat] page write tracking kept on (LARECOMP_WRITE_TRACKING=1): %s\n", why); return; }
+    fprintf(stderr, "[plat] page write tracking off: %s\n", why);
+    if (g_pagemap >= 0) close(g_pagemap);
+    if (g_uffd >= 0) close(g_uffd);
+    g_pagemap = g_uffd = -1;
+}
+
 // ---- guest address space
 // Everything readable/writable from the start, like macOS: the guest maps at 4K granularity, and untouched pages
 // cost nothing (MAP_NORESERVE: the 12 GB window doesn't count against overcommit).
@@ -149,6 +161,11 @@ uint64_t plat_now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+uint64_t plat_thread_cpu_ns(void) {
+    struct timespec ts;
+    return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 ? (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec : 0;
 }
 
 void plat_sleep_until_ns(uint64_t t) {
@@ -208,6 +225,7 @@ static void require_cpu(void) {}
 
 void plat_init(void) {
     log_to_file_without_terminal();
+    raise_open_file_limit();
     require_cpu();
 }
 

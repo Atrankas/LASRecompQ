@@ -20,6 +20,7 @@
 // fixpoint over its logic nodes from the live save's inventory (followers count once their location is reachable).
 #include "../game_addresses.h"
 #include <atomic>
+#include <mutex>
 #include <ctype.h>
 #include <math.h>
 #include <stdint.h>
@@ -47,21 +48,51 @@ bool triforce_counts(int *have, int *needed);         // runtime/hle/triforce.c
 #define SAVE GUEST(GA_LIVE_SAVE)
 #define EVENT_FLAGS (SAVE + 0x5DC0)
 
+// The page object and its panes are guest memory the game frees when the page closes or the pause menu turns to
+// another page, so only the game thread (the page's own update, below) reads them: it copies what the layer needs into
+// g_snap, and the render thread draws from that copy alone. A pause-menu page's state byte (+0xfd: 0x01 / 0x10 opening,
+// 0x02 shown, 0x0f closing, 0x00 closed; the dungeon map page has the same) ends the layer as soon as the page starts
+// to close (it fades out at once).
 static volatile uint64_t g_map_frame, g_map_opened;
-static volatile uint64_t g_map_obj;     // x0 of the map page update (main+0xe93800)
+static volatile uint64_t g_map_obj;     // x0 of the map page update (main+0xe93800); game thread only
+static volatile bool g_map_closing;     // the page is closing (its state byte)
 static volatile uint64_t g_draw_frame;  // the tracker layer was drawn (it drives the page while this is recent)
+static uint64_t g_panes_for;            // the page object the panes below were found for (0: look again)
+namespace {
+struct MapSnap {  // what the layer reads of the page, copied each update on the game thread
+    uint64_t frame = 0;
+    bool closing = false;
+    float mtx = 0, mty = 0, msc = 1;  // N_MapCore_00: zoom / scroll
+    bool lab_ok[21] = {}, lab_shown[21] = {};
+    float lab_x[21] = {}, lab_y[21] = {};
+    uint8_t lab_align[21] = {};
+};
+}  // namespace
+static std::mutex g_snap_mx;
+static MapSnap g_snap;
 static void map_debug_dump(uint64_t f);
 static void map_page_takeover(uint64_t obj);
+static void map_snapshot(uint64_t obj);
+static bool page_closing(uint64_t obj) {
+    uint8_t st = LD8(obj + 0xfd);
+    return st == 0x0f || st == 0x00;
+}
 extern "C" void rt_map_page_tick(Cpu *c) {
     uint64_t f = renderer_present_count();
-    if (f - g_map_frame > 2) g_map_opened = f;  // (re)opened
+    if (f - g_map_frame > 2) g_map_opened = f, g_panes_for = 0;  // (re)opened: a new page (maybe at the same address)
     g_map_frame = f;
     g_map_obj = c->x[0];
+    g_map_closing = page_closing(c->x[0]);
     map_debug_dump(f);
     map_page_takeover(c->x[0]);
+    map_snapshot(c->x[0]);
 }
 extern "C" uint64_t tracker_map_obj(void) { return g_map_obj; }  // (LARECOMP_PANE_SCAN addr 2)
-extern "C" void rt_map_page_end(Cpu *c) { (void)c; map_page_takeover(g_map_obj); }  // (the update's epilogue)
+extern "C" void rt_map_page_end(Cpu *c) {  // (the update's epilogue: its layout for this frame is done)
+    (void)c;
+    map_page_takeover(g_map_obj);
+    map_snapshot(g_map_obj);
+}
 // LARECOMP_MAP_DUMP=<frame>[,<frame>...]: save the map page object (0x4000 bytes) to build/mapobj_<frame>.bin (RE)
 static void map_debug_dump(uint64_t f) {
     static char spec[256];
@@ -129,7 +160,8 @@ static std::vector<Room> g_rooms;
 static std::vector<int> g_seed_settings, g_seed_off;
 static std::unordered_map<std::string, int> g_flag_idx;  // flags.tsv (trade flags)
 static int g_loaded = 0;
-static std::string g_room_shuffle;  // tracker.tsv O dungeon-room-shuffle (off / coherent / chaos / madness)
+static std::string g_room_shuffle;  // tracker.tsv O dungeon-room-shuffle: off / coupled / decoupled (older seeds' chaos /
+                                    // madness read as those; coherent stays: a retired mode, no doorway letters)
 static bool g_kind_present[K_N];
 
 static int tok(const std::string &s) {
@@ -191,7 +223,8 @@ static void load(void) {
         for (char *s = line, *t; (t = strsep(&s, "\t"));) c.push_back(t);
         if (c[0][0] == 'S' && c.size() >= 2) g_seed_settings.push_back(tok(c[1]));
         else if (c[0][0] == 'F' && c.size() >= 2) g_seed_off.push_back(tok(c[1]));
-        else if (c[0][0] == 'O' && c.size() >= 3 && !strcmp(c[1], "dungeon-room-shuffle")) g_room_shuffle = c[2];
+        else if (c[0][0] == 'O' && c.size() >= 3 && !strcmp(c[1], "dungeon-room-shuffle"))
+            g_room_shuffle = !strcmp(c[2], "chaos") ? "coupled" : !strcmp(c[2], "madness") ? "decoupled" : c[2];
         else if (c[0][0] == 'N' && c.size() >= 7) {
             static const char *types[] = {"region", "item", "room", "interaction", "enemy", "trick", "follower"};
             Node n;
@@ -254,7 +287,12 @@ RT_ON_RESET(tracker_reset) {  // (reboot: the next seed's tracker.tsv; the map p
     g_seed_settings.clear(), g_seed_off.clear(), g_flag_idx.clear(), g_acc.clear(), g_acc_trick.clear(), g_room_shuffle.clear();
     memset(g_kind_present, 0, sizeof g_kind_present);
     g_loaded = 0;
-    g_map_frame = g_map_opened = g_map_obj = g_draw_frame = 0;
+    g_map_frame = g_map_opened = g_map_obj = g_draw_frame = g_panes_for = 0;
+    g_map_closing = false;
+    {
+        std::lock_guard<std::mutex> lk(g_snap_mx);
+        g_snap = MapSnap();
+    }
     ui_reset();
     index_reset();
 }
@@ -618,13 +656,14 @@ static void ev_push(uint32_t ev) {  // EV_NAV carries a direction: angle in degr
 static bool dgn_takeover_active(void);
 static bool field_takeover_active(void) {
     uint64_t now = renderer_present_count();
-    return !g_vanilla && g_draw_frame && now - g_draw_frame <= 3 && now - g_map_frame <= 2;
+    return !g_vanilla && !g_map_closing && g_draw_frame && now - g_draw_frame <= 3 && now - g_map_frame <= 2;
 }
 static bool takeover_active(void) { return field_takeover_active() || dgn_takeover_active(); }
 
 // Game thread (runtime/hle/input.c fill_state): while the tracker drives the Map page, the left stick / d-pad, A and Y
 // are ours, B too while a panel or the filter bar is open (then it closes that, not the pause menu). ZR switches
 // between the tracker and the game's own map (its cursor: warp points, pins) until the page is opened again.
+extern "C" bool chaos_dgnmap_shown(void);  // runtime/ui/chaos_overlay.mm (shown and not closing)
 extern "C" uint64_t tracker_map_input(uint64_t b, int32_t st[4]) {
     enum { BA = 1, BB = 2, BY = 8, BZR = 1 << 9 };
     const uint64_t dirs = 0xfull << 12 | 0xfull << 16;
@@ -635,7 +674,8 @@ extern "C" uint64_t tracker_map_input(uint64_t b, int32_t st[4]) {
     hide &= b;  // (released: the game may see it again)
     uint64_t now0 = renderer_present_count();
     bool dgn_avail = g_dgn_avail_frame && now0 - g_dgn_avail_frame <= 3;
-    if (((g_avail_frame && now0 - g_avail_frame <= 3 && now0 - g_map_frame <= 2) || dgn_avail) && (press & BZR)) {
+    bool field_avail = g_avail_frame && now0 - g_avail_frame <= 3 && now0 - g_map_frame <= 2 && !g_map_closing;
+    if ((field_avail || (dgn_avail && chaos_dgnmap_shown())) && (press & BZR)) {  // (not while the page closes)
         g_vanilla = !g_vanilla;
         g_panel_open = false, g_filter_open = false;
         hide |= BZR;
@@ -682,7 +722,6 @@ static bool g_hidden[2];
 static std::vector<uint64_t> g_brackets;  // W_Cursor_00 panes
 static std::vector<char> g_brackets_hidden;
 static float g_cursor_t[2];   // (the cursor's own translate, put back on hand-back)
-static uint64_t g_panes_for;  // the page object they were found for
 
 static void pane_names(void) {
     if (g_pane_names[0][0]) return;
@@ -784,7 +823,7 @@ static void cycle_test(uint64_t obj) {
 static bool takeover_active(void);
 static bool field_takeover_active(void);
 static void map_page_takeover(uint64_t obj) {
-    if (!obj) return;
+    if (!obj || g_map_closing) return;  // (closing: the page goes away as it is)
     cycle_test(obj);
     bool on = field_takeover_active();
     static int tries;
@@ -878,11 +917,14 @@ static void dgn_find(uint64_t obj) {
         cur.swap(next);
     }
 }
-extern "C" void tracker_dgnmap_takeover(uint64_t obj) {
+// (game thread, runtime/ui/chaos_overlay.mm: reopened = a new page, maybe at the same address; closing = it goes away
+// as it is)
+extern "C" void tracker_dgnmap_takeover(uint64_t obj, bool reopened, bool closing) {
     if (!obj) return;
+    if (g_dh.obj != obj || reopened) g_dh = DgnHide(), g_dh.obj = obj;
+    if (closing) return;
     bool on = dgn_takeover_active();
     uint64_t now = renderer_present_count();
-    if (g_dh.obj != obj) g_dh = DgnHide(), g_dh.obj = obj;
     if (on && (!g_dh.tries || ((!g_dh.ops || g_dh.panes.empty()) && g_dh.tries < 6 && now - g_dh.tried_at >= 60))) {
         dgn_find(obj);
         g_dh.tries++, g_dh.tried_at = now;
@@ -903,23 +945,38 @@ extern "C" void tracker_dgnmap_takeover(uint64_t obj) {
     }
 }
 
-static int g_label_align[21];
-// a place name's position (default view, 1280x720 UI units) and whether the game shows it; false = not found
-static bool label_pos(int id, ImVec2 *p, bool *shown) {
-    int k = PANE_LABEL0 + id;
-    if (id < 0 || id >= 21 || !pane_ok(k)) return false;
-    const float *t = (const float *)(uintptr_t)(g_pane[k] + 0x30);
-    if (!(fabsf(t[0]) < 2000 && fabsf(t[1]) < 2000)) return false;
-    *p = ImVec2(640 + t[0], 360 - t[1]);
-    g_label_align[id] = LD8(g_pane[k] + 0x5B) % 3;  // (base position, x: 0 centre, 1 left edge, 2 right edge)
-    *shown = (LD8(g_pane[k] + 0x58) & 1) && LD8(g_pane[k] + 0x5A) > 0;
-    return true;
+// game thread: the page's view and its place names for the layer (g_snap)
+static void map_snapshot(uint64_t obj) {
+    if (!obj) return;
+    MapSnap s;
+    s.frame = g_map_frame, s.closing = g_map_closing;
+    // zoom / scroll: the map content pane N_MapCore_00 (page + 0x640) has local translate (+0x30, layout units, y up,
+    // origin = screen centre) and scale (+0x48); at the default view they are (0,0) and 1
+    uint64_t pane = LD64(obj + 0x640);
+    if (pane && !memcmp((const void *)(uintptr_t)(pane + 0xB0), "N_MapCore", 9)) {
+        const float *t = (const float *)(uintptr_t)(pane + 0x30);
+        float sc = *(const float *)(uintptr_t)(pane + 0x48);
+        if (sc > 0.1f && sc < 20) s.mtx = t[0], s.mty = t[1], s.msc = sc;
+    }
+    // each place name's position (default view, 1280x720 UI units) and whether the game shows it
+    for (int id = 0; id < 21 && g_panes_for == obj; id++) {
+        int k = PANE_LABEL0 + id;
+        if (!pane_ok(k)) continue;
+        const float *t = (const float *)(uintptr_t)(g_pane[k] + 0x30);
+        if (!(fabsf(t[0]) < 2000 && fabsf(t[1]) < 2000)) continue;
+        s.lab_ok[id] = true;
+        s.lab_x[id] = 640 + t[0], s.lab_y[id] = 360 - t[1];
+        s.lab_align[id] = LD8(g_pane[k] + 0x5B) % 3;  // (base position, x: 0 centre, 1 left edge, 2 right edge)
+        s.lab_shown[id] = (LD8(g_pane[k] + 0x58) & 1) && LD8(g_pane[k] + 0x5A) > 0;
+    }
+    std::lock_guard<std::mutex> lk(g_snap_mx);
+    g_snap = s;
 }
 
-// ---- drawing
+// ---- drawing (render thread: g_snap only, never the page's memory)
 static bool map_page_shown(void) {
     uint64_t f = g_map_frame;
-    return f && renderer_present_count() - f <= 2;
+    return f && !g_map_closing && renderer_present_count() - f <= 2;
 }
 extern "C" bool tracker_map_page_shown(void) { return map_page_shown(); }  // (the touch controls: touch_controls.mm)
 
@@ -1285,21 +1342,17 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
         ui.last_solve = now;
     }
     if (reopened) ui.panel = false, ui.filter_focus = false, g_vanilla = false;  // (reopened: the map, no panel)
+    MapSnap snap;
+    {
+        std::lock_guard<std::mutex> lk(g_snap_mx);
+        snap = g_snap;
+    }
+    if (!snap.frame || snap.closing || now - snap.frame > 2) return;  // (the page is closing or gone)
     g_avail_frame = now;
     // the game's UI is a centred 16:9 box; the island parchment spans (187,123)-(1096,630) of 1280x720 = 16x16 screens
     float bw = fminf(display.x, display.y * 16.0f / 9.0f), bh = bw * 9.0f / 16.0f;
     float ox = (display.x - bw) * 0.5f, oy = (display.y - bh) * 0.5f, u = bw / 1280.0f;
-    // zoom / scroll: the map content pane N_MapCore_00 (map page object + 0x640) has local translate (+0x30, layout
-    // units, y up, origin = screen centre) and scale (+0x48); at the default view they are (0,0) and 1
-    float mtx = 0, mty = 0, msc = 1;
-    if (uint64_t pane = g_map_obj ? LD64(g_map_obj + 0x640) : 0) {
-        if (!memcmp((const void *)(uintptr_t)(pane + 0xB0), "N_MapCore", 9)) {
-            mtx = *(float *)(uintptr_t)(pane + 0x30);
-            mty = *(float *)(uintptr_t)(pane + 0x34);
-            msc = *(float *)(uintptr_t)(pane + 0x48);
-            if (!(msc > 0.1f && msc < 20)) { mtx = mty = 0; msc = 1; }
-        }
-    }
+    float mtx = snap.mtx, mty = snap.mty, msc = snap.msc;  // (zoom / scroll: map_snapshot)
     auto ui_pt = [](float cx, float cy) { return ImVec2(187 + cx * (909.0f / 16), 123 + cy * (507.0f / 16)); };  // default view
     auto to_screen = [&](ImVec2 p) {
         float sx = 640 + mtx + msc * (p.x - 640);
@@ -1337,11 +1390,12 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     float name_k = 135.0f / std::max(1.0f, text_size(font, 1, "Tal Tal Heights").x);
     float lw[21] = {};
     for (int i = 0; i < 21; i++)
-        if (kLabel[i][0] && label_pos(i, &lp[i], &lshown[i])) {  // (lp: the name's centre)
+        if (kLabel[i][0] && snap.lab_ok[i]) {  // (lp: the name's centre)
+            lp[i] = ImVec2(snap.lab_x[i], snap.lab_y[i]), lshown[i] = snap.lab_shown[i];
             lhave[i] = true, nlabels++;
             lw[i] = name_k * text_size(font, 1, kLabel[i]).x;
-            if (g_label_align[i] == 1) lp[i].x += lw[i] * 0.5f;
-            else if (g_label_align[i] == 2) lp[i].x -= lw[i] * 0.5f;
+            if (snap.lab_align[i] == 1) lp[i].x += lw[i] * 0.5f;
+            else if (snap.lab_align[i] == 2) lp[i].x -= lw[i] * 0.5f;
         }
     std::vector<std::vector<int>> &area_checks = g_area_checks;
     area_checks.assign(21, {});
@@ -1811,7 +1865,7 @@ extern "C" void tracker_dungeon_draw(ImVec2 display, ImFont *font) {
         float fs = 14 * u, lh = fs + 6 * u, w = 168 * u;
         bool letters = g_settings.chaos_letters != CHAOS_LETTERS_OFF && g_room_shuffle != "off" && !g_room_shuffle.empty() &&
                        g_room_shuffle != "coherent";
-        float h = 16 * u + lh * pills.size() + (letters ? lh * (g_room_shuffle == "madness" ? 2 : 1) + 12 * u : 0);
+        float h = 16 * u + lh * pills.size() + (letters ? lh * (g_room_shuffle == "decoupled" ? 2 : 1) + 12 * u : 0);
         ImVec2 a(ox + 62 * u, oy + 200 * u), z(ox + 62 * u + w, oy + 200 * u + h);  // (left of the paper, under the title)
         parchment(dl, a, z, u);
         float y = a.y + 9 * u;
@@ -1831,7 +1885,7 @@ extern "C" void tracker_dungeon_draw(ImVec2 display, ImFont *font) {
             dl->AddText(font, fs, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), IM_COL32(255, 240, 200, 255), "A");
             dl->AddText(font, fs, ImVec2(c.x + r + 8 * u, y), P_INK, "leads to A");
             y += lh;
-            if (g_room_shuffle == "madness") {
+            if (g_room_shuffle == "decoupled") {
                 c.y += lh;
                 dl->AddRectFilled(ImVec2(c.x - r, c.y - r * 0.7f), ImVec2(c.x + r, c.y + r * 0.7f), IM_COL32(90, 30, 20, 230), r * 0.3f);
                 dl->AddTriangleFilled(ImVec2(c.x - r * 0.5f, c.y - r * 0.4f), ImVec2(c.x - r * 0.5f, c.y + r * 0.4f), ImVec2(c.x + r * 0.4f, c.y),

@@ -142,6 +142,17 @@ POCKETS = {
     'toadstool-clearing': ('pocket-toadstool-clearing', 'swamp & (feather | rooster)', None),  # (LADXR)
     'pothole-field': ('pothole', None, None),  # LAS region pothole = the field behind Richard's villa
 }
+# pocket name -> {Field room: tiles}: the parts of a pocket on screens beside its door's own (pocket_screens: the door's
+# screen, whole), from the walkable area the door opens on (field_reach.areas; tools/test_field_regions.py checks it).
+# A bush / dig tile there stands in the pocket too: the toadstool clearing runs north from Field_06A into the bottom of
+# Field_05A and the edge of Field_05B (bush-05A-1, 5F5HF-AB703-...: only reached through the Quadruplets' house and the
+# river behind it in that seed, while the logic had it as plain woods); the Papahl ledge runs west into Field_02J.
+POCKET_TILES = {
+    'toadstool-clearing': {'Field_05A': (52, 53, 54, 55, 56, 57, 58, 59, 62, 63, 64, 65, 66, 67, 68, 69, 72, 73, 74, 75),
+                           'Field_05B': (50, 60)},
+    'papahl-ledge': {'Field_02J': (5, 6, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 34, 35, 36, 37, 38, 39, 44, 45, 46,
+                                   54)},
+}
 # cave -> [(node, condition-basic LAS has, condition-basic without the vanilla route through that cave or None
 # for "only through shuffled cave doors")]; the node's advanced / glitched / hell conditions are dropped
 REGION_PATCHES = {
@@ -194,6 +205,18 @@ def pocket_screens(cdoors):
             if g >= 0:
                 out[f'Field_{g // 16 + 1:02d}{chr(65 + g % 16)}'] = d['pocket_region']
     return out
+
+
+def pocket_of(cdoors):
+    """-> f(room, tile): the pocket region a Field tile stands in (pocket_screens + POCKET_TILES), else None."""
+    screens = pocket_screens(cdoors)
+    tiles = {}
+    for d in cdoors:
+        p = (d.get('pocket') or {}).get('name')
+        for room, ts in POCKET_TILES.get(p, {}).items():
+            for t in ts:
+                tiles[(room, t)] = d['pocket_region']
+    return lambda room, tile: tiles.get((room, tile)) or screens.get(room)
 
 
 def connector_levels(cdoors):
@@ -323,6 +346,31 @@ def _move(logic, location, region, cond):
     else:
         loc.pop('condition-basic', None)
     return 1
+
+
+def raft_shop_to_dock(exit_, out_dir, romfs, event_tools):
+    """The Rapids Ride starts at the dock outside the raft shop's vanilla door: after paying, Link walks out and boards
+    the raft there. A shuffled exit takes him somewhere else, and the paid ride is gone by the time he gets back to
+    the dock (gate shut, no raft), so the ride and the race could never start (#263). When the shop's exit is
+    shuffled, the owner's paid branch (RaftShopMan.bfevfl `talk`: pay, StartGame, ... Event9) ends with a jump to the
+    vanilla doorstep (Field_04P's own start, played as walking out of the hut), as if Link had left through the
+    vanilla door. Leaving without paying still uses the shuffled exit. Returns True when the flow was changed."""
+    if exit_.get('raft-shop', 'raft-shop') == 'raft-shop':
+        return False
+    rel = os.path.join('region_common', 'event', 'RaftShopMan.bfevfl')
+    path = os.path.join(out_dir, 'romfs', rel)
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(os.path.join(romfs, rel), 'rb') as f, open(path, 'wb') as g:
+            g.write(f.read())
+    flow = event_tools.readFlow(path)
+    fc = flow.flowchart
+    e9 = event_tools.findEvent(fc, 'Event9')  # (SetFacialExpression normal: the end of the paid branch)
+    assert e9 is not None and e9.data.nxt.v is None, 'RaftShopMan.bfevfl Event9 changed'
+    event_tools.createActionChain(fc, 'Event9', [
+        ('GameControl', 'RequestLevelJump', {'level': 'Field', 'locator': 'Field_04P', 'offsetX': 0.0, 'offsetZ': 0.0})])
+    event_tools.writeFlow(path, flow)
+    return True
 
 
 def spoiler(doors, entry, exit_):

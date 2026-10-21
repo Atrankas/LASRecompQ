@@ -56,6 +56,13 @@ uint64_t hle_register(const char *name, HostFn fn) {
     return HLE_BASE + 16ull * hle_count++;
 }
 
+// (diagnostics) the host function behind an HLE stub address, NULL if pc isn't one
+const char *hle_name_at(uint64_t pc) {
+    if (pc < HLE_BASE || pc >= HLE_BASE + HLE_SIZE) return NULL;
+    int i = (int)((pc - HLE_BASE) / 16);
+    return i < hle_count ? hle_slots[i].name : NULL;
+}
+
 void hle_override(uint64_t addr, HostFn fn, const char *name) {
     if (override_count == MAX_OVERRIDE) FATAL("too many overrides\n");
     overrides[override_count].addr = addr;
@@ -132,7 +139,7 @@ GuestFn dispatch_lookup(uint64_t addr) {
 // (functions start 16-byte aligned, and call targets cluster: pc >> 2 alone left 3 slots in 4 unused)
 static inline unsigned dcache_slot(uint64_t pc) { return (unsigned)((pc >> 4) ^ (pc >> 14)) & (DCACHE - 1); }
 
-static GuestFn dispatch_slow(Cpu *c) {
+__attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
         rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)

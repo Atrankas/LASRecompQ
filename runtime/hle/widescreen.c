@@ -40,6 +40,27 @@ float widescreen_effect_stretch(uint64_t fs_hash) {
     return 1.0f;
 }
 
+// Untextured quads drawn with a full-screen viewport are taken for fades and flashes and fill the window
+// (runtime/nvn/renderer.m), but a layout pane draws that way too, whatever its size: the speaker-less message box's
+// dark band (622x46 behind the rounded box, "Wow! This looks pretty heavy!...") came out stretched to the window's
+// width, two dark bars beside the box at 32:9 (user 2026-10-20). A layout (ui2d) draw's vertex uniforms hold the
+// projection (floats 0-15), the pane's model-view rows (16-27) and its rect (132-135: width, height, left, top; y up):
+// true when they describe a pane that doesn't cover the screen (such a draw stays in the 16:9 box).
+bool widescreen_ui_pane_partial(const float *u, uint64_t size) {
+    if (!u || size != 560) return false;
+    if (u[15] != 1 || u[12] != 0 || u[13] != 0 || !(u[0] > 0) || u[5] == 0) return false;  // (orthographic projection)
+    float w = u[132], h = u[133], l = u[134], t = u[135];
+    if (!(w > 0) || !(h > 0) || !(w < 1e5f) || !(h < 1e5f)) return false;
+    float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
+    for (int i = 0; i < 4; i++) {
+        float x = l + (i & 1 ? w : 0), y = t - (i & 2 ? h : 0);
+        float X = u[16] * x + u[17] * y + u[19], Y = u[20] * x + u[21] * y + u[23], Z = u[24] * x + u[25] * y + u[27];
+        float n[2] = {u[0] * X + u[1] * Y + u[2] * Z + u[3], u[4] * X + u[5] * Y + u[6] * Z + u[7]};
+        for (int k = 0; k < 2; k++) lo[k] = fminf(lo[k], n[k]), hi[k] = fmaxf(hi[k], n[k]);
+    }
+    return lo[0] > -0.99f || hi[0] < 0.99f || lo[1] > -0.99f || hi[1] < 0.99f;
+}
+
 // Off in rooms that should keep 16:9 framing (interiors, dungeons) -- see widescreen_update.
 static bool g_allowed = true;
 static bool g_indoor;
@@ -83,6 +104,13 @@ float rt_cull_aspect(float orig) {
     return rt_aspect_site(6) * (orig > 0.1f && orig < 10.0f ? orig / (16.0f / 9.0f) : 1.0f);
 }
 
+// Sky and sea pieces past the north edge (tools/patches.py SKYSEA_BOX_SITES): a piece shows while Link is within
+// its reach plus half a 16:9 view (7.5). A wider view reaches further: half its extra width, doubled for the far
+// (top) edge of the perspective view, where the sky is.
+float rt_skysea_margin(void) {
+    return g_wide > 1.0f ? 15.0f * (g_wide - 1.0f) : 0.0f;
+}
+
 // Vertical field of view: unchanged for wide outputs; for tall ones (factor < 1) widened so the
 // horizontal view stays what the game shows at 16:9.
 float rt_fovy(float orig) {
@@ -105,7 +133,7 @@ float rt_fovy(float orig) {
 // 16:9 on the overworld ("Field"). The game only runs this setup while a level loads (and not for every change of
 // level), so the runtime re-runs it, with the arguments noted at the patched site, when the wanted width changes
 // (widescreen_present_hook, from the game's present call). LARECOMP_INDOOR_AR=0: 16:9 always (as before).
-#define GA_RES_SETUP 0x7001023c10ull
+// (the setup: GA_RES_SETUP, runtime/game_addresses/runtime_v1_0_0.h)
 const char *game_level_name(void);
 static struct { uint64_t sys, views, ctrl; bool valid, wide; float factor; } g_res;
 static bool indoor_wide(void) {

@@ -39,6 +39,8 @@ int maxwell_robust_cbuf;
 bool maxwell_static_stacks = true;
 bool maxwell_brx_table = true;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
+bool maxwell_gmem_lazy;
+bool maxwell_gmem_fs_miss;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -66,6 +68,31 @@ static void sp(Str *s, const char *fmt, ...) {
     vsnprintf(s->buf + s->len, n + 1, fmt, ap2);
     va_end(ap2);
     s->len += n;
+}
+
+// The per-draw tint's recolour mode (ltint[0].w < 0; runtime/nvn/recolour.c, Cosmetics tab): an HSV change of the
+// output colour, in its gamma encoding: for colours whose hue is within ltint[1].y of ltint[1].x (>= 0.5: any) and
+// saturation >= ltint[1].z, the hue goes to ltint[1].x + ltint[0].x + (its distance from ltint[1].x) * ltint[1].w
+// (turns: .w = 1 a plain shift, < 1 also pulls the hues together), saturation * .y, value * .z (kept <= 1 unless it
+// was above). The shading stays: only the colour moves. `c` is the colour target's expression
+// ("c0" / "o.c0"), v3 / v4 the vector types ("vec3" / "float3").
+static void emit_recolour(Str *s, const char *c, const char *v3, const char *v4) {
+    sp(s, "  else if (ltint[0].w < 0.0f) {\n");
+    sp(s, "    %s rc_g = pow(max(%s.rgb, %s(0.0f)), %s(1.0f / 2.2f));\n", v3, c, v3, v3);
+    sp(s, "    %s rc_K = %s(0.0f, -1.0f / 3.0f, 2.0f / 3.0f, -1.0f);\n", v4, v4);
+    sp(s, "    %s rc_p = mix(%s(rc_g.b, rc_g.g, rc_K.w, rc_K.z), %s(rc_g.g, rc_g.b, rc_K.x, rc_K.y), %s(step(rc_g.b, rc_g.g)));\n", v4, v4, v4, v4);
+    sp(s, "    %s rc_q = mix(%s(rc_p.x, rc_p.y, rc_p.w, rc_g.r), %s(rc_g.r, rc_p.y, rc_p.z, rc_p.x), %s(step(rc_p.x, rc_g.r)));\n", v4, v4, v4, v4);
+    sp(s, "    float rc_d = rc_q.x - min(rc_q.w, rc_q.y);\n");
+    sp(s, "    float rc_hh = abs(rc_q.z + (rc_q.w - rc_q.y) / (6.0f * rc_d + 1e-6f)), rc_ss = rc_d / (rc_q.x + 1e-6f), rc_vv = rc_q.x;\n");
+    sp(s, "    float rc_sd = fract(rc_hh - ltint[1].x + 0.5f) - 0.5f, rc_dh = abs(rc_sd);\n");
+    sp(s, "    float rc_m = (ltint[1].y >= 0.5f ? 1.0f : 1.0f - smoothstep(ltint[1].y * 0.6f, ltint[1].y, rc_dh)) *\n"
+          "              smoothstep(ltint[1].z * 0.5f, ltint[1].z + 1e-4f, rc_ss);\n");
+    sp(s, "    rc_hh = fract(ltint[1].x + ltint[0].x + rc_sd * ltint[1].w); rc_ss = clamp(rc_ss * ltint[0].y, 0.0f, 1.0f);\n");
+    sp(s, "    rc_vv = min(rc_vv * ltint[0].z, max(rc_vv, 1.0f));\n");
+    sp(s, "    %s rc_k = clamp(abs(fract(%s(rc_hh) + %s(1.0f, 2.0f / 3.0f, 1.0f / 3.0f)) * 6.0f - %s(3.0f)) - %s(1.0f), "
+          "%s(0.0f), %s(1.0f));\n", v3, v3, v3, v3, v3, v3, v3);
+    sp(s, "    %s rc_r = rc_vv * mix(%s(1.0f), rc_k, %s(rc_ss));\n", v3, v3, v3);
+    sp(s, "    %s.rgb = mix(%s.rgb, pow(rc_r, %s(2.2f)), %s(rc_m));\n  }\n", c, c, v3, v3);
 }
 
 typedef struct {
@@ -709,6 +736,16 @@ static const char *alayer(Ctx *c, const char *r, int slot, char *buf) {
 }
 #define ALAYER(r, slot) alayer(c, (r), (slot), alloca(96))
 
+// 2D normalized coordinates: a scaled texture whose contents occupy its top-left part (Dynamic resolution) is sampled
+// there (prelude uvs(); rscale[1 + slot].zw). Vertex shaders have no rscale table: their lookups stay as they are.
+static const char *uv2(Ctx *c, int slot, const char *x, const char *y, char *buf) {
+    if (c->stage == STAGE_VERTEX) { snprintf(buf, 700, "%s2(%s, %s)", c->glsl ? "vec" : "float", x, y); return buf; }
+    c->uses_rscale = true;
+    snprintf(buf, 700, "uvs(%s2(%s, %s), rscale[%d])", c->glsl ? "vec" : "float", x, y, slot + 1);
+    return buf;
+}
+#define UV2(slot, x, y) uv2(c, (slot), (x), (y), alloca(700))
+
 // GLSL texture lookup on slot `slot` (its type is final here: a conflicting use fails in tex_slot).
 // co: coordinate expressions (1 for 1D, 2 for 2D, 3 for 3D / cube), layer: uint expression or NULL, dref: depth
 // reference or NULL, lod_kind 0 implicit / 1 level / 2 bias (lod), off: ivec2 texel offset or NULL.
@@ -739,6 +776,7 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
     } else if (n == 2) {
         if (off) snprintf(xs, sizeof xs, "(vec2(%s, %s) + vec2(%s) / vec2(tsize%d(%s).xy))", co[0], co[1], off, slot, L);
         else snprintf(xs, sizeof xs, "vec2(%s, %s)", co[0], co[1]);
+        if (c->stage != STAGE_VERTEX) { char w[1700]; snprintf(w, sizeof w, "uvs(%s, rscale[%d])", xs, slot + 1); strcpy(xs, w); c->uses_rscale = true; }
     } else {
         if (off && !cube) snprintf(xs, sizeof xs, "vec3(vec2(%s, %s) + vec2(%s) / vec2(tsize%d(%s).xy), %s)", co[0], co[1], off, slot, L, co[2]);
         else snprintf(xs, sizeof xs, "vec3(%s, %s, %s)", co[0], co[1], co[2]);  // cube lookups take no offset
@@ -862,23 +900,23 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
         case 0: slot = tex_slot(c, index, TEXTYPE_1D, false, false);
             sprintf(call, "t%d.sample(s%d, %s)", slot, slot, F(A)); break;
         case 1: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
-            sprintf(call, "t%d.sample(s%d, float2(%s, %s))", slot, slot, F(A), F(Bv)); break;
+            sprintf(call, "t%d.sample(s%d, %s)", slot, slot, UV2(slot, F(A), F(Bv))); break;
         case 2: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
-            sprintf(call, "t%d.sample(s%d, float2(%s, %s), level(0))", slot, slot, F(A), F(Bv)); break;
+            sprintf(call, "t%d.sample(s%d, %s, level(0))", slot, slot, UV2(slot, F(A), F(Bv))); break;
         case 3: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
-            sprintf(call, "t%d.sample(s%d, float2(%s, %s), level(%s))", slot, slot, F(A), F(A1), F(Bv)); break;
+            sprintf(call, "t%d.sample(s%d, %s, level(%s))", slot, slot, UV2(slot, F(A), F(A1)), F(Bv)); break;
         case 4: slot = tex_slot(c, index, TEXTYPE_2D, true, false);
-            sprintf(call, "float4(t%d.sample_compare(s%d, float2(%s, %s), %s))", slot, slot, F(A), F(A1), F(Bv)); break;
+            sprintf(call, "float4(t%d.sample_compare(s%d, %s, %s))", slot, slot, UV2(slot, F(A), F(A1)), F(Bv)); break;
         case 5: slot = tex_slot(c, index, TEXTYPE_2D, true, false);
-            sprintf(call, "float4(t%d.sample_compare(s%d, float2(%s, %s), %s, level(%s)))", slot, slot, F(A), F(A1), F(B1), F(Bv)); break;
+            sprintf(call, "float4(t%d.sample_compare(s%d, %s, %s, level(%s)))", slot, slot, UV2(slot, F(A), F(A1)), F(B1), F(Bv)); break;
         case 6: slot = tex_slot(c, index, TEXTYPE_2D, true, false);
-            sprintf(call, "float4(t%d.sample_compare(s%d, float2(%s, %s), %s, level(0)))", slot, slot, F(A), F(A1), F(Bv)); break;
+            sprintf(call, "float4(t%d.sample_compare(s%d, %s, %s, level(0)))", slot, slot, UV2(slot, F(A), F(A1)), F(Bv)); break;
         case 7: slot = tex_slot(c, index, TEXTYPE_2D_ARRAY, false, true);
-            sprintf(call, "t%d.sample(s%d, float2(%s, %s), %s)", slot, slot, F(A1), F(Bv), ALAYER(A, slot)); break;
+            sprintf(call, "t%d.sample(s%d, %s, %s)", slot, slot, UV2(slot, F(A1), F(Bv)), ALAYER(A, slot)); break;
         case 8: slot = tex_slot(c, index, TEXTYPE_2D_ARRAY, false, true);
-            sprintf(call, "t%d.sample(s%d, float2(%s, %s), %s, level(0))", slot, slot, F(A1), F(Bv), ALAYER(A, slot)); break;
+            sprintf(call, "t%d.sample(s%d, %s, %s, level(0))", slot, slot, UV2(slot, F(A1), F(Bv)), ALAYER(A, slot)); break;
         case 9: slot = tex_slot(c, index, TEXTYPE_2D_ARRAY, true, true);
-            sprintf(call, "float4(t%d.sample_compare(s%d, float2(%s, %s), %s, %s, level(0)))", slot, slot, F(A1), F(Bv), A, F(B1)); break;
+            sprintf(call, "float4(t%d.sample_compare(s%d, %s, %s, %s, level(0)))", slot, slot, UV2(slot, F(A1), F(Bv)), A, F(B1)); break;
         case 10: slot = tex_slot(c, index, TEXTYPE_3D, false, false);
             sprintf(call, "t%d.sample(s%d, float3(%s, %s, %s))", slot, slot, F(A), F(A1), F(Bv)); break;
         case 11: slot = tex_slot(c, index, TEXTYPE_3D, false, false);
@@ -976,12 +1014,14 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     }
     if (dc) { c->reg_used[pr] = 1; sprintf(dref, "as_type<float>(r%d)", pr); pr++; }
     const char *vec = ncoord == 1 ? "" : ncoord == 2 ? "float2" : "float3";
-    char call[1024];
+    char cexpr[420], call[1024];
+    if (ncoord == 2 && c->stage != STAGE_VERTEX) { snprintf(cexpr, sizeof cexpr, "uvs(float2(%s), rscale[%d])", coords, slot + 1); c->uses_rscale = true; }
+    else snprintf(cexpr, sizeof cexpr, "%s(%s)", vec, coords);
     if (dc)
-        sprintf(call, "float4(t%d.sample_compare(s%d, %s(%s)%s%s, %s%s%s))", slot, slot, vec, coords, array ? ", " : "",
+        sprintf(call, "float4(t%d.sample_compare(s%d, %s%s%s, %s%s%s))", slot, slot, cexpr, array ? ", " : "",
                 layer, dref, lod, off);
     else
-        sprintf(call, "t%d.sample(s%d, %s(%s)%s%s%s%s)", slot, slot, vec, coords, array ? ", " : "", layer, lod, off);
+        sprintf(call, "t%d.sample(s%d, %s%s%s%s%s)", slot, slot, cexpr, array ? ", " : "", layer, lod, off);
     write_tex_result(c, slot, call, mask, d, RZ, false, false);
 }
 
@@ -1111,9 +1151,9 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (qt == 1 && c->glsl) {  // tsize<slot>() is emitted with the slot's final type
             if (c->stage != STAGE_VERTEX) {
                 c->uses_rscale = true;
-                sp(&c->body, "    { uint lv = %s; uvec4 q = uvec4(uint(floor(float(tsize%d(int(lv)).x) / rscale[%d].x + 0.5f)), "
-                   "uint(floor(float(tsize%d(int(lv)).y) / rscale[%d].y + 0.5f)), 1u, uint(textureQueryLevels(t%d)));\n",
-                   R(a), slot, slot + 1, slot, slot + 1, slot);
+                sp(&c->body, "    { uint lv = %s; uvec4 q = uvec4(uint(floor(float(tsize%d(int(lv)).x) * rscale[%d].z / rscale[%d].x + 0.5f)), "
+                   "uint(floor(float(tsize%d(int(lv)).y) * rscale[%d].w / rscale[%d].y + 0.5f)), 1u, uint(textureQueryLevels(t%d)));\n",
+                   R(a), slot, slot + 1, slot + 1, slot, slot + 1, slot + 1, slot);
             } else {
                 sp(&c->body, "    { uint lv = %s; uvec4 q = uvec4(uint(tsize%d(int(lv)).x), uint(tsize%d(int(lv)).y), 1u, uint(textureQueryLevels(t%d)));\n",
                    R(a), slot, slot, slot);
@@ -1125,9 +1165,9 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         } else if (qt == 1) {  // dimension
             if (c->stage != STAGE_VERTEX) {  // report the guest size of scaled allocations
                 c->uses_rscale = true;
-                sp(&c->body, "    { uint lv = %s; uint4 q = uint4(uint(round(float(t%d.get_width(lv)) / rscale[%d].x)), "
-                   "uint(round(float(t%d.get_height(lv)) / rscale[%d].y)), 1, t%d.get_num_mip_levels());\n",
-                   R(a), slot, slot + 1, slot, slot + 1, slot);
+                sp(&c->body, "    { uint lv = %s; uint4 q = uint4(uint(round(float(t%d.get_width(lv)) * rscale[%d].z / rscale[%d].x)), "
+                   "uint(round(float(t%d.get_height(lv)) * rscale[%d].w / rscale[%d].y)), 1, t%d.get_num_mip_levels());\n",
+                   R(a), slot, slot + 1, slot + 1, slot, slot + 1, slot + 1, slot);
             } else {
                 sp(&c->body, "    { uint lv = %s; uint4 q = uint4(t%d.get_width(lv), t%d.get_height(lv), 1, t%d.get_num_mip_levels());\n",
                    R(a), slot, slot, slot);
@@ -1678,6 +1718,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         static const char *const ld_small[] = {"uint(gmem[ga])", "uint(int(char(gmem[ga])))",
                                                "uint(*(device ushort *)(gmem + ga))", "uint(int(*(device short *)(gmem + ga)))"};
         int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
+        bool lazy_wide = c->glsl && maxwell_gmem_chunk_shift && maxwell_gmem_lazy && nw > 1;  // (one chunk check per access)
         if (c->glsl && (c->stage == STAGE_COMPUTE || maxwell_gmem_mirror)) {
             // Compute (Vulkan): the guest heap is host memory across PCIe on a discrete GPU, and a shader storing to
             // it in a loop crawls (the little chain chomps in Madam MeowMeow's house: ~4 ms a dispatch, ~0.07 ms without
@@ -1716,6 +1757,13 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                         c->reg_used[d] = 1;
                         sp(&c->body, "      r%d = fw != 0xFFFFFFFFu ? %s : ok ? %s : 0u;\n", d, fast, slow);
                     }
+                } else if (lazy_wide) {
+                    sp(&c->body, "      { uvec%d t = fw != 0xFFFFFFFFu ? uvec%d(", nw, nw);
+                    for (int k = 0; k < nw; k++) sp(&c->body, "%sgfast_.w[fw + %du]", k ? ", " : "", k);
+                    sp(&c->body, ") : ok ? GMR%d(uint(ga >> 2)) : uvec%d(0u);\n", nw, nw);
+                    for (int k = 0; k < nw; k++)
+                        if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "        r%d = t[%d];\n", d + k, k); }
+                    sp(&c->body, "      }\n");
                 } else {
                     for (int k = 0; k < nw; k++)
                         if (d != RZ && d + k < RZ) {
@@ -1733,6 +1781,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                     sp(&c->body, "      if (ok) { uint sh = uint(ga & %s) * 8u; uint v = (%s & 0x%xu) << sh;\n", bm, R(d), m);
                     sp(&c->body, "        if (fw != 0xFFFFFFFFu) { atomicAnd(gfast_.w[fw], ~(0x%xu << sh)); atomicOr(gfast_.w[fw], v); }\n", m);
                     sp(&c->body, "        else { GMAND(uint(ga >> 2), ~(0x%xu << sh)); GMOR(uint(ga >> 2), v); } }\n", m);
+                } else if (lazy_wide) {
+                    for (int k = 0; k < nw; k++) sp(&c->body, "      if (fw != 0xFFFFFFFFu) gfast_.w[fw + %du] = %s;\n", k, R(d == RZ ? RZ : d + k));
+                    sp(&c->body, "      if (fw == 0xFFFFFFFFu && ok) GMW%d(uint(ga >> 2), uvec%d(", nw, nw);
+                    for (int k = 0; k < nw; k++) sp(&c->body, "%s%s", k ? ", " : "", R(d == RZ ? RZ : d + k));
+                    sp(&c->body, "));\n");
                 } else {
                     for (int k = 0; k < nw; k++)
                         sp(&c->body, "      if (fw != 0xFFFFFFFFu) gfast_.w[fw + %du] = %s; else if (ok) GMW(uint(ga >> 2) + %du, %s);\n", k,
@@ -1748,6 +1801,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             if (!store) {
                 if (size < 4) {
                     if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      if (ok) r%d = %s; else r%d = 0u;\n", d, gl_small[size], d); }
+                } else if (lazy_wide) {  // (one bounds check and address for the whole aligned access)
+                    sp(&c->body, "      { uvec%d t = ok ? GMR%d(uint(ga >> 2)) : uvec%d(0u);\n", nw, nw, nw);
+                    for (int k = 0; k < nw; k++)
+                        if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "        r%d = t[%d];\n", d + k, k); }
+                    sp(&c->body, "      }\n");
                 } else {
                     for (int k = 0; k < nw; k++)
                         if (d != RZ && d + k < RZ) {
@@ -1762,7 +1820,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                     sp(&c->body, "      if (ok) { uint wi = uint(ga >> 2); uint sh = uint(ga & %s) * 8u; GMAND(wi, ~(0x%xu << sh)); "
                        "GMOR(wi, (%s & 0x%xu) << sh); }\n", size < 2 ? "3ul" : "2ul", size < 2 ? 0xFFu : 0xFFFFu, R(d),
                        size < 2 ? 0xFFu : 0xFFFFu);
-                else
+                else if (lazy_wide) {
+                    sp(&c->body, "      if (ok) GMW%d(uint(ga >> 2), uvec%d(", nw, nw);
+                    for (int k = 0; k < nw; k++) sp(&c->body, "%s%s", k ? ", " : "", R(d == RZ ? RZ : d + k));
+                    sp(&c->body, "));\n");
+                } else
                     for (int k = 0; k < nw; k++)
                         sp(&c->body, "      if (ok) GMW(uint(ga >> 2) + %du, %s);\n", k, R(d == RZ ? RZ : d + k));
             }
@@ -2899,7 +2961,9 @@ static const char glsl_prelude[] =
     "uint bfe_s(uint v, uint ctl) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u) return 0u; if (pos >= 32u) return (int(v) < 0) ? 0xFFFFFFFFu : 0u; return uint(bitfieldExtract(int(v), int(pos), int(min(len, 32u - pos)))); }\n"
     "uint bfi(uint ins, uint ctl, uint base) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u || pos >= 32u) return base; return bitfieldInsert(base, ins, int(pos), int(min(len, 32u - pos))); }\n"
     "float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n"
-    "uvec2 rsc(uvec2 c, vec4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uvec2(floor((vec2(c) + 0.5f) * s.xy)); }\n";
+    "uvec2 rsc(uvec2 c, vec4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uvec2(floor((vec2(c) + 0.5f) * s.xy)); }\n"
+    // a scaled texture whose contents occupy its top-left part (Dynamic resolution): sample that part
+    "vec2 uvs(vec2 uv, vec4 s) { return (s.z == 1.0f && s.w == 1.0f) ? uv : min(uv, 1.0f) * s.zw; }\n";
 // MSL semantics: saturate(NaN) = 0, fmin/fmax return the non-NaN operand - as Maxwell's .SAT and FMNMX. On a GPU whose
 // min / max / clamp do the same by themselves (maxwell_ieee_minmax, probed by device.c; Adreno) the plain functions:
 // the isnan selects cost two to four instructions a site, and keep the Adreno compiler from folding the clamp into
@@ -2997,6 +3061,17 @@ static char *scalar_cbuf_rewrite(const char *src, int idx) {
     return o.buf ? o.buf : strdup("");
 }
 
+// (GLSL fragment, lazy heap chunks) Early depth / stencil tests for a shader that counts chunk misses (GMiss atomics):
+// only where the tests' outcome can't depend on the shader - no discard, no depth output (a sample mask output
+// isn't translated) - and the shader has no side effect of its own (stores), so whether a hidden fragment runs it is
+// not observable. (Alpha to
+// coverage with early tests would write depth for samples it drops: the renderer uses this shader's module without
+// the execution mode for those pipelines, vulkan/exec.c fs_late.)
+static bool glsl_early_tests(const Ctx *c) {
+    return c->glsl && c->stage == STAGE_FRAGMENT && c->info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy &&
+           !maxwell_gmem_fs_miss && !c->info->uses_discard && !c->omap_depth && !c->uses_gmem_store;
+}
+
 // Declarations + entry point around the (rewritten) body; mirrors the MSL assembly in maxwell_translate.
 static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     ShaderInfo *info = c->info;
@@ -3021,6 +3096,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     {
         const char *rest = strchr(glsl_prelude, '\n') + 1;  // (after #version: the fp16 extension goes first)
         sp(&s, "%.*s", (int)(rest - glsl_prelude), glsl_prelude);
+        if (info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy) sp(&s, "#extension GL_EXT_buffer_reference : require\n");
         if (maxwell_half_native) sp(&s, "#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require\n");
         if (maxwell_scalar_cbuf && info->cbuf_dynamic) sp(&s, "#extension GL_EXT_scalar_block_layout : require\n");
         static int exact = -1;
@@ -3071,10 +3147,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (c->uses_gmem_store)
             sp(&s, "#define GMW(i, v) gmem_.w[i] = (v)\n#define GMAND(i, m) atomicAnd(gmem_.w[i], m)\n"
                    "#define GMOR(i, m) atomicOr(gmem_.w[i], m)\n");
-    } else if (info->uses_gmem) {  // the heap in chunks of 1 << maxwell_gmem_chunk_shift bytes, one buffer each (shader.h)
-        int n = maxwell_gmem_chunks(), ws = (int)maxwell_gmem_chunk_shift - 2;  // (word index: chunk = i >> ws)
+    } else if (info->uses_gmem && !maxwell_gmem_lazy) {  // the heap in windows, one binding each, plain branches (shader.h)
+        int n = maxwell_gmem_chunks(), ws = (int)maxwell_gmem_chunk_shift - 2, cs = GMEM_CHUNK_SET(stage);
         for (int k = 0; k < n; k++)
-            sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem%d { uint w[]; } gmem%d_;\n", set, maxwell_gmem_binding(k),
+            sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem%d { uint w[]; } gmem%d_;\n", cs, GMEM_CHUNK_BINDING + k,
                c->uses_gmem_store ? "" : "readonly ", k, k);
         sp(&s, "uint GMR_(uint i) { uint c = i >> %du, o = i & 0x%xu;\n", ws, (1u << ws) - 1);
         for (int k = 0; k < n; k++) sp(&s, "  if (c == %du) return gmem%d_.w[o];\n", k, k);
@@ -3093,6 +3169,66 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             }
             sp(&s, "#define GMW(i, v) GMW_(i, v)\n#define GMAND(i, m) GMAND_(i, m)\n#define GMOR(i, m) GMOR_(i, m)\n");
         }
+    } else if (info->uses_gmem) {  // chunks imported lazily: a table of device addresses, buffer references (shader.h)
+        int ws = (int)maxwell_gmem_chunk_shift - 2, cs = GMEM_CHUNK_SET(stage);
+        bool direct = stage != STAGE_COMPUTE;  // (compute: its storage buffers are in gfast_ already)
+        sp(&s, "layout(std140, set = %d, binding = %d) uniform GChunks { uvec4 gchunk[%d]; };\n", cs, GMEM_CHUNK_BINDING, GMEM_CHUNKS_MAX);
+        sp(&s, "layout(buffer_reference, std430, buffer_reference_align = 4) %sbuffer GW { uint w[]; };\n", c->uses_gmem_store ? "" : "readonly ");
+        // Misses are counted with atomics on GMiss: a side effect, which in a fragment shader turns early depth / stencil
+        // tests off - every overdrawn fragment ran in full (UHD 770 main pass 13.3 ms vs 8.4). So a fragment shader
+        // whose own result can't depend on late tests (no discard or depth output, no stores) declares
+        // early tests (glsl_early_tests) and keeps its counter; one that can't (discard / depth, no stores)
+        // counts nothing - it would cost those tests - and relies on the runtime bringing its chunks in before the draw:
+        // the bound storage buffers' chunks (gmem_chunk_bind), pointers in uniform buffers, the chunks other shaders
+        // missed (cache/gmem_chunks.txt). LARECOMP_VK_GMEM_FS_MISS=1 (maxwell_gmem_fs_miss): every shader counts, no
+        // early tests (as before; to find a chunk only such a shader reaches).
+        bool count = stage != STAGE_FRAGMENT || maxwell_gmem_fs_miss || c->uses_gmem_store || glsl_early_tests(c);
+        if (count) {
+            sp(&s, "layout(std430, set = %d, binding = %d) buffer GMiss { uint n[%d]; uint w[%d]; } gmiss_;\n", cs, GMEM_MISS_BINDING,
+               GMEM_CHUNKS_MAX, GMEM_CHUNKS_MAX);
+            sp(&s, "void gmiss(uint c, uint i) { atomicAdd(gmiss_.n[c], 1u); atomicMin(gmiss_.w[c], i); }\n");
+        } else {
+            sp(&s, "void gmiss(uint c, uint i) { }\n");
+        }
+        // (gchunk[c]: x, y = device address, z = words; the first word's chunk holds the whole aligned access)
+        sp(&s, "#define GMC(i) ((i) >> %du)\n#define GMO(i) ((i) & 0x%xu)\n", ws, (1u << ws) - 1);
+        if (direct) {  // (gd[k]: x = the chunk's first word, y = its words (0: unused), z, w = its device address; GDir<k>: it)
+            sp(&s, "layout(push_constant) uniform GDirect { uvec4 gd[%d]; };\n", GMEM_DIRECT_MAX);
+            for (int k = 0; k < GMEM_DIRECT_MAX; k++)
+                sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GDir%d { uint w[]; } gdir%d_;\n", cs, GMEM_DIRECT_BINDING + k,
+                   c->uses_gmem_store ? "" : "readonly ", k, k);
+        }
+        // Each access: the draw's storage buffer chunks first (gd, uniform: no table read, no miss path), then the table.
+        static const struct { const char *head, *act, *miss; int last; bool store; } fn[] = {
+            {"uint GMR1(uint i)", "return p.w[o];", "return 0u;", 0, false},
+            {"uvec2 GMR2(uint i)", "return uvec2(p.w[o], p.w[o + 1u]);", "return uvec2(0u);", 1, false},
+            {"uvec4 GMR4(uint i)", "return uvec4(p.w[o], p.w[o + 1u], p.w[o + 2u], p.w[o + 3u]);", "return uvec4(0u);", 3, false},
+            {"void GMW1(uint i, uint v)", "p.w[o] = v; return;", "", 0, true},
+            {"void GMW2(uint i, uvec2 v)", "p.w[o] = v.x; p.w[o + 1u] = v.y; return;", "", 1, true},
+            {"void GMW4(uint i, uvec4 v)", "p.w[o] = v.x; p.w[o + 1u] = v.y; p.w[o + 2u] = v.z; p.w[o + 3u] = v.w; return;", "", 3, true},
+            {"void GMAND1(uint i, uint v)", "atomicAnd(p.w[o], v); return;", "", 0, true},
+            {"void GMOR1(uint i, uint v)", "atomicOr(p.w[o], v); return;", "", 0, true},
+        };
+        for (int f = 0; f < (int)(sizeof fn / sizeof fn[0]); f++) {
+            if (fn[f].store && !c->uses_gmem_store) continue;
+            sp(&s, "%s { uint o;", fn[f].head);
+            if (direct)  // (whole chunks: an aligned access in one never leaves it; the storage buffer, not the address)
+                for (int k = 0; k < GMEM_DIRECT_MAX; k++) {
+                    char act[192], *d = act;
+                    for (const char *a = fn[f].act; *a && d < act + sizeof act - 8; a++) {
+                        if (a[0] == 'p' && a[1] == '.') d += snprintf(d, 8, "gdir%d_", k);
+                        else *d++ = *a;
+                    }
+                    *d = 0;
+                    sp(&s, " o = i - gd[%d].x; if (o < gd[%d].y) { %s }", k, k, act);
+                }
+            char lim[16];
+            if (fn[f].last) snprintf(lim, sizeof lim, "o + %du", fn[f].last); else snprintf(lim, sizeof lim, "o");
+            sp(&s, " uint c = GMC(i); o = GMO(i); uvec4 e = gchunk[c]; if (%s < e.z) { GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); %s } "
+                       "gmiss(c, i); %s }\n", lim, fn[f].act, fn[f].miss);
+        }
+        sp(&s, "#define GMR(i) GMR1(i)\n");
+        if (c->uses_gmem_store) sp(&s, "#define GMW(i, v) GMW1(i, v)\n#define GMAND(i, m) GMAND1(i, m)\n#define GMOR(i, m) GMOR1(i, m)\n");
     }
     if (info->uses_gmem_map) {  // (compute) the dispatch's storage buffers, device-local: gmap[i] = heap offset, size, word
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GMap { uvec4 gmap[%d]; };\n", set, GMAP_BUFFER_INDEX, GMAP_MAX + 1);
@@ -3157,6 +3293,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             sp(&s, "layout(location = %d) out %s c%d;\n", rt, kind == 1 ? "ivec4" : kind == 2 ? "uvec4" : "vec4", rt);
         }
         if (c->omap_depth) info->writes_depth = true;
+        if (glsl_early_tests(c)) sp(&s, "layout(early_fragment_tests) in;\n");
     } else {
         sp(&s, "layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;\n");
     }
@@ -3217,6 +3354,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (tint)
             sp(&s, "  if (ltint[0].w > 0.0f) { vec3 g = c0.rgb; float l = dot(g, vec3(0.299f, 0.587f, 0.114f));\n"
                    "    c0.rgb = mix(g, ltint[0].rgb * pow(l, ltint[1].w) + ltint[1].rgb * l, ltint[0].w); }\n");
+        if (tint) emit_recolour(&s, "c0", "vec3", "vec4");
         if (c->omap_depth) {
             if (c->reg_used[r + 1]) sp(&s, "  gl_FragDepth = as_f(r%d);\n", r + 1);
             else sp(&s, "  gl_FragDepth = gl_FragCoord.z;\n");
@@ -3229,6 +3367,57 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     free(c->body.buf);
     free(c);
     return info;
+}
+
+// BRX (indirect branch, Vulkan / GLSL only): label just the targets its jump table can name. A BRX used to make every
+// instruction a case of the dispatcher switch (any one may be a target): hundreds of cases falling into each other
+// inside the dispatcher loop. Suspected of what AMD's Windows driver never finishes building (issue #237: the dialogue
+// body text's vertex shader stayed "building", its draws skipped - Tarin's name showed, the message stayed blank).
+// The compiler puts the table in the program's own constants (cb1, after the code: blob + const_offset), loaded into
+// the BRX register by an LDC c[0x1][Rx + table] shortly before: BRX Ra, imm goes to pc + 8 + table[k] + imm. Entries
+// are read until one isn't an instruction of this shader (the end of the table; a word past it that still looks like
+// one only adds a harmless case). False: not that shape (the register set some other way, no constants, nothing
+// valid) - the caller labels every instruction as before. LARECOMP_BRX_ALL_LABELS=1: always every instruction.
+__attribute__((unused)) static bool brx_table_labels(const uint8_t *code, size_t i, size_t end, const uint8_t *blob, size_t const_offset, uint8_t *label) {
+    static int all = -1;
+    if (all < 0) { const char *e = getenv("LARECOMP_BRX_ALL_LABELS"); all = e && atoi(e) != 0; }
+    if (all || const_offset >= 0x10000 || const_offset < 0x80) return false;  // (0x10000: no constants known)
+    uint64_t brx = ((const uint64_t *)code)[i];
+    int ra = (int)bits(brx, 8, 8);
+    int64_t imm = sbits(brx, 20, 24);
+    if (ra == RZ) return false;
+    // the instruction that set ra: an LDC from cb1 within the few before, nothing else writing ra (or a branch) between
+    int64_t table = -1;
+    for (size_t k = i, seen = 0; k-- > 0 && seen < 32;) {
+        if (k % 4 == 0) continue;  // (scheduling words)
+        seen++;
+        uint64_t w = ((const uint64_t *)code)[k];
+        if ((w & 0xfff0000000000000ull) >= 0xe200000000000000ull && (w & 0xfff0000000000000ull) <= 0xe350000000000000ull)
+            return false;  // flow control between: not straight-line
+        if ((w & 0xfff8000000000000ull) == 0xef90000000000000ull && (int)bits(w, 0, 8) == ra) {  // LDC ra, c[idx][Rx + off]
+            if (bits(w, 36, 5) != 1 || bits(w, 48, 3) != 4) return false;  // (cb1, 32-bit)
+            table = (int64_t)bits(w, 20, 16);
+            break;
+        }
+        if ((int)bits(w, 0, 8) == ra) return false;  // (something else may write ra: unknown)
+    }
+    if (table < 0) return false;
+    const uint8_t *tab = blob + const_offset + table;
+    uint8_t *mark = calloc(end + 4, 1);
+    int n = 0;
+    for (int k = 0; k < 256; k++) {
+        int32_t v;
+        memcpy(&v, tab + 4 * k, 4);
+        int64_t t = (int64_t)i * 8 + 8 + v + imm;
+        if (t < 8 || (t & 7) || (size_t)(t / 8) >= end) break;
+        t = norm_target(t);  // (as the BRX itself does at run time)
+        if ((size_t)(t / 8) >= end) break;
+        mark[t / 8] = 1;
+        n++;
+    }
+    if (n) for (size_t k = 0; k < end; k++) label[k] |= mark[k];
+    free(mark);
+    return n > 0;
 }
 
 ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
@@ -3440,6 +3629,9 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     free(c->flow_to), c->flow_to = NULL;
     free(off0), free(off1);
     free(label);
+    // (MSL: more textures than sampler slots take a slot table, at a buffer index the vertex stage's streams use)
+    if (!c->glsl && stage == STAGE_VERTEX && info->ntex > MSL_MAX_SAMPLERS)
+        fail(c, "%d textures in a vertex shader (Metal: %d samplers)", info->ntex, MSL_MAX_SAMPLERS);
     if (c->fail) { free(c->body.buf); free(c); return info; }
     if (c->glsl) return glsl_finish(c, any_branch, dbg);
 
@@ -3452,6 +3644,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     sp(&s, "static inline uint bfi(uint ins, uint ctl, uint base) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u || pos >= 32u) return base; return insert_bits(base, ins, pos, min(len, 32u - pos)); }\n");
     sp(&s, "static inline float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n");
     sp(&s, "static inline uint2 rsc(uint2 c, float4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uint2(floor((float2(c) + 0.5f) * s.xy)); }\n");
+    sp(&s, "static inline float2 uvs(float2 uv, float4 s) { return (s.z == 1.0f && s.w == 1.0f) ? uv : min(uv, 1.0f) * s.zw; }\n");
     sp(&s, "static inline float2 hx(uint v, uint swz) { if (swz == 1u) return float2(as_type<float>(v)); float2 h = float2(as_type<half2>(v)); return swz == 2u ? h.xx : swz == 3u ? h.yy : h; }\n");
     // merges on half2 lanes rather than with integer masks: on an M1 (macOS 15.0.1) the Metal compiler miscompiled
     // (old & 0xFFFF0000u) | lo in Link's body shader - the merged low half read back as a constant 512.0 and Link
@@ -3508,17 +3701,25 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         info->uses_rscale = true;
     }
     // Runtime highlight (e.g. golden unchecked pots): fragment shaders writing a float color target 0 get a
-    // per-draw tint, float4 [0] = colour.rgb + strength, [1] = added glow.rgb (strength 0 = untouched).
+    // per-draw tint, float4 [0] = colour.rgb + strength, [1] = added glow.rgb (strength 0 = untouched; < 0: the
+    // Cosmetics recolour, emit_recolour).
     bool tint = stage == STAGE_FRAGMENT && !dbg && (c->omap_target & 0x7) == 0x7 && (!key || key->rt_kind[0] == 0);
     if (tint) {
         sp(&args, ", constant float4 *ltint [[buffer(19)]]");
         info->uses_tint = true;
     }
+    // Metal has 16 sampler slots a stage (textures: 31). Up to 16 textures, texture i samples with sampler i. With more
+    // (issue #215: a cave floor's fragment shader with 17), the samplers come as one array of the 16 slots and a table
+    // (buffer SMAP_BUFFER_INDEX) names each texture's slot: the renderer puts each distinct sampler state the draw uses
+    // in a slot of its own, so every texture keeps its own filtering and wrapping (renderer.m sampler_slots).
+    bool smap = info->ntex > MSL_MAX_SAMPLERS;  // (not in vertex shaders: refused above)
+    if (smap) sp(&args, ", constant uint *smap [[buffer(%d)]], array<sampler, %d> ss [[sampler(0)]]", SMAP_BUFFER_INDEX,
+                 MSL_MAX_SAMPLERS);
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
         const char *tn = tex_type_name(t->type);
-        if (t->shadow) sp(&args, ", depth%s<float> t%d [[texture(%d)]], sampler s%d [[sampler(%d)]]", tn, i, i, i, i);
-        else sp(&args, ", texture%s<float> t%d [[texture(%d)]], sampler s%d [[sampler(%d)]]", tn, i, i, i, i);
+        sp(&args, ", %s%s<float> t%d [[texture(%d)]]", t->shadow ? "depth" : "texture", tn, i, i);
+        if (!smap) sp(&args, ", sampler s%d [[sampler(%d)]]", i, i);
     }
     if (stage == STAGE_VERTEX) {
         sp(&s, "vertex VOut main0(VIn in [[stage_in]], uint vid [[vertex_id]], uint iid [[instance_id]]%s%s) {\n",
@@ -3535,6 +3736,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
            args.buf ? args.buf : "");
     }
     free(args.buf);
+    if (smap)
+        for (int i = 0; i < info->ntex; i++) sp(&s, "  sampler s%d = ss[smap[%d]];\n", i, i);
     for (int i = 0; i < 256; i++)
         if (c->reg_used[i]) sp(&s, "  uint r%d = 0;\n", i);
     for (int i = 0; i < 7; i++)
@@ -3580,6 +3783,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (tint)
             sp(&s, "  if (ltint[0].w > 0.0f) { float3 g = o.c0.rgb; float l = dot(g, float3(0.299f, 0.587f, 0.114f));\n"
                    "    o.c0.rgb = mix(g, ltint[0].rgb * pow(l, ltint[1].w) + ltint[1].rgb * l, ltint[0].w); }\n");
+        if (tint) emit_recolour(&s, "o.c0", "float3", "float4");
         if (c->omap_depth) {
             if (c->reg_used[r + 1]) sp(&s, "  o.depth = as_type<float>(r%d);\n", r + 1);
             else sp(&s, "  o.depth = in.pos.z;\n");

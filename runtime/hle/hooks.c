@@ -13,6 +13,7 @@
 
 void rt_mb_seen(uint64_t o);  // miniboss.c
 int rt_shadow_link_appear(uint64_t o);
+int rt_shadow_link_bgm(void);
 int rt_gohma_free(void);
 uint32_t rt_gohma_heading(uint64_t gohma, uint32_t track);
 int rt_crashout_skip(uint64_t o);
@@ -29,6 +30,8 @@ int rt_hook(Cpu *c, uint64_t site) {
         return 0;
     case GUEST(GA_SHADOW_LINK_APPEAR_SITE):  // SHADOW_LINK_APPEAR_SITE - ldr x9, [x0, #0x230]: his Appear event, none on the Field
         return rt_shadow_link_appear(c->x[0]) ? 2 : 0;
+    case GUEST(GA_SHADOW_LINK_BGM_SITE):  // SHADOW_LINK_BGM_SITE - bl main+0xce8ce0: his chamber music, only in the chamber
+        return rt_shadow_link_bgm();
     case GUEST(GA_CRASHOUT_SITE):  // CRASHOUT_SITE - str wzr, [x0, #0xb8]: Blaino's knock-out, no crash-out for copies
         if (!rt_crashout_skip(c->x[0])) return 0;
         ST32(c->x[0] + 0xb8, 0);
