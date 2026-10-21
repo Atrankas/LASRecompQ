@@ -1350,8 +1350,28 @@ static void bars_backdrop(VkCommandBuffer cb, TexBackend *b, double vx, double v
     if (on < 0) on = !getenv("LARECOMP_BARS") || atoi(getenv("LARECOMP_BARS"));
     static bool need;  // (this present's real frame: kept for its in-between frame and the menu's redraw)
     if (!again) need = g_box_drawn && !g_full_drawn && g_box_rt == (void *)b, g_box_drawn = g_full_drawn = false;
-    if (!on || !need) return;
-    if (crop[2] <= 0 || crop[3] <= 0) return;
+    if (!on || g_settings.black_bars || crop[2] <= 0 || crop[3] <= 0) return;
+    {   // the window around the picture (a 16:9 picture - movies, menus, Authentic 16:9 - in a wider or taller window):
+        // the picture's own edges there too, instead of black
+        double W = g_vk.sc_extent.width, H = g_vk.sc_extent.height, cw = crop[2] * 0.3, ch = crop[3] * 0.3;
+        if (vx >= 1) {
+            float uv[4] = {crop[0], crop[1], (float)cw, crop[3]};
+            vk_present_backdrop(cb, 0, (float)vy, (float)vx, (float)vh, uv, flip, 0.42f);
+        }
+        if (W - vx - vw >= 1) {
+            float uv[4] = {(float)(crop[0] + crop[2] - cw), crop[1], (float)cw, crop[3]};
+            vk_present_backdrop(cb, (float)(vx + vw), (float)vy, (float)(W - vx - vw), (float)vh, uv, flip, 0.42f);
+        }
+        if (vy >= 1) {
+            float uv[4] = {crop[0], flip ? (float)(crop[1] + crop[3] - ch) : crop[1], crop[2], (float)ch};
+            vk_present_backdrop(cb, 0, 0, (float)W, (float)vy, uv, flip, 0.42f);
+        }
+        if (H - vy - vh >= 1) {
+            float uv[4] = {crop[0], flip ? crop[1] : (float)(crop[1] + crop[3] - ch), crop[2], (float)ch};
+            vk_present_backdrop(cb, 0, (float)(vy + vh), (float)W, (float)(H - vy - vh), uv, flip, 0.42f);
+        }
+    }
+    if (!need) return;
     const float *f = g_box_frac;
     double x0 = vx + (f[0] - crop[0]) / crop[2] * vw, x1 = vx + (f[1] - crop[0]) / crop[2] * vw;
     double y0 = vy + (f[2] - crop[1]) / crop[3] * vh, y1 = vy + (f[3] - crop[1]) / crop[3] * vh;

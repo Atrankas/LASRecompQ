@@ -277,12 +277,12 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec3 c;\n"
                "  if (fx.x <= 0.0) c = texture(t, uv).rgb;\n"
                "  else {\n"
-               // (a 5x5 box of taps spread over the sampled strip: soft, no detail)
+               // (a 7x7 box of taps spread wide over the sampled strip: soft, no detail - a narrower spread left streaks)
                "    c = vec3(0.0);\n"
-               "    float r = 0.06 * fx.y;\n"
-               "    for (int j = -2; j <= 2; j++)\n"
-               "      for (int i = -2; i <= 2; i++) c += textureLod(t, uv + vec2(i, j) * r * 0.5, 0.0).rgb;\n"
-               "    c = c / 25.0 * fx.x;\n"
+               "    float r = 0.16 * fx.y;\n"
+               "    for (int j = -3; j <= 3; j++)\n"
+               "      for (int i = -3; i <= 3; i++) c += textureLod(t, uv + vec2(i, j) * (r / 3.0), 0.0).rgb;\n"
+               "    c = c / 49.0 * fx.x;\n"
                "  }\n"
                SCREEN_FILTER_SRC("vec3")
                "  o = vec4(c, 1.0);\n"

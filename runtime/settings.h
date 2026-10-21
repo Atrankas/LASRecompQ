@@ -56,6 +56,7 @@ typedef struct {
     bool blur_removal;   // no tilt-shift blur at the top / bottom of the screen
     bool hide_hero_icon; // no Hero Mode icon on the HUD
     int frame_gen;       // 60 fps (generated): in-between frames while the game runs at 30 (Vulkan: framegen.c)
+    bool black_bars;     // the bars around a picture narrower than the window plain black (else its blurred edges)
     int frame_rate;      // FRAME_RATE_*: the game's own frame rate mode (runtime/hle/framepace.c, nvn/pace.c)
     int power_mode;      // phones with root: 0 balanced, 1 maximum performance, 2 GPU performance (RootBoost.java reads it)
     bool mirror_mode;    // the world mirrored left to right (Gameplay tab): renderers + runtime/hle/input.c

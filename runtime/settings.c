@@ -243,6 +243,7 @@ void settings_load(void) {
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
         else if (!strcmp(key, "frame_gen")) g_settings.frame_gen = atoi(val);
+        else if (!strcmp(key, "black_bars")) g_settings.black_bars = atoi(val) != 0;
         else if (!strcmp(key, "frame_rate")) g_settings.frame_rate = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
         else if (!strcmp(key, "power_mode")) g_settings.power_mode = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
         else if (!strcmp(key, "ui_language")) g_settings.ui_language = atoi(val) >= 0 && atoi(val) < N_UI_LANGUAGES ? atoi(val) : 0;
@@ -339,7 +340,7 @@ void settings_save(void) {
     fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\nframe_gen = %d\n", g_settings.move_360, g_settings.blur_removal,
             g_settings.hide_hero_icon, g_settings.frame_gen);
     fprintf(f, "ui_language = %d\npower_mode = %d\n", g_settings.ui_language, g_settings.power_mode);
-    fprintf(f, "frame_rate = %d\n", g_settings.frame_rate);
+    fprintf(f, "frame_rate = %d\nblack_bars = %d\n", g_settings.frame_rate, g_settings.black_bars);
     static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation"};
     fprintf(f, "prompts = %s\n", prompts[g_settings.prompts & 3]);
     fprintf(f, "menu_confirm = %s\n", g_settings.menu_confirm == MENU_CONFIRM_CONTROLLER ? "controller" : "game");

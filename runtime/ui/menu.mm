@@ -380,6 +380,14 @@ static void init(void) {
     const char *paths[] = {"/System/Library/Fonts/Avenir Next.ttc", "/System/Library/Fonts/Helvetica.ttc",
                            "C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                            "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"};
+    // (Android has none of those: the DejaVu Sans the APK carries, copied out with the app's resources - else the
+    // name entry's text, the FPS counter and the overlays came out in ImGui's 13 px default font)
+    char dejavu[1024];
+    if (rt_resource("DejaVuSans.ttf", NULL, dejavu, sizeof dejavu)) {
+        g_font = io.Fonts->AddFontFromFileTTF(dejavu, 34, &cfg);
+        ImFontConfig b = cfg;
+        g_font_big = io.Fonts->AddFontFromFileTTF(dejavu, 56, &b);
+    }
     for (const char *p : paths) {
         if (FILE *f = fopen(p, "rb")) fclose(f);  // a missing file is an assertion in ImGui, not a NULL return
         else continue;
@@ -628,6 +636,16 @@ static void tab_display(void) {
                "after each one from the picture, the scene's depth, the camera's movement and what moves on its own, "
                "and shown a refresh later. It pauses by itself when the game can't hold its 30. Takes effect at the "
                "next start of the app.");
+#endif
+#ifndef __APPLE__
+    {
+        static const char *barn[] = {"Blurred picture", "Black"};
+        int v = g_settings.black_bars ? 1 : 0;
+        if (opt_choice("Side bars", &v, barn, 2, 0,
+                       "What fills the screen around a picture narrower (or taller) than it - movies, menus, the file "
+                       "select, Authentic 16:9: the picture's own edges, blurred and dimmed, or plain black."))
+            g_settings.black_bars = v != 0;
+    }
 #endif
     static const char *frn[] = {"Auto", "60 fps (native)", "30 fps"};
     opt_choice("Frame rate", &g_settings.frame_rate, frn, 3, FRAME_RATE_AUTO,

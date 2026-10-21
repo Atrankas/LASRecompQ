@@ -52,7 +52,7 @@ static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) neve
 // frame with nothing else (menus, the file select, movies: no scene composited over the whole target) leaves the rest
 // of the target as it was - another frame's picture, a different one in each buffer: the bars flickered. Then the
 // present covers them (device.c bars_backdrop). Render thread.
-uint64_t g_box_draw_frame = ~0ull, g_full_draw_frame = ~0ull;  // (renderer_present_count of the last such draws)
+bool g_box_drawn, g_full_drawn;  // such draws since the last present (device.c resets them; render thread, in order)
 void *g_box_rt;  // (the target they went into)
 float g_box_frac[4];  // the box: x0, x1, y0, y1 as fractions of the target
 
@@ -5706,7 +5706,7 @@ static void draw_(CmdRec *r, bool indexed) {
         }
         bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_exec_frame());
         if (!composite) wide_frame = ~0ull;
-        if (composite) g_full_draw_frame = renderer_present_count();
+        if (composite) g_full_drawn = true;
         if (!composite) {
             int pw, ph;
             pass_size(&pw, &ph);
@@ -5715,7 +5715,7 @@ static void draw_(CmdRec *r, bool indexed) {
             vp_ox = (pw - st.rt.color[0]->width * u) * 0.5f;
             vp_oy = (ph - st.rt.color[0]->height * u) * 0.5f;
             if (pw > 0 && ph > 0) {  // (the box, as fractions of the target: device.c bars_backdrop)
-                g_box_draw_frame = renderer_present_count();
+                g_box_drawn = true;
                 g_box_rt = st.rt.color[0]->backend;
                 g_box_frac[0] = vp_ox / pw, g_box_frac[1] = (vp_ox + st.rt.color[0]->width * u) / pw;
                 g_box_frac[2] = vp_oy / ph, g_box_frac[3] = (vp_oy + st.rt.color[0]->height * u) / ph;
@@ -6821,8 +6821,9 @@ void vk_present_backdrop(VkCommandBuffer cb, float x, float y, float w, float h,
     extern VkViewport vk_sc_viewport(float x, float y, float w, float h);
     VkViewport vp = vk_sc_viewport(x, y, w, h);
     vkCmdSetViewport(cb, 0, 1, &vp);
-    float pv[8] = {flip ? 1.0f : 0.0f, (float)g_vk.sc_quarter, light, 0, uvr[0], uvr[1], uvr[2], uvr[3]};
-    vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
+    float pc[12] = {flip ? 1.0f : 0.0f, (float)g_vk.sc_quarter, light, 0, uvr[0], uvr[1], uvr[2], uvr[3]};
+    screen_filter_params(pc + 8);  // (the bars take the screen filter too, as the picture)
+    vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
     vkCmdDraw(cb, 3, 1, 0, 0);
     VkViewport full = {0, 0, (float)g_vk.sc_phys.width, (float)g_vk.sc_phys.height, 0, 1};
     vkCmdSetViewport(cb, 0, 1, &full);

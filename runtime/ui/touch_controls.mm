@@ -665,7 +665,7 @@ extern "C" void touch_draw(ImDrawList *dl, float w, float h, ImFont *font) {
             dl->AddText(font, hs, q, IM_COL32(255, 255, 255, 255), hn);
         }
     }
-    if (ctx == X_TITLE && !g_editing) {  // what a tap does
+    if (ctx == X_TITLE && !g_editing && g_title_step < 2) {  // what a tap does (past the file select: the game's own)
         const char *t = g_title_step == 1 ? T("Tap a file to play") : T("Tap to start");
         // (the title screen: between its "Press L + R" and the copyright line at the bottom, which it covered)
         float ty = g_title_step == 1 ? h - 40 * th : h * 0.835f;
