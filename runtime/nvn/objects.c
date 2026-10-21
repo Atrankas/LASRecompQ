@@ -804,6 +804,12 @@ NVN(nvnWindowSetPresentInterval) {  // (the game's 60 / 30 fps mode: 1 / 2; LARE
     if (log < 0) log = getenv("LARECOMP_LOG_INTERVAL") != NULL;
     if (log && WIN->interval != (int)A(1)) LOG("[nvn] present interval %d -> %d\n", WIN->interval, (int)A(1));
     WIN->interval = (int)A(1);
+    // the game's mode for frame generation (vulkan/framegen.c: in-between frames in its 30) and the fps line. Set here
+    // as well as in runtime/hle/framepace.c rt_frame_steps: that read sits in the part of the game's frame controller
+    // its own dynamic resolution runs, and with that off (tools/patches.py GAME_DYNRES_SITE) it never ran - the mode
+    // stayed 60 and frame generation never started (1.1.0, issue #7)
+    extern uint32_t g_game_interval;
+    if (A(1) >= 1 && A(1) <= 4) g_game_interval = (uint32_t)A(1);
 }
 NVN(nvnWindowSetCrop) { int *cr = WIN->crop; cr[0] = (int)A(1); cr[1] = (int)A(2); cr[2] = (int)A(3); cr[3] = (int)A(4); }
 NVN(nvnWindowGetCrop) { memcpy(AP(1), WIN->crop, 16); }

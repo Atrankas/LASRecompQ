@@ -1313,6 +1313,7 @@ uint64_t renderer_present_count(void);
 void renderer_save_texture_tex(TexBackend *b, const char *path);
 
 static uint64_t frames, total_frames, g_frame_counter;
+static unsigned g_gen_frames;  // in-between frames since the last fps line
 uint64_t renderer_present_count(void) { return total_frames; }  // (the game thread's frame: the HLE hooks')
 // The frame whose work is being translated (rqueue.h rq_frame): "once per frame" state of the translation. Without the
 // render thread, total_frames.
@@ -1489,6 +1490,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBackend *fin, const float rect[4],
                             const float crop[4], bool flip_present);
         bool gen = fg_frame_wanted(frame, b);
+        g_gen_frames += gen;  // (the fps line: in-between frames shown)
         g_fg_copy = gen;
         // LARECOMP_FG_SHOT=<frame>: that frame's window picture, its in-between one and the next real one (build/fg_*.png)
         static long fg_shot = -1;
@@ -1579,9 +1581,10 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             uint64_t gbn = atomic_load(&g_gpu_busy_ns);
             double gpu_avg = frames && gb_at ? (gbn - gb_at) / 1e6 / frames : 0;  // (GPU ms per presented frame)
             gb_at = gbn;
-            LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms gpu %.1fms speed %.0f%% (mode %d) level %s (%s)\n", now,
-                (unsigned long long)frame, frames / (now - last_fps_time), max_gap * 1000.0, gpu_avg, g_game_speed * 100,
-                g_game_interval ? 60 / (int)g_game_interval : 60, game_level_name(), renderer_stats());
+            LOG("[vk] t=%.1f frame %llu %.1f fps (+%.1f generated) max %.0fms gpu %.1fms speed %.0f%% (mode %d) level %s (%s)\n", now,
+                (unsigned long long)frame, frames / (now - last_fps_time), g_gen_frames / (now - last_fps_time), max_gap * 1000.0,
+                gpu_avg, g_game_speed * 100, g_game_interval ? 60 / (int)g_game_interval : 60, game_level_name(), renderer_stats());
+            g_gen_frames = 0;
         }
         max_gap = 0;
         frames = 0;

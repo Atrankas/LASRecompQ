@@ -25,9 +25,16 @@
 
 // The game's own dynamic resolution (tools/patches.py GAME_DYNRES_SITE) is off: the resolution is the one chosen here,
 // and only our Dynamic changes it. LARECOMP_GAME_DYNRES=1 (test): the game lowers its main pass under GPU load again.
+// Android: the game's own stays on (as before Beta 5): with it off, interiors at the unlocked aspect came out zoomed
+// and off-centre (the wide render setup goes through its levels, issue #8), and the frame controller's part that
+// reports the game's 30 / 60 mode didn't run (frame generation never started, issue #7). LARECOMP_GAME_DYNRES=0: off.
 int rt_game_dynres(void) {
     static int on = -1;
+#ifdef __ANDROID__
+    if (on < 0) on = !getenv("LARECOMP_GAME_DYNRES") || atoi(getenv("LARECOMP_GAME_DYNRES"));
+#else
     if (on < 0) on = getenv("LARECOMP_GAME_DYNRES") && atoi(getenv("LARECOMP_GAME_DYNRES"));
+#endif
     return on;
 }
 
