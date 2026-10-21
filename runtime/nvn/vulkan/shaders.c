@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include "shaders.h"
+#include "../screen_filter.h"
 
 void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works at all)
     shaderc_compiler_t c = shaderc_compiler_initialize();
@@ -268,17 +269,23 @@ static const char *builtin_src(const char *name, int *stage) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
                "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform F { layout(offset = 32) vec4 pf; };\n"  // (the screen filter)
                "layout(location = 0) in vec2 uv;\n"
                "layout(location = 1) in vec2 fx;\n"
                "layout(location = 0) out vec4 o;\n"
                "void main() {\n"
-               "  if (fx.x <= 0.0) { o = vec4(texture(t, uv).rgb, 1.0); return; }\n"
+               "  vec3 c;\n"
+               "  if (fx.x <= 0.0) c = texture(t, uv).rgb;\n"
+               "  else {\n"
                // (a 5x5 box of taps spread over the sampled strip: soft, no detail)
-               "  vec3 c = vec3(0.0);\n"
-               "  float r = 0.06 * fx.y;\n"
-               "  for (int j = -2; j <= 2; j++)\n"
-               "    for (int i = -2; i <= 2; i++) c += textureLod(t, uv + vec2(i, j) * r * 0.5, 0.0).rgb;\n"
-               "  o = vec4(c / 25.0 * fx.x, 1.0);\n"
+               "    c = vec3(0.0);\n"
+               "    float r = 0.06 * fx.y;\n"
+               "    for (int j = -2; j <= 2; j++)\n"
+               "      for (int i = -2; i <= 2; i++) c += textureLod(t, uv + vec2(i, j) * r * 0.5, 0.0).rgb;\n"
+               "    c = c / 25.0 * fx.x;\n"
+               "  }\n"
+               SCREEN_FILTER_SRC("vec3")
+               "  o = vec4(c, 1.0);\n"
                "}\n";
     }
     // ---- decoded video, NV12 -> RGBA (exec.c vk_convert_nv12): limited range BT.601, as swscale did (the movies

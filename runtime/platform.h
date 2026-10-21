@@ -28,6 +28,9 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi);
 // reset for the range. Returns the count (max: maybe more), or -1 where there is no tracking (macOS, older Linux).
 // Page size: *page.
 int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page);
+#ifdef __linux__
+void plat_write_tracking_off(const char *why);  // tracking off from now on (unless LARECOMP_WRITE_TRACKING=1)
+#endif
 enum { PLAT_PROT_NONE = 0, PLAT_PROT_READ = 1, PLAT_PROT_RW = 3 };
 int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
 #define PLAT_PAGE 0x4000ull  // largest page size we deal with (macOS 16K; multiple of Windows' 4K)
@@ -45,6 +48,15 @@ void plat_thread_core(int role);
 void plat_frame_work(uint64_t busy_ns, uint64_t target_ns);
 int plat_cpu_count(void);  // logical cores this process may run on (its affinity mask); 0 if unknown
 void plat_thread_guest(int prio);  // a guest thread's host scheduling class from its Switch priority (lower = more urgent)
+uint64_t plat_thread_cpu_ns(void);  // the calling thread's CPU time so far (user + system; diagnostics)
+// The calling thread is one of the frame's critical threads: on Windows, no power throttling (EcoQoS) for it and, on a
+// hybrid CPU, a preference for the performance cores (selected CPU sets; LARECOMP_PCORE=0: off). Elsewhere a no-op.
+enum { PLAT_PERF_GAME, PLAT_PERF_RENDER, PLAT_PERF_VSYNC };
+#ifdef _WIN32
+void plat_thread_perf_core(int role);
+#else
+static inline void plat_thread_perf_core(int role) { (void)role; }
+#endif
 
 // ---- process
 void plat_init(void);                                // first thing in main()

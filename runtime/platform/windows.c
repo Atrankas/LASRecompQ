@@ -99,6 +99,35 @@ uint64_t plat_now_ns(void) {
     return (uint64_t)((unsigned __int128)t.QuadPart * 1000000000u / (uint64_t)qpf.QuadPart);
 }
 
+// The calling thread's CPU time. GetThreadTimes only advances in whole scheduler ticks (15.6 ms): per frame that reads
+// 0 or 15.6. QueryThreadCycleTime counts the thread's cycles exactly, in TSC ticks on x64 (invariant TSC), so
+// those are converted with the TSC rate measured once against the performance counter (20 ms, at the first call).
+// Elsewhere (or if the cycle count fails): GetThreadTimes, kernel + user.
+#if defined(__x86_64__) || defined(_M_X64)
+#include <intrin.h>
+static double tsc_per_ns;
+static INIT_ONCE tsc_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK tsc_calibrate(PINIT_ONCE o, PVOID p, PVOID *c) {
+    (void)o, (void)p, (void)c;
+    uint64_t q0 = plat_now_ns(), t0 = __rdtsc();
+    Sleep(20);
+    uint64_t q1 = plat_now_ns(), t1 = __rdtsc();
+    if (q1 > q0 && t1 > t0) tsc_per_ns = (double)(t1 - t0) / (double)(q1 - q0);
+    return TRUE;
+}
+#endif
+uint64_t plat_thread_cpu_ns(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    InitOnceExecuteOnce(&tsc_once, tsc_calibrate, NULL, NULL);
+    ULONG64 cyc;
+    if (tsc_per_ns > 0 && QueryThreadCycleTime(GetCurrentThread(), &cyc)) return (uint64_t)((double)cyc / tsc_per_ns);
+#endif
+    FILETIME c, e, k, u;
+    if (!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) return 0;
+    uint64_t kt = ((uint64_t)k.dwHighDateTime << 32) | k.dwLowDateTime, ut = ((uint64_t)u.dwHighDateTime << 32) | u.dwLowDateTime;
+    return (kt + ut) * 100;  // (100 ns units)
+}
+
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x2
 #endif
@@ -126,6 +155,102 @@ int plat_cpu_count(void) {
 }
 
 void plat_thread_guest(int prio) { (void)prio; }  // (the OS's default scheduling serves the game here)
+
+// ---- performance cores (hybrid CPUs: P-cores + E-cores)
+// Windows may run the game, render and vsync threads on efficiency cores, where they run far slower (another Switch
+// recomp measured 40%). Each of those threads opts out of power throttling (EcoQoS) and, on a hybrid CPU, selects the
+// CPU sets of the faster cores (EfficiencyClass above the lowest). Selected CPU sets are a soft preference, never a
+// hard pin, and they are only the cores the process affinity allows: when the affinity already excludes the E-cores
+// (or the P-cores), nothing is selected, so an affinity-limited run (e.g. 0xF) schedules exactly as before.
+// Not hybrid: no CPU sets. LARECOMP_PCORE=0: none of this (the process-wide opt-out in plat_init stays).
+static INIT_ONCE pcore_once = INIT_ONCE_STATIC_INIT;
+static bool pcore_off;
+static ULONG *pcore_ids;  // the selected CPU set ids (NULL: no selection)
+static ULONG pcore_n;
+static const char *pcore_how = "";
+
+static BOOL CALLBACK pcore_init(PINIT_ONCE o, PVOID p, PVOID *c) {
+    (void)o, (void)p, (void)c;
+    const char *e = getenv("LARECOMP_PCORE");
+    if (e && *e && atoi(e) == 0) {
+        pcore_off = true;
+        fprintf(stderr, "[pcore] off (LARECOMP_PCORE=0): default scheduling, thread power throttling unchanged\n");
+        return TRUE;
+    }
+    ULONG len = 0;
+    GetSystemCpuSetInformation(NULL, 0, &len, GetCurrentProcess(), 0);
+    uint8_t *buf = len ? malloc(len) : NULL;
+    if (!buf || !GetSystemCpuSetInformation((PSYSTEM_CPU_SET_INFORMATION)buf, len, &len, GetCurrentProcess(), 0)) {
+        free(buf);
+        pcore_how = " (CPU sets unavailable)";
+        fprintf(stderr, "[pcore] CPU set information unavailable (error %lu): power throttling off only\n", GetLastError());
+        return TRUE;
+    }
+    // The process affinity mask covers its primary group only: filter by it when the system has a single group.
+    DWORD_PTR proc = 0, sys = 0;
+    bool filter = GetActiveProcessorGroupCount() == 1 && GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) && proc;
+    int lo = 255, hi = -1, all_p = 0, all_e = 0, ok_p = 0, ok_e = 0, n = 0;
+    for (ULONG off = 0; off < len;) {  // pass 1: the efficiency classes
+        SYSTEM_CPU_SET_INFORMATION *i = (SYSTEM_CPU_SET_INFORMATION *)(buf + off);
+        if (!i->Size) break;
+        if (i->Type == CpuSetInformation) {
+            int ec = i->CpuSet.EfficiencyClass;
+            if (ec < lo) lo = ec;
+            if (ec > hi) hi = ec;
+            n++;
+        }
+        off += i->Size;
+    }
+    bool hybrid = n && hi > lo;
+    if (hybrid) pcore_ids = calloc((size_t)n, sizeof *pcore_ids);
+    for (ULONG off = 0; off < len;) {  // pass 2: count, and the P-cores the affinity allows
+        SYSTEM_CPU_SET_INFORMATION *i = (SYSTEM_CPU_SET_INFORMATION *)(buf + off);
+        if (!i->Size) break;
+        if (i->Type == CpuSetInformation) {
+            bool perf = i->CpuSet.EfficiencyClass > lo;
+            bool allowed = !filter || (i->CpuSet.Group == 0 && i->CpuSet.LogicalProcessorIndex < 64 &&
+                                       (proc >> i->CpuSet.LogicalProcessorIndex) & 1);
+            perf ? all_p++ : all_e++;
+            if (allowed) perf ? ok_p++ : ok_e++;
+            if (allowed && perf && pcore_ids) pcore_ids[pcore_n++] = i->CpuSet.Id;
+        }
+        off += i->Size;
+    }
+    free(buf);
+    if (!hybrid) {
+        pcore_how = " (not hybrid: no CPU sets)";
+        fprintf(stderr, "[pcore] CPU not hybrid (%d logical processors, one efficiency class): power throttling off, "
+                        "no CPU sets\n", n);
+    } else if (!ok_p || !ok_e) {
+        free(pcore_ids), pcore_ids = NULL, pcore_n = 0;
+        pcore_how = " (affinity decides: no CPU sets)";
+        fprintf(stderr, "[pcore] hybrid CPU: %d performance + %d efficiency logical processors; the process affinity "
+                        "allows %d + %d: no CPU sets (the affinity decides), power throttling off\n", all_p, all_e, ok_p, ok_e);
+    } else {
+        pcore_how = " (performance-core CPU sets)";
+        fprintf(stderr, "[pcore] hybrid CPU: %d performance + %d efficiency logical processors%s; game/render/vsync "
+                        "threads prefer the %d performance ones, power throttling off\n", all_p, all_e,
+                filter && (ok_p != all_p || ok_e != all_e) ? " (affinity-limited)" : "", ok_p);
+    }
+    return TRUE;
+}
+
+void plat_thread_perf_core(int role) {
+    InitOnceExecuteOnce(&pcore_once, pcore_init, NULL, NULL);
+    if (pcore_off) return;
+    THREAD_POWER_THROTTLING_STATE tp = {
+        .Version = THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        .ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        .StateMask = 0,  // (controlled, and off: never EcoQoS)
+    };
+    bool thr = SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &tp, sizeof tp) != 0;
+    bool sets = !pcore_ids || SetThreadSelectedCpuSets(GetCurrentThread(), pcore_ids, pcore_n) != 0;
+    static volatile LONG logged;  // (once per role: a reboot's new game thread applies the same, quietly)
+    static const char *const names[] = {"game", "render", "vsync"};
+    if (role < 0 || role > 2 || (InterlockedOr(&logged, 1 << role) & (1 << role))) return;
+    fprintf(stderr, "[pcore] %s thread: power throttling %s%s%s\n", names[role], thr ? "off" : "unchanged (refused)",
+            pcore_how, sets ? "" : " (CPU sets refused)");
+}
 
 void plat_thread_realtime(uint64_t period_ns) {
     (void)period_ns;
@@ -585,15 +710,62 @@ int plat_proc_wait(PlatProc p, bool block) {
     return code > 255 ? 255 : (int)code;  // (a crash's NTSTATUS, e.g. 0xC0000409, is not "still running" (-1))
 }
 
+// rm -rf that never goes through a link: a junction or symlink inside is removed itself (RemoveDirectory /
+// DeleteFile on the reparse point), never what it points to. Cloud placeholders (OneDrive: also reparse points, but
+// not redirects) are ordinary files and folders. w: a \\?\ path in a 32768-wide buffer, len its length; attr and
+// tag: its FindFirstFile attributes and reparse tag.
+static bool cloud_placeholder(DWORD tag) { return (tag & 0xFFFF0FFF) == 0x9000001A; }  // IO_REPARSE_TAG_CLOUD(_1.._F)
+static bool remove_tree_w(wchar_t *w, size_t len, DWORD attr, DWORD tag) {
+    bool dir = attr & FILE_ATTRIBUTE_DIRECTORY;
+    if ((attr & FILE_ATTRIBUTE_REPARSE_POINT) && !cloud_placeholder(tag))  // junction / symlink: the link only
+        return dir ? RemoveDirectoryW(w) != 0 : DeleteFileW(w) != 0;
+    if (attr & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(w, attr & ~FILE_ATTRIBUTE_READONLY);
+    if (!dir) return DeleteFileW(w) != 0;
+    bool ok = true;
+    if (len + 3 >= 32768) return false;
+    wcscpy(w + len, L"\\*");
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileExW(w, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+    w[len] = 0;
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            size_t k = wcslen(fd.cFileName);
+            if (len + 1 + k >= 32768) { ok = false; continue; }
+            w[len] = L'\\';
+            wcscpy(w + len + 1, fd.cFileName);
+            ok &= remove_tree_w(w, len + 1 + k, fd.dwFileAttributes,
+                                (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ? fd.dwReserved0 : 0);
+            w[len] = 0;
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    return RemoveDirectoryW(w) != 0 && ok;
+}
+
 bool plat_remove_tree(const char *dir) {
-    // SHFileOperation wants a double-NUL-terminated path with backslashes
-    static __thread wchar_t w[MAX_PATH + 2];
-    int n = MultiByteToWideChar(CP_UTF8, 0, dir, -1, w, MAX_PATH);
-    if (n <= 1) return false;
-    w[n] = 0;
-    for (wchar_t *p = w; *p; p++) if (*p == L'/') *p = L'\\';
-    SHFILEOPSTRUCTW op = {.wFunc = FO_DELETE, .pFrom = w, .fFlags = FOF_NO_UI};
-    return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
+    static __thread wchar_t rel[MAX_PATH * 4], w[32768];
+    if (MultiByteToWideChar(CP_UTF8, 0, dir, -1, rel, MAX_PATH * 4) <= 1) return false;
+    for (wchar_t *p = rel; *p; p++) if (*p == L'/') *p = L'\\';
+    DWORD n = GetFullPathNameW(rel, 32768 - 8, w + 4, NULL);  // (absolute, then \\?\ for long paths)
+    if (!n || n >= 32768 - 8) return false;
+    size_t len;
+    if (w[4] == L'\\' && w[5] == L'\\') {  // \\server\share -> \\?\UNC\server\share
+        memmove(w + 8, w + 6, (n - 1) * sizeof *w);
+        memcpy(w, L"\\\\?\\UNC\\", 8 * sizeof *w);
+        len = n + 6;
+    } else {
+        memcpy(w, L"\\\\?\\", 4 * sizeof *w);
+        len = n + 4;
+    }
+    while (len > 7 && w[len - 1] == L'\\') len--;  // (no trailing separator: "\\*" is appended)
+    w[len] = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileExW(w, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FindClose(h);
+    return remove_tree_w(w, len, fd.dwFileAttributes,
+                         (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ? fd.dwReserved0 : 0);
 }
 
 // End the process at once, skipping DLL teardown (from an atexit handler, after flushing). Exit status 0.

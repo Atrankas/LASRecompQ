@@ -77,3 +77,4 @@
 #define GA_MAIN_CODE_SIZE                  UINT64_C(0x16a0000)
 #define GA_DELEGATE_JOB_VTABLE_LIVE         UINT64_C(0x7001c51308)
 #define GA_DELEGATE_JOB_VTABLE_BASE         UINT64_C(0x7001c51358)
+#define GA_RES_SETUP                        UINT64_C(0x7001023c10)

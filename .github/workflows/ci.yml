@@ -68,12 +68,18 @@ jobs:
           build/test-condvar
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Game-files delete guard (links, outside the data folder)
+        run: DEPS="$HOME/sdl3" python3 tools/test_delete_guard.py
+      - name: Dynamic resolution controller (simulated GPU)
+        run: python3 tools/test_dynres.py
       - name: Controller light colours
         run: |
           clang -std=gnu11 -O1 tools/test_led.c -lm -o build/test-led
           build/test-led
       - name: Vulkan fence sequence regression
         run: python3 tools/test_fence_sequence.py
+      - name: Guest heap import on low-memory machines
+        run: python3 tools/test_gmem_lowmem.py
       - name: Vulkan validation failure regression
         run: python3 tools/test_vulkan_validation.py
       - name: SIMD rounding and host-state regression
@@ -82,6 +88,8 @@ jobs:
           build/test-simd-rounding
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
+      - name: Randomizer Field region table
+        run: python3 tools/test_field_regions.py
       - name: Vulkan synchronization failure regression
         run: python3 tools/test_vulkan_sync_errors.py
       - name: Shader translator instruction semantics
@@ -120,6 +128,10 @@ jobs:
           build/test-condvar
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Game-files delete guard (links, outside the data folder)
+        run: python3 tools/test_delete_guard.py
+      - name: Dynamic resolution controller (simulated GPU)
+        run: python3 tools/test_dynres.py
       - name: Controller light colours
         run: |
           clang -std=gnu11 -O1 tools/test_led.c -lm -o build/test-led
@@ -159,6 +171,8 @@ jobs:
           python3 tools/test_windows_processes.py
       - name: Save I/O regression tests
         run: python3 tools/test_save.py
+      - name: Game-files delete guard (junctions, outside the data folder)
+        run: python3 tools/test_delete_guard.py
       - name: Movie extractor lifecycle regression
         run: |
           clang -std=gnu11 -O1 tools/test_movie_extractor.c -lavformat -lavcodec -lavutil -lswscale -o build/test-movie-extractor.exe
@@ -170,6 +184,8 @@ jobs:
           build/test-condvar.exe
       - name: Vulkan fence sequence regression
         run: python tools/test_fence_sequence.py
+      - name: Guest heap import on low-memory machines
+        run: python tools/test_gmem_lowmem.py
       - name: Vulkan validation failure regression
         run: python tools/test_vulkan_validation.py
       - name: Windows guest thread stack regression
@@ -191,8 +207,12 @@ jobs:
       # just satisfies it. The GLSL half - every fuzzed translation compiles and validates - is the check)
       - name: Shader translator fuzz (GLSL)
         run: REF=HEAD tools/test_translate.sh 4000 "$(nproc)" glsl
-      # (the heap in chunks, as on GPUs whose storage buffers can't span it - Intel: shader.h maxwell_gmem_chunk_shift)
+      # (the heap in chunks: lazily imported on AMD APUs and Intel, windows where that isn't possible - shader.h maxwell_gmem_chunk_shift)
       - name: Shader translator fuzz (GLSL, guest heap in chunks)
-        run: TT_GMEM_CHUNK_SHIFT=26 REF=HEAD tools/test_translate.sh 2000 "$(nproc)" glsl
+        run: TT_GMEM_CHUNK_SHIFT=24 REF=HEAD tools/test_translate.sh 2000 "$(nproc)" glsl
+      - name: Shader translator fuzz (GLSL, guest heap in lazy chunks)
+        run: TT_GMEM_CHUNK_SHIFT=24 TT_GMEM_LAZY=1 REF=HEAD tools/test_translate.sh 2000 "$(nproc)" glsl
+      - name: Shader translator fuzz (GLSL, guest heap in lazy chunks, misses counted in every fragment shader)
+        run: TT_GMEM_CHUNK_SHIFT=24 TT_GMEM_LAZY=1 TT_GMEM_FS_MISS=1 REF=HEAD tools/test_translate.sh 500 "$(nproc)" glsl
       - name: Vulkan synchronization failure regression
         run: python tools/test_vulkan_sync_errors.py

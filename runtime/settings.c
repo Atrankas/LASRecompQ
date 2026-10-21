@@ -18,6 +18,11 @@ static const char *settings_file(void) {
     return e && *e ? e : "larecomp.ini";
 }
 
+const char *const g_enemy_colour_modes[N_ENEMY_COLOUR_MODES] = {"Off", "Random per seed", "Random every load"};
+static const char *const k_enemy_colour_keys[N_ENEMY_COLOUR_MODES] = {"off", "seed", "load"};  // (larecomp.ini)
+const char *const g_screen_filters[N_SCREEN_FILTERS] = {"Off", "Game Boy", "Game Boy Color", "Grayscale"};
+static const char *const k_screen_filter_keys[N_SCREEN_FILTERS] = {"off", "gameboy", "gameboy_color", "grayscale"};  // (else: off)
+
 Settings g_settings = {
     .aspect = ASPECT_UNLOCKED,
     .fullscreen = false,
@@ -27,6 +32,7 @@ Settings g_settings = {
     .rumble = true,
     .rumble_strength = 100,
     .controller_light = true,
+    .menu_confirm = MENU_CONFIRM_CONTROLLER,
     .show_fps = false,
     .inv_keys = true,
     .tracker = true,
@@ -38,6 +44,9 @@ Settings g_settings = {
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
     .touch_opacity = 0.6f,
     .touch_size = 1.0f,
+    .upscaler_auto = true,
+    .res_auto = true,
+    .livesplit_host = "localhost:16834",
 #ifndef __APPLE__
     .bg_input = true,  // (as before the setting; on macOS it needs Input Monitoring permission, so Off there)
 #endif
@@ -127,6 +136,40 @@ const char *settings_translation_dir(void) {
     return g_tr_found ? g_tr_dir : NULL;
 }
 
+int g_default_upscaler = UPSCALE_SHARP;
+int g_default_res_mode = RES_MATCH;
+bool g_gpu_integrated;
+
+static const char *res_name(int m) {
+    static char n[8];
+    if (m >= 1 && m <= 8) { snprintf(n, sizeof n, "%dx", m); return n; }
+    return m == RES_DYNAMIC ? "dynamic" : m == RES_Q75 ? "75%" : m == RES_Q50 ? "50%" : m == RES_Q25 ? "25%" :
+           m == RES_X125 ? "1.25x" : m == RES_X150 ? "1.5x" : "match";
+}
+
+void settings_resolve_defaults(bool integrated) {
+    const char *e = getenv("LARECOMP_INTEGRATED");
+    if (e && *e) integrated = atoi(e) != 0;
+#ifdef __ANDROID__
+    // phones' GPUs are all integrated, and their defaults stay their own: SGSR (one cheap pass), the dynamic
+    // resolution (the display's, down to 50% while the GPU can't hold 30 fps), 1x = the Switch's 1080p
+    integrated = false;
+    g_gpu_integrated = false;
+    g_default_upscaler = UPSCALE_SHARP;
+    g_default_res_mode = RES_DYNAMIC;
+#else
+    g_gpu_integrated = integrated;
+    g_default_upscaler = integrated ? UPSCALE_BILINEAR : UPSCALE_SHARP;
+    g_default_res_mode = RES_MATCH;  // (Dynamic is not a default until it is reliable: user 2026-10-18)
+#endif
+    if (g_settings.upscaler_auto) g_settings.upscaler = g_default_upscaler;
+    if (g_settings.res_auto) g_settings.res_mode = g_default_res_mode;
+    LOG("[settings] %s GPU: upscaler %s (%s), resolution %s (%s), anti-aliasing %s\n", integrated ? "integrated" : "discrete / other",
+        g_settings.upscaler == UPSCALE_BILINEAR ? "bilinear" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" :
+        g_settings.upscaler == UPSCALE_SGSR ? "sgsr" : "metalfx",
+        g_settings.upscaler_auto ? "default" : "chosen", res_name(g_settings.res_mode), g_settings.res_auto ? "default" : "chosen",
+        g_settings.antialias == AA_SMAA ? "smaa" : "off");
+}
 
 void settings_load(void) {
     static bool loaded;
@@ -172,17 +215,23 @@ void settings_load(void) {
         }
         else if (!strcmp(key, "resolution")) {
             int n = atoi(val);
+            g_settings.res_auto = !strcmp(val, "auto");
+            if (g_settings.res_auto) { g_settings.res_mode = g_default_res_mode; continue; }
             g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : (!strcmp(val, "75%") || !strcmp(val, "67%")) ? RES_Q75 :
                                   !strcmp(val, "50%") ? RES_Q50 : !strcmp(val, "1.25x") ? RES_X125 : !strcmp(val, "1.5x") ? RES_X150 : !strcmp(val, "25%") ? RES_Q25 :
                                   (n >= 1 && n <= 4) ? n : n > 4 ? 4 : RES_MATCH;  // (5x-8x were removed)
         }
-        else if (!strcmp(key, "upscaler"))
-            g_settings.upscaler = !strcmp(val, "bilinear") ? UPSCALE_BILINEAR
-                                : !strcmp(val, "sgsr") ? UPSCALE_SGSR
+        else if (!strcmp(key, "upscaler")) {  // (metalfx / fsr1: this OS's; auto: never chosen, the GPU's default)
+            g_settings.upscaler_auto = !strcmp(val, "auto");
+            if (!g_settings.upscaler_auto)
+                g_settings.upscaler = !strcmp(val, "bilinear") ? UPSCALE_BILINEAR
+                                    : !strcmp(val, "sgsr") ? UPSCALE_SGSR
 #ifdef __ANDROID__
-                                : !strcmp(val, "fsr1") ? UPSCALE_FSR1
+                                    : !strcmp(val, "fsr1") ? UPSCALE_FSR1
 #endif
-                                : UPSCALE_SHARP;  // (metalfx / fsr1: this OS's)
+                                    : UPSCALE_SHARP;
+            else g_settings.upscaler = g_default_upscaler;
+        }
         else if (!strcmp(key, "antialias")) g_settings.antialias = !strcmp(val, "off") ? AA_OFF : AA_SMAA;  // ("fxaa": SMAA now)
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
@@ -200,8 +249,8 @@ void settings_load(void) {
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
         else if (!strcmp(key, "prompts")) g_settings.prompts = !strcmp(val, "nintendo") ? PROMPTS_NINTENDO : !strcmp(val, "xbox") ?
                                                               PROMPTS_XBOX : !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION : PROMPTS_AUTO;
-        else if (!strcmp(key, "menu_confirm")) g_settings.menu_confirm = !strcmp(val, "controller") ? MENU_CONFIRM_CONTROLLER
-                                                                                                  : MENU_CONFIRM_GAME;
+        else if (!strcmp(key, "menu_confirm")) g_settings.menu_confirm = !strcmp(val, "game") ? MENU_CONFIRM_GAME
+                                                                                                  : MENU_CONFIRM_CONTROLLER;
         else if (!strcmp(key, "language")) {  // ("auto" or one of the game's codes; anything else: auto)
             // (zh-CN / zh-TW: what a settings file from before this wrote; the game reads zh-Hans / zh-Hant)
             const char *v = !strcmp(val, "zh-CN") ? "zh-Hans" : !strcmp(val, "zh-TW") ? "zh-Hant" : val;
@@ -225,8 +274,25 @@ void settings_load(void) {
         else if (!strcmp(key, "walk_speed_dungeons")) g_settings.walk_speed_dungeons = atoi(val) != 0;
         else if (!strcmp(key, "diff_ohko")) g_settings.diff_ohko = atoi(val) != 0;
         else if (!strcmp(key, "diff_hero")) g_settings.diff_hero = atoi(val) != 0;
-        else if (!strcmp(key, "tunic")) { for (int i = 0; i < N_TUNIC_COLOURS; i++) if (!strcmp(val, g_tunic_colours[i])) g_settings.tunic = i; }
-        else if (!strcmp(key, "hearts")) { for (int i = 0; i < N_HEART_COLOURS; i++) if (!strcmp(val, g_heart_colours[i])) g_settings.hearts = i; }
+        else if (!strcmp(key, "timer")) g_settings.timer = atoi(val) != 0;
+        else if (!strcmp(key, "timer_position")) g_settings.timer_pos = !strcmp(val, "right") ? TIMER_POS_RIGHT : TIMER_POS_LEFT;
+        else if (!strcmp(key, "livesplit")) g_settings.livesplit = atoi(val) != 0;
+        else if (!strcmp(key, "rando_options")) strlcpy(g_settings.rando_options, val, sizeof g_settings.rando_options);
+        else if (!strcmp(key, "livesplit_host")) strlcpy(g_settings.livesplit_host, val, sizeof g_settings.livesplit_host);
+        else if (!strcmp(key, "tunic")) col_parse(&g_settings.tunic, val);  // (colour rows: runtime/cosmetic_colour.c)
+        else if (!strcmp(key, "hearts")) col_parse(&g_settings.hearts, val);
+        else if (!strcmp(key, "hair")) col_parse(&g_settings.hair, val);
+        else if (!strcmp(key, "shield")) col_parse(&g_settings.shield, val);
+        else if (!strcmp(key, "skin")) col_parse(&g_settings.skin, val);
+        else if (!strcmp(key, "leaves")) col_parse(&g_settings.leaves, val);
+        else if (!strcmp(key, "grass")) col_parse(&g_settings.grass, val);
+        else if (!strcmp(key, "sand")) col_parse(&g_settings.sand, val);
+        else if (!strcmp(key, "screen_filter")) {
+            for (int i = 0; i < N_SCREEN_FILTERS; i++) if (!strcmp(val, k_screen_filter_keys[i])) g_settings.screen_filter = i;
+        }
+        else if (!strcmp(key, "enemy_colours")) {
+            for (int i = 0; i < N_ENEMY_COLOUR_MODES; i++) if (!strcmp(val, k_enemy_colour_keys[i])) g_settings.enemy_colours = i;
+        }
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
@@ -260,17 +326,10 @@ void settings_save(void) {
                         g_settings.touch_moved[i] ? g_settings.touch_pos[i][1] : -1, g_settings.touch_scale[i] > 0.1f ? g_settings.touch_scale[i] : 1,
                         g_settings.touch_hidden[i]);
     }
-    fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1"
-                                  : g_settings.upscaler == UPSCALE_SGSR ? "sgsr" : "bilinear");
+    fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
+                                   g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : g_settings.upscaler == UPSCALE_SGSR ? "sgsr" : "bilinear");
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : "off");
-    if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
-    else if (g_settings.res_mode == RES_X125) fprintf(f, "resolution = 1.25x\n");
-    else if (g_settings.res_mode == RES_X150) fprintf(f, "resolution = 1.5x\n");
-    else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");
-    else if (g_settings.res_mode == RES_Q25) fprintf(f, "resolution = 25%%\n");
-    else if (g_settings.res_mode == RES_Q50) fprintf(f, "resolution = 50%%\n");
-    else if (g_settings.res_mode >= 1 && g_settings.res_mode <= 8) fprintf(f, "resolution = %dx\n", g_settings.res_mode);
-    else fprintf(f, "resolution = match\n");
+    fprintf(f, "resolution = %s\n", g_settings.res_auto ? "auto" : res_name(g_settings.res_mode));
     fprintf(f, "inv_keys = %d\n", g_settings.inv_keys);
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);
     fprintf(f, "rumble = %d\n", g_settings.rumble);
@@ -301,8 +360,22 @@ void settings_save(void) {
             g_settings.diff_hero);
     fprintf(f, "walk_speed = %.2f\n", g_settings.walk_speed);
     fprintf(f, "walk_speed_dungeons = %d\n", g_settings.walk_speed_dungeons);
-    fprintf(f, "tunic = %s\nhearts = %s\n", g_tunic_colours[g_settings.tunic], g_heart_colours[g_settings.hearts]);
+    fprintf(f, "timer_position = %s\n", g_settings.timer_pos == TIMER_POS_RIGHT ? "right" : "left");
+    fprintf(f, "timer = %d\nlivesplit = %d\nlivesplit_host = %s\n", g_settings.timer, g_settings.livesplit,
+            g_settings.livesplit_host);
+    static const struct { const char *key; const CosColour *c; } cols[] = {
+        {"tunic", &g_settings.tunic}, {"hearts", &g_settings.hearts}, {"hair", &g_settings.hair},
+        {"shield", &g_settings.shield}, {"skin", &g_settings.skin},
+        {"leaves", &g_settings.leaves}, {"grass", &g_settings.grass}, {"sand", &g_settings.sand}};
+    for (size_t i = 0; i < sizeof cols / sizeof *cols; i++) {
+        char v[16];
+        col_format(cols[i].c, v, sizeof v);
+        fprintf(f, "%s = %s\n", cols[i].key, v);
+    }
+    fprintf(f, "enemy_colours = %s\n", k_enemy_colour_keys[g_settings.enemy_colours]);
+    fprintf(f, "screen_filter = %s\n", k_screen_filter_keys[g_settings.screen_filter]);
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
+    if (g_settings.rando_options[0]) fprintf(f, "rando_options = %s\n", g_settings.rando_options);
     fclose(f);
 }

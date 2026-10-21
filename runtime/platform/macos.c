@@ -44,7 +44,10 @@ static void log_to_file_in_app(void) {
     session_log_open(dir, g_log_path, sizeof g_log_path);
 }
 
-void plat_init(void) { log_to_file_in_app(); }
+void plat_init(void) {
+    log_to_file_in_app();
+    raise_open_file_limit();
+}
 
 bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     // Everything readable/writable: macOS pages are 16K but the guest maps at 4K granularity.
@@ -74,6 +77,11 @@ int plat_protect(uint64_t addr, uint64_t size, int prot) {
 uint64_t plat_now_ns(void) {
     if (!tb.denom) mach_timebase_info(&tb);
     return mach_absolute_time() * tb.numer / tb.denom;
+}
+
+uint64_t plat_thread_cpu_ns(void) {
+    struct timespec ts;
+    return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 ? (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec : 0;
 }
 
 void plat_sleep_until_ns(uint64_t t) {
