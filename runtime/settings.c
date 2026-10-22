@@ -5,7 +5,11 @@
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "hle.h"
 #include "input_bind.h"
@@ -306,9 +310,30 @@ void settings_load(void) {
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
 }
 
+// Written to larecomp.ini.tmp, then put in its place: a phone ends apps in the background at any moment (the app saves
+// then too: runtime/nvn/vulkan/device.c), and a file cut short there lost every setting. One writer at a time.
+static void settings_write(FILE *f);
+static bool replace_file(const char *from, const char *to) {
+#ifdef _WIN32
+    return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING);
+#else
+    return rename(from, to) == 0;
+#endif
+}
 void settings_save(void) {
-    FILE *f = fopen(SETTINGS_FILE, "w");
-    if (!f) { LOG("[settings] cannot write %s\n", SETTINGS_FILE); return; }
+    static atomic_flag lock = ATOMIC_FLAG_INIT;
+    char tmp[1024];
+    snprintf(tmp, sizeof tmp, "%s.tmp", SETTINGS_FILE);
+    while (atomic_flag_test_and_set(&lock)) {}
+    FILE *f = fopen(tmp, "w");
+    if (!f) LOG("[settings] cannot write %s\n", tmp);
+    else {
+        settings_write(f);
+        if (fclose(f) != 0 || !replace_file(tmp, SETTINGS_FILE)) LOG("[settings] cannot write %s\n", SETTINGS_FILE);
+    }
+    atomic_flag_clear(&lock);
+}
+static void settings_write(FILE *f) {
     fprintf(f, "# LAS Recomp settings (edited from the in-game menu: F1, Esc, or Minus+Plus on a controller)\n");
     fprintf(f, "aspect = %s\n", g_settings.aspect == ASPECT_ORIGINAL ? "original" : "unlocked");
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
@@ -379,5 +404,4 @@ void settings_save(void) {
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     if (g_settings.rando_options[0]) fprintf(f, "rando_options = %s\n", g_settings.rando_options);
-    fclose(f);
 }

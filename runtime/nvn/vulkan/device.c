@@ -1008,6 +1008,7 @@ static bool SDLCALL lifecycle_watch(void *user, SDL_Event *e) {
         if (!atomic_exchange(&g_background, true)) {
             LOG("[vk] in the background: game paused\n");
             vk_pipeline_cache_save();  // (phones end apps in the background without exit(): the exit handler never runs)
+            settings_save();           // (likewise: options changed with the menu still open were lost)
         }
     } else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND && atomic_load(&g_background)) {
         LOG("[vk] in front again\n");

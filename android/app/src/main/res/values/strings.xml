@@ -11,4 +11,7 @@
     <string name="driver_close">Close</string>
     <string name="driver_installed">Driver installed: LAS Recomp starts again with it.</string>
     <string name="driver_install_failed">The driver was not installed: %1$s</string>
+    <string name="play_channel">Game session</string>
+    <string name="play_title">LAS Recomp is open</string>
+    <string name="play_text">The game waits paused where you left it.</string>
 </resources>

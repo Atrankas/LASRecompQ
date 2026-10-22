@@ -238,6 +238,13 @@ public class LasActivity extends SDLActivity {
         d.removeCallbacks(mHideBars);
         d.postDelayed(mHideBars, 1000);
         RootBoost.start(this);
+        PlayService.start(this);  // (keeps the game alive at the home screen: PlayService.java)
+    }
+
+    @Override
+    protected void onDestroy() {
+        PlayService.stop(this);
+        super.onDestroy();
     }
 
     @Override

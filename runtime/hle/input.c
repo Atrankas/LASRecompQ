@@ -386,14 +386,50 @@ int input_menu_family(SDL_JoystickID which) {
     return bind_label_family();
 }
 
+// Which connected controller the game reads. Android lists other input devices as gamepads too (a wireless keyboard /
+// mouse receiver's media keys: "Logitech USB Receiver Mouse"), and the first one listed used to be taken for good: a
+// DualSense connected beside it was never read. Now a pad SDL knows (PlayStation, Xbox, Switch...) beats one with sticks
+// and face buttons, which beats anything else; and the controller whose button is pressed becomes the one read.
+static int pad_rank(SDL_JoystickID id) {
+    SDL_GamepadType t = SDL_GetGamepadTypeForID(id);
+    if (t != SDL_GAMEPAD_TYPE_UNKNOWN && t != SDL_GAMEPAD_TYPE_STANDARD) return 3;
+    char *m = SDL_GetGamepadMappingForID(id);
+    int r = m && strstr(m, "leftx:") && strstr(m, ",a:") && strstr(m, ",b:") ? 2 : 1;
+    SDL_free(m);
+    return r;
+}
+static void use_pad(SDL_JoystickID id, const char *why) {
+    if (pad && SDL_GetGamepadID(pad) == id) return;
+    SDL_Gamepad *p = SDL_OpenGamepad(id);
+    if (!p) { LOG("[input] gamepad %u: %s\n", (unsigned)id, SDL_GetError()); return; }
+    if (pad) {
+        SDL_RumbleGamepad(pad, 0, 0, 0);
+        led_restore("switched");
+        SDL_CloseGamepad(pad);
+    }
+    pad = p;
+    led_forget();
+    rumble_last_lo = rumble_last_hi = 0, rumble_warned = false;
+    LOG("[input] gamepad: %s (%s)\n", SDL_GetGamepadName(pad), why);
+    note_family();
+}
+static void pick_pad(const char *why) {  // the best connected one, unless the one read is as good
+    int n = 0, best = -1, cur = pad ? pad_rank(SDL_GetGamepadID(pad)) : 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&n), pick = 0;
+    for (int i = 0; i < n; i++) {
+        int r = pad_rank(ids[i]);
+        LOG("[input] connected: %s (rank %d)\n", SDL_GetGamepadNameForID(ids[i]), r);
+        if (r > best) best = r, pick = ids[i];
+    }
+    SDL_free(ids);
+    if (pick && best > cur) use_pad(pick, why);
+}
+
 void input_handle_event(const SDL_Event *e) {
     static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
     if (!scanned) {
         scanned = true;
-        int n = 0;
-        SDL_JoystickID *ids = SDL_GetGamepads(&n);
-        if (n > 0 && !pad) { pad = SDL_OpenGamepad(ids[0]); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
-        SDL_free(ids);
+        pick_pad("connected");
     }
     if (touch_handle_event(e)) return;
     switch (e->type) {
@@ -407,8 +443,8 @@ void input_handle_event(const SDL_Event *e) {
         break;
     }
     case SDL_EVENT_GAMEPAD_ADDED:
-        if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
-        touch_pad_used();  // (the touch controls hide: touch_controls.mm)
+        pick_pad("connected");
+        if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) touch_pad_used();  // (the touch controls hide: touch_controls.mm)
         break;
     case SDL_EVENT_GAMEPAD_REMOVED:
         if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) {
@@ -416,10 +452,15 @@ void input_handle_event(const SDL_Event *e) {
             SDL_CloseGamepad(pad); pad = NULL; note_family();
             led_forget();  // (gone: it shows its own colour when it comes back)
             rumble_clear(); rumble_last_lo = rumble_last_hi = 0; rumble_warned = false;
+            pick_pad("another one left");  // (a controller still connected takes over)
         }
         recompute_pad();
         break;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && !host_test && e->gbutton.which != TEST_DEVICE) {
+            use_pad(e->gbutton.which, "pressed");  // (the controller in use is the one read)
+            touch_pad_used();
+        }
         if (!host_test || e->gbutton.which == TEST_DEVICE) {  // (the press as the event has it, before reading the pad)
             uint64_t b = pad_bits(e->gbutton.button);
             note_press(e->gbutton.down ? b : 0, e->gbutton.down ? 0 : b);
@@ -427,6 +468,10 @@ void input_handle_event(const SDL_Event *e) {
         recompute_pad();
         break;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+        if (!host_test && abs(e->gaxis.value) > 20000 && (!pad || SDL_GetGamepadID(pad) != e->gaxis.which) &&
+            pad_rank(e->gaxis.which) >= (pad ? pad_rank(SDL_GetGamepadID(pad)) : 1))
+            use_pad(e->gaxis.which, "stick moved");  // (a stick pushed well off centre, on a pad at least as good)
+        if (!host_test && pad && SDL_GetGamepadID(pad) != e->gaxis.which) break;  // (another device's axes: not the game's)
         if ((e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || e->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) &&
             !host_test) {  // (the triggers as buttons: past half way)
             static bool trig[2];
@@ -439,9 +484,8 @@ void input_handle_event(const SDL_Event *e) {
             }
         }
         recompute_pad();
-        // the controller in use (a press, a stick or trigger well off centre - not drift): the touch controls hide
-        if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 12000))
-            touch_pad_used();
+        // the controller in use (a stick or trigger well off centre - not drift; a press: above): the touch controls hide
+        if (abs(e->gaxis.value) > 12000) touch_pad_used();
         break;
     }
 }

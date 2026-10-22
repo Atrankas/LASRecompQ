@@ -19,6 +19,8 @@
     <!-- building the game code on the phone (BuildService): keeps running with the screen off, shows its progress -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- the game kept alive (paused) while another app is in front: PlayService -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -59,5 +61,15 @@
             android:name=".BuildService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- keeps the process alive while the game is open, so a trip to the home screen doesn't end it (PlayService) -->
+        <service
+            android:name=".PlayService"
+            android:exported="false"
+            android:stopWithTask="true"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps a paused game session in memory while the player is in another app" />
+        </service>
     </application>
 </manifest>
