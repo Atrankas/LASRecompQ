@@ -52,6 +52,7 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="com.oculus.intent.category.VR" />
             </intent-filter>
         </activity>
         <!-- keeps the app alive while the game code is built on the phone (runtime/gamebuild.c). extractNativeLibs
