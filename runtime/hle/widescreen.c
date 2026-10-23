@@ -1,6 +1,7 @@
 // Widescreen: the camera code's 16:9 aspect literal loads are patched (tools/patches.py) to call
 // rt_aspect_site(); the renderer sets the wide factor (output aspect / 16:9) each frame.
 #include <SDL3/SDL.h>
+include <SDL3/SDL_sensor.h>
 #include "../game_addresses.h"
 #include <string.h>
 #include <math.h>
