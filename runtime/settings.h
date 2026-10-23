@@ -31,7 +31,8 @@ enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 
 // the game is told English, whose text files the translation replaces.
 enum { LANG_AUTO = 0, LANG_PT_BR = 12, N_LANGUAGES = 13 };
 // The app's own menus (runtime/ui/i18n.h): auto follows the system (Portuguese -> Portuguese), else English
-enum { UI_LANG_AUTO = 0, UI_LANG_EN = 1, UI_LANG_PT_BR = 2, N_UI_LANGUAGES = 3 };
+enum { UI_LANG_AUTO = 0, UI_LANG_EN = 1, UI_LANG_PT_BR = 2, UI_LANG_ES = 3, UI_LANG_FR = 4, UI_LANG_DE = 5, UI_LANG_IT = 6,
+       UI_LANG_NL = 7, N_UI_LANGUAGES = 8 };
 extern const char *const g_language_codes[N_LANGUAGES];  // what the game is told: "ja", "en-US", "es", ...
 extern const char *const g_language_names[N_LANGUAGES];  // for the menu ("Auto", "Japanese", ..., "Spanish")
 
@@ -145,3 +146,4 @@ const char *settings_translation_dir(void);
 void settings_translation_changed(void);  // (files copied in: look again)
 // Whether the app's menus are in Brazilian Portuguese (ui_language, or the system's language for auto)
 bool settings_ui_portuguese(void);
+int settings_ui_language(void);  // UI_LANG_EN.. (never auto): the menus' language in effect

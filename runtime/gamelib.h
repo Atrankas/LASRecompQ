@@ -5,8 +5,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#ifndef GAMELIB_ENTRY  // (tools/gamelib_entry.c, compiled on phones with only the headers it needs: no stdio there)
 #include <stdio.h>
 #include <string.h>
+#endif
 
 #include "cpu.h"
 
@@ -33,6 +35,7 @@
 #define GAMELIB_ABI 1
 #define GAMELIB_FULL_ID_SIZE 96
 
+#ifndef GAMELIB_ENTRY
 // The id a library for the game files in game_dir has (GAMELIB_ID-<build ID>); false when exefs/main is unreadable.
 static inline bool gamelib_full_id(const char *game_dir, char *out, size_t size) {
     char path[1100];
@@ -47,6 +50,7 @@ static inline bool gamelib_full_id(const char *game_dir, char *out, size_t size)
     for (int i = 0; i < 8 && n + 2 < (int)size; i++) n += snprintf(out + n, size - n, "%02X", hdr[0x40 + i]);
     return true;
 }
+#endif
 
 typedef struct {
     uint32_t abi;    // GAMELIB_ABI

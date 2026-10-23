@@ -542,7 +542,7 @@ static void *extract_thread(void *) {
         }
     }
     if (!file_exists(g_root + "/exefs/main")) { set_failure(FAIL_NOT_FOUND); goto done; }
-    if (!build_id_ok(g_root + "/exefs/main")) { set_failure(FAIL_VERSION); goto done; }
+    if (!build_id_ok(g_root + "/exefs")) { set_failure(FAIL_VERSION); goto done; }
     if (!in_place_files(g_root)) { set_failure(FAIL_MISSING); goto done; }
     game_files_changed();  // (counted again: the copy is new)
     pthread_mutex_lock(&g_lock);

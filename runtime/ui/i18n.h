@@ -1,4 +1,4 @@
-// The app's own menus in Brazilian Portuguese (runtime/ui/i18n.mm): T("English text") is the pt-BR text when the menus
+// The app's own menus in Brazilian Portuguese and (in part) Spanish, French, German, Italian and Dutch (runtime/ui/i18n.mm): T("English text") is the translation when the menus
 // are in Portuguese (settings_ui_portuguese: the App language setting, or the system's language), else the English
 // as passed. Looked up by the exact English, at draw time (a language switch shows at once): option tables stay in
 // English and go through T() where they're drawn. Text without a translation comes back as passed.

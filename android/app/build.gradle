@@ -140,7 +140,8 @@ if (project.hasProperty('lasTranslation')) {
 
 // The on-phone build's kit and asset archive again from this checkout's sources (quick: python and zig stay built), so
 // the headers and the generator inside the APK are the ones its game code id (tools/android/gamelib_id.sh) is made from
-if (onDevice) {
+// (-PlasOnDeviceKitReady: build/ondevice as it is - e.g. a release's kit with its generator files brought up to date)
+if (onDevice && !project.hasProperty('lasOnDeviceKitReady')) {
     tasks.register('lasOnDeviceAssets', Exec) {
         workingDir file('../..')
         commandLine 'bash', '-c', 'tools/android/ondevice/build_cckit.sh && tools/android/ondevice/make_assets.sh'

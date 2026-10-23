@@ -69,9 +69,11 @@ extern "C" void difficulty_draw(float scale) {
                        "The game's text language, as its own system setting. Applies when the game restarts."))
             settings_save();
         // the app's own menus (i18n.h): at once
-        static const char *const ui_names[N_UI_LANGUAGES] = {"Auto", "English", "Português (Brasil)"};
+        static const char *const ui_names[N_UI_LANGUAGES] = {"Auto", "English", "Português (Brasil)", "Español", "Français",
+                                                             "Deutsch", "Italiano", "Nederlands"};
         if (opt_choice("App language", &g_settings.ui_language, ui_names, N_UI_LANGUAGES, UI_LANG_AUTO,
-                       "This menu and the start screen, at once. Auto: the system's language."))
+                       "This menu and the start screen, at once. Auto: the system's language. Spanish, French, German, Italian and "
+                       "Dutch cover the main menus and settings; the rest stays in English."))
             settings_save();
 #ifdef __ANDROID__
         translation_rows();
