@@ -17,24 +17,30 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: Configurar Android SDK y NDK
-      uses: android-actions/setup-android@v3
-
-    - name: Instalar NDK 27.2.12479018
+    - name: Configurar variables del SDK de Android
       run: |
-        ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.2.12479018"
+        echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+        echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+
+    - name: Instalar Android NDK 27.2.12479018
+      run: |
+        # Usamos el sdkmanager nativo del sistema aceptando licencias primero
+        yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses
+        /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.2.12479018"
 
     - name: Modificar script para compilar en Linux de Actions
       run: |
-        # Usamos el compilador de la máquina virtual como Host
-        sed -i 's|--host-cc=.*|--host-cc=gcc \\|g' tools/android/build_deps.sh
-        # Aseguramos que las rutas apunten al SDK/NDK virtual de la Action
-        sed -i 's|^SDK=.*|SDK="${ANDROID_HOME}"|g' tools/android/build_deps.sh
-        sed -i 's|^NDK=.*|NDK="${ANDROID_HOME}/ndk/27.2.12479018"|g' tools/android/build_deps.sh
-        # Eliminamos la línea de firmas SHA que te daba problemas
+        # Configurar las rutas absolutas dentro del entorno de GitHub
+        NDK_PATH="/usr/local/lib/android/sdk/ndk/27.2.12479018"
+        
+        sed -i "s|^SDK=.*|SDK=\"/usr/local/lib/android/sdk\"|g" tools/android/build_deps.sh
+        sed -i "s|^NDK=.*|NDK=\"$NDK_PATH\"|g" tools/android/build_deps.sh
+        
+        # Eliminar comprobaciones de firmas y forzar el compilador host nativo de Linux
         sed -i '/shasum -a 256/d' tools/android/build_deps.sh
+        sed -i 's/--host-cc=.*/--host-cc=gcc \\/g' tools/android/build_deps.sh
 
-    - name: Compilar Dependencias Nativa (FFmpeg, Shaderc, etc)
+    - name: Compilar Dependencias Nativas (FFmpeg, Shaderc, etc)
       run: |
         chmod +x tools/android/build_deps.sh
         ./tools/android/build_deps.sh
