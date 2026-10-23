@@ -9,9 +9,9 @@ the phone itself from your own game package.
 ![Mabe Village on a Galaxy S20 FE: the context-aware touch controls, 60 fps](docs/android/gameplay_touch.jpg)
 
 > [!IMPORTANT]
-> **No game files are included.** You need your own legally obtained copy of *Link's Awakening* **v1.0.0** (an `.xci`
-> or `.nsp` dumped from your own cartridge or console, together with the `prod.keys` from your own Switch - or the
-> extracted `exefs` / `romfs` folders). The app contains nothing from the game; it builds the game code on your phone
+> **No game files are included.** You need your own legally obtained copy of *Link's Awakening* (an `.xci` or `.nsp`
+> of v1.0.0 dumped from your own cartridge or console, together with the `prod.keys` from your own Switch - or the
+> extracted `exefs` / `romfs` folders of v1.0.0, v1.0.1 or v1.1.0). The app contains nothing from the game; it builds the game code on your phone
 > from your files. Instructions on how to obtain them will **not** be provided.
 
 > [!NOTE]
@@ -21,6 +21,33 @@ the phone itself from your own game package.
 ## Download
 
 Get the latest APK from the **[Releases page](https://github.com/Nycolazs/LASRecomp-Android-Plus/releases/latest)**.
+
+## What's new in 1.2.0
+
+- **Lighter on the GPU and smoother**: up to date with LAS Recomp Beta 5's latest renderer work (Vulkan calls on a
+  thread of their own, descriptor sets recycled and reused, a pipeline key memo, faster texture checks, steadier frame
+  pacing). Same save, same scripted route through the Field and two dungeons on a Galaxy S20 FE: GPU time per game
+  frame 22.1 -> 18.1 ms (-18%), frames over 50 ms 171 -> 49 (-71%), the same 30 + generated frames.
+- **Lighter on memory**: the shader head start's file is mapped instead of read into memory, the pipeline cache is
+  saved without a second copy in memory, and the shader caches start over when the shader translator changes (before,
+  on phones, they only grew - and the GPU driver keeps all of the pipeline cache in memory).
+- **Game versions 1.0.1 and 1.1.0** set up too, as well as 1.0.0 (the address tables by build ID from the original
+  project).
+- **More menu languages** (#11): Spanish, French, German, Italian and Dutch for the main menus and settings (the rest
+  stays in English), next to English and Brazilian Portuguese.
+- Fixes: a crash in the GPU driver at the first area with the bundled Turnip driver; the game's amiibo option at
+  Dampe's no longer crashes; the vertical lighting seam in interiors with a widened view; PhysX and level-change crash
+  fixes from the original project.
+- Crash logs name the crashing thread and the code it was in, also inside the GPU driver.
+
+> [!WARNING]
+> **1.2.0 is signed with a new release key** (the one of 1.0.0-1.1.2 is no longer available), so Android won't install
+> it over 1.1.x. To keep your progress: copy the folder `Android/data/com.lasrecomp.android/files/save` to another
+> place with a file manager or a computer over USB (or **Settings > Prelaunch > Saves > Export saves...**), uninstall
+> the old app, install 1.2.0, set up the game files again, and put the `save` folder back (or **Import saves...**).
+> From 1.2.0 on, updates install directly again.
+
+The first start compiles the game code on the phone again (the generator changed) and prepares the shaders anew.
 
 ## How it runs - Galaxy S20 FE (Snapdragon 865)
 
