@@ -148,8 +148,3 @@ if (onDevice && !project.hasProperty('lasOnDeviceKitReady')) {
     }
     preBuild.dependsOn lasOnDeviceAssets
 }
-// === AÑADIR ESTO AL FINAL ABSOLUTO DE TU ARCHIVO BUILD.GRADLE ===
-dependencies {
-    // Le decimos a Gradle que cargue de forma automática el archivo .aar de tus Quest 3
-    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])
-}
