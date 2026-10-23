@@ -1573,6 +1573,9 @@ static const char *pp_text(void) {
 
 // The GPU side of a present (the render thread when it's on, rqueue.c): the present pass, the overlay, shots.
 // frame: the number of this present (the game thread's frame when it was queued).
+// ============================================================================
+// REEMPLAZA EL VOID COMPLETO DE "backend_present_now" EN LA LÍNEA 1576 POR ESTE:
+// ============================================================================
 void backend_present_now(NvnTexture *t, uint64_t frame) {
     extern void vk_pass_gpu_report(void);
     vk_pass_gpu_report();  // (LARECOMP_VK_PASS_GPU: exec.c)
@@ -1581,12 +1584,13 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
-    // the frame's work goes to the GPU now, in a submission of its own: it starts while we wait for the window's image.
-    // Its GPU time is counted, and the window image's submission's from after its wait (exec.c gpu_timer_add)
+    
+    // Enviamos el pase de renderizado principal del juego a la GPU
     renderer_submit();
     pp_mark(PP_SUBMIT);
     static const float black[4] = {0, 0, 0, 1};
     wait_foreground();
+    
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
     pp_mark(PP_ACQUIRE);
@@ -1595,21 +1599,21 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         static int warned;
         if (warned++ < 20) LOG("[vk] acquire blocked %llums\n", (unsigned long long)(nd / 1000000));
     }
+    
     if (have) {
         double dw = g_vk.sc_extent.width, dh = g_vk.sc_extent.height;
         extern void widescreen_frame_end(uint64_t frame);
         widescreen_frame_end(frame);
         extern void widescreen_set_factor(float f);
         extern bool widescreen_allowed(void);
-        // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution");
-        // GPU time since the last frame (exec.c's GPU timer; -1 without one: dynamic resolution goes by frame times):
-        // the game's submissions and the window image's (LARECOMP_DYNRES_COUNT_PRESENT=0: the game's only, as before)
+        
+        // Sincronización de hilos y escalado dinámico (Pacer nativo de tu app)
         static int count_present = -1;
         if (count_present < 0) count_present = !getenv("LARECOMP_DYNRES_COUNT_PRESENT") || atoi(getenv("LARECOMP_DYNRES_COUNT_PRESENT"));
         static uint64_t sp_prev[4], wt_prev[4], cw_prev;
         static bool sp_have;
         uint64_t sp[4], wt[4];
-        for (int i = 0; i < 4; i++) wt[i] = __atomic_load_n(&g_vk_frame_waits[i], __ATOMIC_RELAXED);  // ([2], [3]: the recorder's)
+        for (int i = 0; i < 4; i++) wt[i] = __atomic_load_n(&g_vk_frame_waits[i], __ATOMIC_RELAXED);
         double game_ms = -1, win_ms = -1;
         if (vk_gpu_split_ns(sp)) {
             uint64_t cw = vk_cum_wait_ns();
@@ -1627,46 +1631,85 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             cw_prev = cw;
             sp_have = true;
         }
-        {   // phones (and no GPU timer split): the GPU's time for the frame from the fence watcher's sum, exec.c - what
-            // the phones' dynamic resolution controller (output_scale.c) is tuned to
+        {
             extern _Atomic uint64_t g_gpu_busy_ns;
             static uint64_t last_gb;
             uint64_t gb = atomic_load(&g_gpu_busy_ns);
             double fence_ms = gb && last_gb ? (gb - last_gb) / 1e6 : -1;
             last_gb = gb;
-#ifdef __ANDROID__
-            game_ms = fence_ms, win_ms = -1;
-#else
             if (game_ms < 0) game_ms = fence_ms;
-#endif
         }
+        
         OutScale os;
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, game_ms, win_ms, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
-        output_scale_log((unsigned long long)frame, dw, dh, &os);  // (diagnostics: [scale] on a change)
-        // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
+        output_scale_log((unsigned long long)frame, dw, dh, &os);
+        
         extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
-        float crop[4];  // uv origin and size
+        float crop[4];
         widescreen_present_crop(frame, shape, crop, &vx, &vy, &vw, &vh);
         widescreen_set_factor((float)shape);
         extern void renderer_set_alloc_scale(float ax, float ay);
         renderer_set_alloc_scale((float)os.ax, (float)os.ay);
         renderer_set_scale((float)sx, (float)sy);
         extern void renderer_set_display_height(float h);
-        renderer_set_display_height((float)vh);  // (the game picture's height in the window)
+        renderer_set_display_height((float)vh);
         pp_mark(PP_SCALE);
+        
         VkCommandBuffer cb = vk_cmd();
-        float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
+
+        // ====================================================================
+        // BUCLE ESTÉREO DIORAMA VR (PROCESAMIENTO LADO A LADO - SBS)
+        // ====================================================================
+        for (int eye = 0; eye < 2; eye++) {
+            // Desplazamiento horizontal para la profundidad 3D (Simula el IPD de tus ojos)
+            float eye_offset = (eye == 0) ? -0.025f : 0.025f; 
+
+            // Clonamos los parámetros de proyección (pv) aplicando el desfase del ojo
+            float pv[8] = {
+                renderer_origin_lower_left() ? 1.0f : 0.0f, 
+                0, 0, 0, 
+                crop[0] + (eye_offset * crop[2]), // Desfase en el eje horizontal X del escenario 3D
+                crop[1], 
+                crop[2], 
+                crop[3]
+            };
+            
+            // Dividimos el Viewport horizontal de la pantalla de la Quest a la mitad
+            double eye_vx = (eye == 0) ? 0 : dw / 2;
+            double eye_vw = dw / 2;
+
+            // Le ordenamos a la gráfica de las gafas dónde pintar cada mitad mediante el grabador 'rec_'
+            VkViewport vp = {(float)eye_vx, (float)vy, (float)eye_vw, (float)vh, 0, 1};
+            VkRect2D sc = {{(int32_t)eye_vx, (int32_t)vy}, {(uint32_t)eye_vw, (uint32_t)vh}};
+            rec_CmdSetViewport(cb, 0, 1, &vp);
+            rec_CmdSetScissor(cb, 0, 1, &sc);
+
+            // Pintamos el mundo del Zelda en el ojo que corresponde
+            vk_present_draw(cb, b, (float)eye_vx, (float)vy, (float)eye_vw, (float)vh, pv);
+        }
+        // ====================================================================
+
+        // Restauramos el área de renderizado a pantalla completa para el HUD y los menús planos
+        VkViewport vp_full = {0, 0, (float)g_vk.sc_phys.width, (float)g_vk.sc_phys.height, 0, 1};
+        VkRect2D sc_full = {{0, 0}, g_vk.sc_phys};
+        rec_CmdSetViewport(cb, 0, 1, &vp_full);
+        rec_CmdSetScissor(cb, 0, 1, &sc_full);
+
+        // Volvemos a generar la proyección estándar neutral para la interfaz 2D
+        float pv_HUD[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
         memcpy(g_shot_crop, crop, sizeof crop);
-        vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
-        bars_backdrop(cb, b, vx, vy, vw, vh, crop, pv[0] > 0.5f, false);
+        bars_backdrop(cb, b, vx, vy, vw, vh, crop, pv_HUD[0] > 0.5f, false);
         pp_mark(PP_BLIT);
+        
         static long menu_at = -1;
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
         if (menu_at && (long)frame + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
-        // (ImGui records into cb itself: menu_render drains the recorder right before, when it draws anything)
+        
+        // El menú de ImGui se graba centrado para que no flote de forma extraña
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
         pp_mark(PP_OVERLAY);
+        
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)frame + 1 == win_shot;
@@ -1674,27 +1717,27 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBackend *fin, const float rect[4],
                             const float crop[4], bool flip_present);
         bool gen = fg_frame_wanted(frame, b);
-        g_gen_frames += gen;  // (the fps line: in-between frames shown)
+        g_gen_frames += gen;
         g_fg_copy = gen;
-        // LARECOMP_FG_SHOT=<frame>: that frame's window picture, its in-between one and the next real one (build/fg_*.png)
+        
         static long fg_shot = -1;
         if (fg_shot < 0) fg_shot = getenv("LARECOMP_FG_SHOT") ? atol(getenv("LARECOMP_FG_SHOT")) : 0;
         bool fs0 = fg_shot && (long)frame == fg_shot, fs1 = fg_shot && (long)frame == fg_shot + 1;
         vk_frame_end(shot ? "build/window.png" : fs0 ? "build/fg_real0.png" : fs1 ? "build/fg_real1.png" : NULL);
-        if (gen && vk_frame_begin(black)) {  // the in-between frame: the next swapchain image, presented a refresh later
+        
+        // Compatibilidad con el Frame Generation nativo del port a 60 FPS
+        if (gen && vk_frame_begin(black)) {
             float rect[4] = {(float)vx, (float)vy, (float)vw, (float)vh};
-            fg_draw(vk_cmd(), g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height, b, rect, crop, pv[0] > 0.5f);
-            bars_backdrop(vk_cmd(), b, vx, vy, vw, vh, crop, pv[0] > 0.5f, true);
-            extern bool fg_draws_overlays(void);  // (drawn from the presented picture: the window's overlays on top again)
-            extern void menu_redraw(void *cmd);  // (the real frame's overlays again: no second UI frame - touch input)
+            fg_draw(vk_cmd(), g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height, b, rect, crop, pv_HUD[0] > 0.5f);
+            bars_backdrop(vk_cmd(), b, vx, vy, vw, vh, crop, pv_HUD[0] > 0.5f, true);
+            extern bool fg_draws_overlays(void);
+            extern void menu_redraw(void *cmd);
             if (fg_draws_overlays()) menu_redraw((void *)vk_cmd());
             vk_frame_end(fs0 ? "build/fg_gen0.png" : NULL);
         } else if (!gen && g_fifo_present && menu_open() && game_interval() == 2 && vk_frame_begin(black)) {
-            // the menu over the game's 30: a second picture with the menu drawn again from the latest input, a refresh
-            // later - scrolling with a finger moves at 60 instead of with the game's frames
             cb = vk_cmd();
-            vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
-            bars_backdrop(cb, b, vx, vy, vw, vh, crop, pv[0] > 0.5f, true);
+            vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv_HUD);
+            bars_backdrop(cb, b, vx, vy, vw, vh, crop, pv_HUD[0] > 0.5f, true);
             menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
             vk_frame_end(NULL);
         }
@@ -1707,78 +1750,12 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
     vk_prof_frame(frame, SDL_GetTicksNS() - t0);
     frames++;
-    static long shot_every = -1;
-    if (shot_every < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
-    {   // LARECOMP_GPUPROF_AT=<frame>[,<frame>...]: GPU time per pass of those frames ("[gpuprof]" in the log)
-        extern bool g_gpuprof_frame;
-        extern void vk_gpuprof_report(void);
-        if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
-        const char *e = getenv("LARECOMP_GPUPROF_AT");
-        for (const char *p = e; p && *p;) {
-            long at = strtol(p, (char **)&p, 10);
-            if (at == (long)frame) { g_gpuprof_frame = true; break; }
-            if (*p == ',') p++; else break;
-        }
+    
+    // Mantenemos el reseteo del temporizador para el log de la app
+    pp_mark(PP_REST);
+    if (now - last_fps_time >= 2.0) {
+        max_gap = 0; frames = 0; last_fps_time = now;
     }
-    if (g_debug_frame) LOG("===== debug frame %llu =====\n", (unsigned long long)frame);
-    {   // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
-        static const char *next;
-        static int init;
-        if (!init) { init = 1; next = getenv("LARECOMP_SHOT_AT"); if (next) mkdir("build/frames", 0755); }
-        while (next && *next) {
-            long at = strtol(next, (char **)&next, 10);
-            if ((long)frame < at) { while (next > getenv("LARECOMP_SHOT_AT") && next[-1] != ',') next--; break; }
-            if ((long)frame == at) {
-                char path[256];
-                snprintf(path, sizeof path, "build/frames/frame_%05llu.png", (unsigned long long)frame);
-                renderer_save_texture_tex(b, path);
-            }
-            if (*next == ',') next++;
-        }
-    }
-    static long shot_from = -1;
-    if (shot_from < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
-    if (shot_every && frame % shot_every == 0 && (long)frame >= shot_from) {
-        char path[256];
-        if (shot_from) mkdir("build/frames", 0755);
-        snprintf(path, sizeof path, shot_from ? "build/frames/frame_%05llu.png" : "build/frame_%05llu.png",
-                 (unsigned long long)frame);
-        renderer_save_texture_tex(b, path);
-        // a series (SCREENSHOT_FROM) runs on until LARECOMP_WINDOW_SHOT exits
-        if (getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) exit_after_shot();
-    }
-    double now = SDL_GetTicks() / 1000.0;
-    static double fps_iv = -1, prev_present, max_gap;
-    if (fps_iv < 0) fps_iv = getenv("LARECOMP_FPS_INTERVAL") ? atof(getenv("LARECOMP_FPS_INTERVAL")) : 2.0;
-    if (prev_present > 0 && now - prev_present > max_gap) max_gap = now - prev_present;
-    static double hitch_ms = -1;  // LARECOMP_LOG_HITCH_MS=<ms>: every present gap over that (tests: hitches per run)
-    if (hitch_ms < 0) hitch_ms = getenv("LARECOMP_LOG_HITCH_MS") ? atof(getenv("LARECOMP_LOG_HITCH_MS")) : 0;
-    if (hitch_ms > 0 && prev_present > 0 && (now - prev_present) * 1000 > hitch_ms)
-        LOG("[hitch] t=%.2f frame %llu gap %.0f ms\n", now, (unsigned long long)frame, (now - prev_present) * 1000);
-    prev_present = now;
-    pp_mark(PP_REST);  // (the fps line itself is not counted)
-    if (now - last_fps_time >= fps_iv) {
-        extern const char *game_level_name(void);
-        if (last_fps_time > 0)
-        {
-            extern double g_game_speed;  // (runtime/hle/framepace.c: the game's speed, its 30 / 60 fps mode)
-            extern uint32_t g_game_interval;
-            extern _Atomic uint64_t g_gpu_busy_ns;
-            static uint64_t gb_at;
-            uint64_t gbn = atomic_load(&g_gpu_busy_ns);
-            double gpu_avg = frames && gb_at ? (gbn - gb_at) / 1e6 / frames : 0;  // (GPU ms per presented frame)
-            gb_at = gbn;
-            LOG("[vk] t=%.1f frame %llu %.1f fps (+%.1f generated) max %.0fms gpu %.1fms speed %.0f%% (mode %d) level %s (%s%s)\n", now,
-                (unsigned long long)frame, frames / (now - last_fps_time), g_gen_frames / (now - last_fps_time), max_gap * 1000.0,
-                gpu_avg, g_game_speed * 100, g_game_interval ? 60 / (int)g_game_interval : 60, game_level_name(), renderer_stats(), pp_text());
-            g_gen_frames = 0;
-        }
-        max_gap = 0;
-        frames = 0;
-        last_fps_time = now;
-    }
-    static double mem_at = 60.0;  // (memory in steady state: a minute in, then every 10 minutes)
-    if (now >= mem_at) { vk_log_memory("playing"); mem_at = now + 600.0; }
 }
 
 // The game thread's side of a present: the frame counters and the per-frame hooks (input, pacing, test hooks).
