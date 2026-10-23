@@ -1661,6 +1661,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         // ====================================================================
         // BUCLE ESTÉREO DIORAMA VR (PROCESAMIENTO LADO A LADO - SBS)
         // ====================================================================
+        float pv_HUD[8] = {0};
         for (int eye = 0; eye < 2; eye++) {
             // Desplazamiento horizontal para la profundidad 3D (Simula el IPD de tus ojos)
             float eye_offset = (eye == 0) ? -0.025f : 0.025f; 
@@ -1674,6 +1675,11 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 crop[2], 
                 crop[3]
             };
+            
+            // Guardamos una copia limpia para el HUD posterior
+            if (eye == 0) {
+                memcpy(pv_HUD, pv, sizeof(pv_HUD));
+            }
             
             // Dividimos el Viewport horizontal de la pantalla de la Quest a la mitad
             double eye_vx = (eye == 0) ? 0 : dw / 2;
@@ -1697,7 +1703,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         rec_CmdSetScissor(cb, 0, 1, &sc_full);
 
         // Volvemos a generar la proyección estándar neutral para la interfaz 2D
-        float pv_HUD[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
+        pv_HUD[4] = crop[0]; // Aseguramos el HUD centrado
         memcpy(g_shot_crop, crop, sizeof crop);
         bars_backdrop(cb, b, vx, vy, vw, vh, crop, pv_HUD[0] > 0.5f, false);
         pp_mark(PP_BLIT);
@@ -1751,12 +1757,18 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     vk_prof_frame(frame, SDL_GetTicksNS() - t0);
     frames++;
     
-    // Mantenemos el reseteo del temporizador para el log de la app
+    // Marcador de fin de renderizado para el perfilador nativo
     pp_mark(PP_REST);
+    
+    // Limpiamos las variables temporales locales de control de tiempo originales
+    double now = SDL_GetTicks() / 1000.0;
     if (now - last_fps_time >= 2.0) {
-        max_gap = 0; frames = 0; last_fps_time = now;
+        frames = 0;
+        last_fps_time = now;
     }
 }
+// === FIN DEL REEMPLAZO ===
+
 
 // The game thread's side of a present: the frame counters and the per-frame hooks (input, pacing, test hooks).
 static void present_hooks(void) {
