@@ -1,5 +1,6 @@
 // Widescreen: the camera code's 16:9 aspect literal loads are patched (tools/patches.py) to call
 // rt_aspect_site(); the renderer sets the wide factor (output aspect / 16:9) each frame.
+#include <SDL3/SDL.h>
 #include "../game_addresses.h"
 #include <string.h>
 #include <math.h>
@@ -374,44 +375,44 @@ static bool game_in_play_now(void) { extern int game_in_play(void); return game_
 // REEMPLAZA LA FUNCIÓN COMPLETA "widescreen_present_crop" POR ESTA EN WIDESCREEN.C:
 // ============================================================================
 void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double *vx, double *vy, double *vw, double *vh) {
-    static uint64_t last;  // (last wide boxed frame: room changes slide the edges instead of jumping)
+    static uint64_t last;
     static float cu0, cu1;
     crop[0] = crop[1] = 0, crop[2] = crop[3] = 1;
     g_room_wide = false;
 
     // ----------------=================================================
-    // LECTURA NATIVA DEL GIROSCOPIO DE META QUEST 3 (SDL3)
+    // LECTURA NATIVA ACTUALIZADA PARA SDL3 (GIROSCOPIO QUEST 3)
     // ----------------=================================================
     static SDL_Sensor *vr_sensor = NULL;
-    static float vr_yaw = 0.0f; // Rotación horizontal de la cabeza
-    static float vr_pitch = 0.0f; // Rotación vertical de la cabeza
+    static float vr_yaw = 0.0f;
+    static float vr_pitch = 0.0f;
 
     if (!vr_sensor) {
-        // Buscamos si las Quest tienen un giroscopio o sensor de orientación activo a través de SDL
         int num_sensors = 0;
         SDL_SensorID *sensors = SDL_GetSensors(&num_sensors);
-        for (int i = 0; i < num_sensors; i++) {
-            if (SDL_GetSensorType(sensors[i]) == SDL_SENSOR_GYRO) {
-                vr_sensor = SDL_OpenSensor(sensors[i]);
-                break;
+        if (sensors) {
+            for (int i = 0; i < num_sensors; i++) {
+                if (SDL_GetSensorType(sensors[i]) == SDL_SENSOR_GYRO) {
+                    vr_sensor = SDL_OpenSensor(sensors[i]);
+                    break;
+                }
             }
+            SDL_free(sensors);
         }
-        if (sensors) SDL_free(sensors);
     }
 
     if (vr_sensor) {
-        float data[3];
-        if (SDL_GetSensorData(vr_sensor, data, 3) == 0) {
-            // data[1] suele ser el eje Y (yaw) y data[0] el eje X (pitch)
-            // Multiplicamos por un factor de sensibilidad para ajustar el movimiento del Diorama
-            vr_yaw += data[1] * 0.005f; 
-            vr_pitch += data[0] * 0.005f;
+        float sensor_data[3];
+        if (SDL_GetSensorData(vr_sensor, sensor_data, 3) == 0) {
+            // Capturamos la velocidad angular y la integramos con un multiplicador de sensibilidad suave
+            vr_yaw += sensor_data[1] * 0.002f; 
+            vr_pitch += sensor_data[0] * 0.002f;
             
-            // Limitamos el rango de visión para que el diorama no se rompa de forma agresiva
-            if (vr_yaw > 0.4f) vr_yaw = 0.4f;
-            if (vr_yaw < -0.4f) vr_yaw = -0.4f;
-            if (vr_pitch > 0.3f) vr_pitch = 0.3f;
-            if (vr_pitch < -0.3f) vr_pitch = -0.3f;
+            // Limitamos los topes de rotación del Diorama VR
+            if (vr_yaw > 0.35f) vr_yaw = 0.35f;
+            if (vr_yaw < -0.35f) vr_yaw = -0.35f;
+            if (vr_pitch > 0.25f) vr_pitch = 0.25f;
+            if (vr_pitch < -0.25f) vr_pitch = -0.25f;
         }
     }
     // ----------------=================================================
@@ -425,7 +426,7 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
     if (shape > 1.0 && widescreen_interior_fill() && game_in_play_now()) { g_room_wide = true; return; }  
     
     if (shape < 1.0) {
-        crop[1] = (float)((1.0 - shape) / 2) + vr_pitch; // Añadimos movimiento vertical (Pitch) a la VR
+        crop[1] = (float)((1.0 - shape) / 2) + vr_pitch; 
         crop[3] = (float)shape;
         double nh = *vh * shape; *vy += (*vh - nh) / 2; *vh = nh;
         return;
@@ -451,7 +452,7 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
     }
     last = frame;
     
-    // Inyectamos el movimiento horizontal del giroscopio (Yaw) directamente en el buffer de recorte
+    // Aplicamos el desplazamiento de la maqueta según la posición de la cabeza
     crop[0] = cu0 + vr_yaw; 
     crop[2] = cu1 - cu0;
     *vx += *vw * cu0, *vw *= cu1 - cu0;
