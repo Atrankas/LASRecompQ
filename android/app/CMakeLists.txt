@@ -31,7 +31,7 @@ FetchContent_Declare(adrenotools GIT_REPOSITORY https://github.com/bylaws/libadr
                      GIT_TAG 8fae8ce254dfc1344527e05301e43f37dea2df80 GIT_SUBMODULES_RECURSE ON)
 FetchContent_Declare(
     openxr_loader_src
-    GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-SDK-Source
+    GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-SDK-Source.git
     GIT_TAG        release-1.1.44 # Versión estable y compatible con Quest 3
     SOURCE_SUBDIR  src/loader
 )
