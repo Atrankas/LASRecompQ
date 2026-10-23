@@ -24,19 +24,14 @@ jobs:
 
     - name: Instalar Android NDK 27.2.12479018
       run: |
-        # Usamos el sdkmanager nativo del sistema aceptando licencias primero
         yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses
         /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.2.12479018"
 
     - name: Modificar script para compilar en Linux de Actions
       run: |
-        # Configurar las rutas absolutas dentro del entorno de GitHub
         NDK_PATH="/usr/local/lib/android/sdk/ndk/27.2.12479018"
-        
         sed -i "s|^SDK=.*|SDK=\"/usr/local/lib/android/sdk\"|g" tools/android/build_deps.sh
         sed -i "s|^NDK=.*|NDK=\"$NDK_PATH\"|g" tools/android/build_deps.sh
-        
-        # Eliminar comprobaciones de firmas y forzar el compilador host nativo de Linux
         sed -i '/shasum -a 256/d' tools/android/build_deps.sh
         sed -i 's/--host-cc=.*/--host-cc=gcc \\/g' tools/android/build_deps.sh
 
@@ -56,8 +51,21 @@ jobs:
         chmod +x gradlew
         ./gradlew assembleRelease -PonDeviceBuild=true
 
+    - name: Generar Clave de Firma y Firmar APK (Opción B)
+      run: |
+        # 1. Generamos un almacén de claves (keystore) temporal de pruebas con la herramienta nativa de Java
+        keytool -genkey -v -keystore mi_clave_temporal.keystore -alias clave_alias -keyalg RSA -keysize 2048 -validity 10000 \
+          -storepass mi_contrasena_secreta -keypass mi_contrasena_secreta -dname "CN=Pruebas, OU=Desarrollo, O=Personal, L=Ciudad, S=Estado, C=ES"
+        
+        # 2. Buscamos la herramienta apksigner integrada en el SDK Build-Tools de Android
+        APKSIGNER=$(find /usr/local/lib/android/sdk/build-tools/ -name apksigner | sort -V | tail -n 1)
+        
+        # 3. Firmamos el APK que generó Gradle usando la clave recién creada
+        $APKSIGNER sign --keystore mi_clave_temporal.keystore --storepass mi_contrasena_secreta --keypass mi_contrasena_secreta \
+          --out android/app/build/outputs/apk/release/LASRecomp-Android-Firmado.apk android/app/build/outputs/apk/release/app-release.apk
+
     - name: Subir el APK resultante como Artefacto
       uses: actions/upload-artifact@v4
       with:
         name: LASRecomp-Android-APK
-        path: android/app/build/outputs/apk/release/app-Qrelease.apk
+        path: android/app/build/outputs/apk/release/LASRecomp-Android-Firmado.apk
