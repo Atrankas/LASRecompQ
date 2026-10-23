@@ -381,7 +381,7 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
     g_room_wide = false;
 
     // ----------------=================================================
-    // LECTURA NATIVA ACTUALIZADA PARA SDL3 (GIROSCOPIO QUEST 3)
+    // LECTURA NATIVA REPARADA PARA SDL3 (GIROSCOPIO QUEST 3)
     // ----------------=================================================
     static SDL_Sensor *vr_sensor = NULL;
     static float vr_yaw = 0.0f;
@@ -392,9 +392,14 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
         SDL_SensorID *sensors = SDL_GetSensors(&num_sensors);
         if (sensors) {
             for (int i = 0; i < num_sensors; i++) {
-                if (SDL_GetSensorType(sensors[i]) == SDL_SENSOR_GYRO) {
-                    vr_sensor = SDL_OpenSensor(sensors[i]);
-                    break;
+                // En SDL3, primero abrimos el sensor por su ID para poder inspeccionarlo
+                SDL_Sensor *opened = SDL_OpenSensor(sensors[i]);
+                if (opened) {
+                    if (SDL_GetSensorType(opened) == SDL_SENSOR_GYRO) {
+                        vr_sensor = opened; // ¡Encontrado! Nos lo quedamos
+                        break;
+                    }
+                    SDL_CloseSensor(opened); // Si no es el giroscopio, lo cerramos
                 }
             }
             SDL_free(sensors);
@@ -404,9 +409,9 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
     if (vr_sensor) {
         float sensor_data[3];
         if (SDL_GetSensorData(vr_sensor, sensor_data, 3) == 0) {
-            // Capturamos la velocidad angular y la integramos con un multiplicador de sensibilidad suave
-            vr_yaw += sensor_data[1] * 0.002f; 
-            vr_pitch += sensor_data[0] * 0.002f;
+            // Integramos la velocidad angular con el pacer de movimiento
+            vr_yaw += sensor_data[0] * 0.002f; 
+            vr_pitch += sensor_data[1] * 0.002f;
             
             // Limitamos los topes de rotación del Diorama VR
             if (vr_yaw > 0.35f) vr_yaw = 0.35f;
