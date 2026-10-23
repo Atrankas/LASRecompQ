@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.os.Build;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -38,6 +39,13 @@ final class GpuDrivers {
 
     // An Adreno GPU (the kernel's kgsl device): the Turnip build the APK carries can run
     static boolean adreno() { return new File("/dev/kgsl-3d0").exists(); }
+
+    // A Meta Quest headset (Build.MANUFACTURER is "Oculus" on Quest 2/3/Pro, "Meta" on newer builds)
+    static boolean isQuest() {
+        String m = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.toLowerCase(java.util.Locale.ROOT);
+        String d = Build.MODEL == null ? "" : Build.MODEL.toLowerCase(java.util.Locale.ROOT);
+        return m.contains("oculus") || m.contains("meta") || d.startsWith("quest");
+    }
 
     static File root(Context c) { return new File(c.getFilesDir(), "gpu_driver"); }
 
@@ -144,6 +152,11 @@ final class GpuDrivers {
     // No custom driver selected, and the system's driver is older than Vulkan 1.3, which the renderer needs (Adreno 6xx
     // phones that stopped getting updates, e.g. the Galaxy S20 FE's 1.1): the Turnip build the APK carries runs
     static boolean auto(Context c) {
+        // Meta Quest (Horizon OS): its SELinux policy denies the kgsl ioctl Turnip allocates GPU memory with
+        // (avc: denied ioctl /dev/kgsl-3d0 0x934 -> vkCreateDevice VK_ERROR_OUT_OF_DEVICE_MEMORY), so the bundled
+        // Turnip can never start there. Qualcomm's own driver (vulkan.adreno.so) is the one to use; if it is below
+        // Vulkan 1.3, device.c's compat path (COMPAT_EXT) takes over.
+        if (isQuest()) return false;
         // (also after a custom driver was switched off: the system's can't run the game without Vulkan 1.3 - it
         // crashed at start)
         return adreno() && !c.getPackageManager().hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION, 0x403000);
