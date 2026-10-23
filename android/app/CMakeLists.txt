@@ -29,18 +29,11 @@ add_subdirectory(${ROOT}/build/android/SDL3 ${CMAKE_BINARY_DIR}/SDL3)
 include(FetchContent)
 FetchContent_Declare(adrenotools GIT_REPOSITORY https://github.com/bylaws/libadrenotools.git
                      GIT_TAG 8fae8ce254dfc1344527e05301e43f37dea2df80 GIT_SUBMODULES_RECURSE ON)
-# 1. Definimos la librería precompilada que guardaste en tu carpeta 'libs'
-add_library(openxr_loader SHARED IMPORTED)
-set_target_properties(openxr_loader PROPERTIES
-    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/libs/openxr_loader_for_android-1.1.65.aar"
-)
 # Forzamos a que compile solo el cargador estático para ahorrar tiempo en la nube
 set(BUILD_LOADER ON CACHE BOOL "" FORCE)
 set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
-
-FetchContent_MakeAvailable(openxr_loader_src)
 FetchContent_MakeAvailable(adrenotools)
 foreach(t main_hook hook_impl)
   target_link_options(${t} PRIVATE "-Wl,-z,max-page-size=16384")  # (16 KB page devices, as libmain.so)
@@ -124,5 +117,5 @@ target_link_options(main PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,-Bsymbolic" "
                                  "-Wl,-z,nostart-stop-gc")  # (the HLE / service / reset tables: sections kept whole)
 target_link_libraries(main PRIVATE SDL3::SDL3-shared
                       ${DEPS}/lib/libavformat.a ${DEPS}/lib/libavcodec.a ${DEPS}/lib/libswscale.a ${DEPS}/lib/libavutil.a
-                      ${DEPS}/lib/libshaderc_combined.a adrenotools android lasrecomp log m dl vulkan openxr_loader)
+                      ${DEPS}/lib/libshaderc_combined.a adrenotools android lasrecomp log m dl vulkan)
                       
