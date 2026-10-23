@@ -23,10 +23,9 @@ EXEFS=$GAME
 [ -f "$EXEFS/main" ] || EXEFS=$GAME/exefs
 [ -f "$EXEFS/main" ] && [ -f "$EXEFS/sdk" ] || { echo "no exefs/main and exefs/sdk in $GAME"; exit 1; }
 EXEFS=$(cd "$EXEFS" && pwd)  # (the generator runs in tools/)
-# v1.0.0 only (the build id at 0x40, as the start screen checks: runtime/ui/launcher.mm BUILD_ID)
-WANT=$(sed -n 's/.*BUILD_ID\[8\] = {\([^}]*\)}.*/\1/p' runtime/ui/launcher.mm | tr -d ' ,' | sed 's/0x//g' | tr 'A-F' 'a-f')
-HAVE=$(dd if="$EXEFS/main" bs=1 skip=64 count=8 2>/dev/null | xxd -p)
-[ -z "$WANT" ] || [ "$WANT" = "$HAVE" ] || { echo "exefs/main is not version 1.0.0 (build id $HAVE)"; exit 1; }
+# (the game version: tools/gen.py picks its address table by the main program's build ID, at 0x40, and stops on an
+# unknown one; the library's id ends in its first 8 bytes, as runtime/gamelib.h gamelib_full_id makes it)
+BUILD8=$(dd if="$EXEFS/main" bs=1 skip=64 count=8 2>/dev/null | xxd -p | tr 'a-f' 'A-F')
 
 SDK=${ANDROID_HOME:-$(sed -n 's/^sdk.dir=//p' android/local.properties 2>/dev/null || true)}
 SDK=${SDK:-/opt/homebrew/share/android-commandlinetools}
@@ -44,7 +43,7 @@ if [ ! -x "$VENV/bin/python" ]; then
     "$VENV/bin/pip" install -q capstone==5.0.9 unicorn==2.1.4 lz4==4.4.5
 fi
 
-ID=$(tools/android/gamelib_id.sh)
+ID=$(tools/android/gamelib_id.sh)-$BUILD8
 FLAGS=$(tools/android/gamelib_id.sh --flags)
 SPLITFLAGS=$(tools/android/gamelib_id.sh --split-flags)
 GENARGS=$(tools/android/gamelib_id.sh --gen-args)

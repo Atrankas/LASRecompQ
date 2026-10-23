@@ -877,6 +877,22 @@ SHADOW_LINK_APPEAR_SITE = A.SHADOW_LINK_APPEAR_SITE
 # and the area's own music plays on (runtime/hle/miniboss.c rt_shadow_link_bgm).
 SHADOW_LINK_BGM_SITE = A.SHADOW_LINK_BGM_SITE
 
+# An actor's AI starting one of its events (main+0x94a510, x20 = the AI, flow name at [x29-0x40]): right before it
+# builds the event request (bl main+0x80c290). Any event request holds Link still while it runs; a randomizer item
+# picked up from the ground (a SinkingSword item actor) whose entry only sets its flag and adds a rupee / heart /
+# refill is given by the runtime instead (runtime/hle/quick_pickup.c) and the request skipped: the skip goes to the
+# function's no-event return.
+ACTOR_EVENT_SITE = A.ACTOR_EVENT_SITE
+
+
+# Issue #314 (Hot Head, Turtle Rock: crash reading 0x11 in main+0x142afb0 when the Magic Rod's fire hit him): a PhysX
+# shape change on an actor in the scene (main+0x1408db0, RigidCore::onShapeChange - the geometry / pose / filter /
+# flags / offsets a shape setter just changed, flags at [x2]) and its sibling main+0x1408d60 look up the actor's
+# simulation object for that shape with main+0x14090a0 (RigidSim::getSimForShape). PhysX hands back the address 1
+# when the shape has none ("should never happen": it is only asserted in PhysX's own debug builds) and the update then
+# reads through it. The hooks right after the lookup skip the update for a shape the simulation doesn't hold (the
+# functions' own return): its simulation object, if one is made later, starts from the shape's current state.
+SHAPE_SIM_SITES = [A.SHAPE_SIM_SITES_0, A.SHAPE_SIM_SITES_1]
 
 # ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
 # what to do - 0 run it, 1 the hook did it all, 2.. jump to the site's first.. target (each a label in its function).
@@ -893,6 +909,7 @@ HOOKS = {
     MSTALFOS_JUMP_SITE: (0x1e213800, (), 'fsub s0, s0, s1: Master Stalfos jump arc from his takeoff height'),
     SHADOW_LINK_APPEAR_SITE: (0xf9411809, (A.SHADOW_LINK_APPEAR_SKIP,), 'ldr x9, [x0, #0x230]: Shadow Link, no Appear event on the Field'),
     SHADOW_LINK_BGM_SITE: (0x97ff5eac, (), 'bl main+0xce8ce0: Shadow Link starts his chamber music, not outside it'),
+    ACTOR_EVENT_SITE: (0x97fb074a, (A.ACTOR_EVENT_SKIP,), 'bl main+0x80c290: an actor\'s event request (quick pickups: none)'),
     MCHIEF_STORY_SITE: (0x37380148, (A.MCHIEF_STORY_SKIP,), 'tbnz w8, #7: Moblin Chief, no story check on the Field'),
     DIG_HOLE_SITE: (0xf94007f6, (), 'ldr x22, [sp, #8]: a hole was dug (digs.c)'),
     HOLE_CAP_SITES[0]: (0xf101451f, (), 'cmp x8, #0x51: dug-hole limit (digs.c)'),
@@ -905,4 +922,6 @@ HOOKS = {
     FRAME_JOB_KICKOFF_SITES[3]: (0x910782b3, (), 'add x19, x21, #0x1e0: frame job kick-off, previous finish first'),
     FRAME_JOB_FINISH_SITE: (0xf9400008, (), 'ldr x8, [x0]: frame job finish (debug delay)'),
     OWNER_CALL_NOTIFY_SITE: (0x9100e2a0, (), 'add x0, x21, #0x38: owner-thread call done, the caller is waiting first'),
+    SHAPE_SIM_SITES[0]: (0xaa0003f4, (A.SHAPE_SIM_SKIP_0,), 'mov x20, x0: a PhysX shape change, no update without its simulation object (#314)'),
+    SHAPE_SIM_SITES[1]: (0xaa0003e1, (A.SHAPE_SIM_SKIP_1,), 'mov x1, x0: a PhysX shape change, no update without its simulation object (#314)'),
 }

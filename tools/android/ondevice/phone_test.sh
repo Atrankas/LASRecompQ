@@ -23,7 +23,7 @@ adb push -q $S/cckit $D/cckit
 adb push -q tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/simd_c.py \
     tools/game_addresses.py $D/tools/
 adb push -q tools/rando/patch_variants.json $D/tools/rando/
-adb push -q runtime/game_addresses/patches_v1_0_0.h $D/runtime/game_addresses/
+adb push -q runtime/game_addresses/versions.h runtime/game_addresses/patches_v*.h $D/runtime/game_addresses/
 adb push -q tools/android/ondevice/selftest.py tools/android/ondevice/pybench.py tools/android/ondevice/phone_cc_test.sh $D/
 adb push -q tools/android/ondevice/linkprobe.c build/ondevice/obj/linkprobe_loader "$MAINDIR/libmain.so" "$MAINDIR/libSDL3.so" $D/work/
 [ -z "${1:-}" ] || adb push -q "$1" $D/work/one.c

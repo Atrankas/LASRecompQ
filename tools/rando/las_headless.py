@@ -695,12 +695,16 @@ def main():
     print('bomb bag text:', bomb_bag_text.apply(out_dir, romfs, settings), flush=True)
     import powder_bag_text  # (same) found powder: "You found your Powder Bag!"
     print('powder bag text:', powder_bag_text.apply(out_dir, romfs, settings), flush=True)
+    import silent_pickups  # (the last flow edit) minor ground items: no item-get cutscene, a sound and a card instead
+    print('silent pickups: %d gives, %d native get flows' % silent_pickups.apply(out_dir, romfs), flush=True)
     import room_links  # (every room edit done: actors' links within each room must still be sound)
     problems = room_links.check(out_dir, _uw_leb, romfs)
     if problems:
         for pr in problems[:20]:
             print('room links:', pr, file=sys.stderr)
         sys.exit(f'room links broken in {len(problems)} place(s) - the game would crash loading them; first: {problems[0]}')
+    import quick_pickups  # (every flow edit done) ground items given without an event: Link doesn't stop for them
+    print('quick pickups:', quick_pickups.apply(out_dir, romfs), flush=True)
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
@@ -712,6 +716,9 @@ def main():
         s['hint-sheet'] = True  # (runtime/hle/hint_sheet.c: older seeds have no Hint Sheet)
         s['ghost-item'] = 'ghost' in pets  # (runtime/hle/pets.c: older seeds' Ghost follows Link)
         s['underwater-items'] = True  # (runtime: the sunken heart-piece actors don't hide for an owned heart piece)
+        s['silent-pickups'] = True  # (tools/rando/silent_pickups.py; runtime/hle/silent_pickups.c)
+        shells = sum(1 for v in result['placements'].values() if v == 'seashell')  # (the fly-in's "n / total": 50)
+        s['seashell-total'] = shells if 0 < shells <= 50 else 50
         json.dump(s, f, indent=1)
     print('flags.tsv:', seed_tables.write_flags(out_dir, _ot, romfs), flush=True)  # (reads settings.json)
     stage('Building the check tracker', 0.99)

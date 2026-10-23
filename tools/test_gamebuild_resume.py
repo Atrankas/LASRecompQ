@@ -64,7 +64,7 @@ with tempfile.TemporaryDirectory() as temporary:
         (resources/'runtime'/name).write_text('/* fixture header */\n')
     (resources/'tools/gamelib_entry.c').write_text('int cache_entry(void) { return 0; }\n')
     (resources/'runtime/hle/hle_symbols.txt').write_text('fixture\n')
-    main = b'fixture main'
+    main = b'NSO0' + bytes(0x3c) + bytes.fromhex('0123456789abcdef') + bytes(0x18) + b'fixture main'  # (the build ID: the library id)
     (game/'exefs/main').write_bytes(main)
     (game/'exefs/sdk').write_bytes(b'fixture sdk')
     generator = tmp/'generator.py'; generator.write_text(GENERATOR)

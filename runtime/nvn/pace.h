@@ -11,3 +11,6 @@ uint64_t pace_frames_over(void);  // (stats) frames over 60 fps's budget since t
 // A backend's view of the frame (optional): raises busy (ms) with the work its other threads / the GPU did for it, and
 // can pass the frame's work on (phones: performance hints). slow: the game's 30 fps mode is on
 extern void (*pace_busy_adjust)(double *busy, bool slow);
+// any thread: a one-off stall (a load, a save commit, ...; why: for the log): the next second's frames don't count
+// toward holding 30 (pace.c)
+void pace_hitch(const char *why);

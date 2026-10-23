@@ -33,7 +33,7 @@ final class NxPackage {
 
     // Returns null when done, else: "keys:<name>" (a key prod.keys doesn't have), "badkeys" (the header doesn't
     // decrypt: wrong keys), "notgame" (no Link's Awakening program inside), "updateonly" (only an update of it),
-    // "version" (another version than buildId),
+    // "version" (none of the versions in buildId: comma-separated build IDs),
     // "corrupt:<what>", "space:<bytes needed>", "copy:<details>"
     static String extract(FileChannel pkg, Map<String, byte[]> keys, File dest, String buildId, Progress progress) {
         try {
@@ -402,7 +402,7 @@ final class NxPackage {
             ByteBuffer b = exefs.read(main.off + 0x40, 8);
             StringBuilder have = new StringBuilder();
             for (int i = 0; i < 8; i++) have.append(String.format(Locale.ROOT, "%02x", b.get(i) & 0xff));
-            if (!buildId.equalsIgnoreCase(have.toString())) return "version";
+            if (!LasActivity.buildIdMatches(buildId, have.toString())) return "version";
         }
         List<RomFile> rf = romfsFiles();
         total = 0;

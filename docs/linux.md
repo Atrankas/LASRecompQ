@@ -66,20 +66,23 @@ The randomizer from a source checkout uses LAS-Randomizer's own venv (Python 3.1
     third_party/LAS-Randomizer/venv/bin/pip install -r third_party/LAS-Randomizer/requirements.txt
 
 ## AppImages
-Needs podman, and for aarch64 QEMU user emulation with binfmt (`sudo apt install podman qemu-user qemu-user-binfmt`).
+Needs podman, and for the other arch's AppImage QEMU user emulation with binfmt (`sudo apt install podman qemu-user
+qemu-user-binfmt`).
 
     make appimage                # this machine's arch -> build/dist/LAS Recomp-<version>-linux-<arch>.AppImage
-    make appimage ARCH=aarch64   # cross-compiled from x86-64
+    make appimage ARCH=aarch64   # on x86-64: cross-compiled
     make appimages               # both
 
 Everything is built in Ubuntu 22.04 containers (`tools/linux/Containerfile`), so the result runs on glibc 2.35+:
 SDL3, an LGPL-only FFmpeg (only the movie codecs, as on Windows / macOS), and shaderc from pinned sources
-(`tools/linux/build_deps.sh`), then the game against them (`tools/linux/package.sh`). aarch64 is cross-compiled in
-the amd64 container against the arm64 image's root filesystem (`build/linux/aarch64/sysroot`). The seed generator
-helper (`tools/linux/rando_helper.sh`, PyInstaller) is frozen in a container of its own arch; on arm64 that runs
-under QEMU and builds oead and keystone-engine from source the first time (no arm64 wheels on PyPI; cached in
-`build/linux/aarch64/wheels`). The generated game code comes from the host (`generated/`, `generated-aarch64/`;
-`make appimage` runs `make gen` for it when missing).
+(`tools/linux/build_deps.sh`), then the game against them (`tools/linux/package.sh`). This machine's arch is built
+natively in one container of that arch (the release does both archs that way, on an arm64 runner for aarch64).
+aarch64 on an x86-64 machine is cross-compiled in the amd64 container against the arm64 image's root filesystem
+(`build/linux/aarch64/sysroot`), with only the seed generator helper (`tools/linux/rando_helper.sh`, PyInstaller
+builds for the machine it runs on) frozen in the arm64 container under QEMU, where pip also builds oead and
+keystone-engine from source the first time (no arm64 wheels on PyPI; cached in `build/linux/aarch64/wheels`). The
+generated game code comes from the host (`generated/`, `generated-aarch64/`; `make appimage` runs `make gen` for it
+when missing).
 
 Release check of the x86-64 AppImage (`make smoketest`, tools/linux/smoketest.sh, ~7 minutes on this kind of machine):
 three launches of the AppImage itself - the start screen; a session from a test save warping to four overworld spots

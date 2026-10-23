@@ -752,6 +752,8 @@ static void drop_slot(const char *path) {
 // Commit always succeeds for the game (see save_failed). A save that failed is dropped whole. If only the sidecar's
 // rename failed (the data is already replaced), its working copy stays for the next mount to finish the pair.
 static void commit(HostFs *fs) {
+    extern void pace_hitch(const char *why);  // nvn/pace.c
+    if (fs->npending) pace_hitch("a save commit");
     for (int i = 0; i < fs->npending; i++) {
         const char *path = fs->pending[i];
         if (fs->failed[i]) {

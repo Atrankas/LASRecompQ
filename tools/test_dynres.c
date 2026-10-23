@@ -14,6 +14,7 @@
 
 Settings g_settings = {.res_mode = RES_DYNAMIC};
 bool g_gpu_integrated = true;
+void pace_hitch(const char *why) { (void)why; }  // (output_scale.c's render scale changes: nvn/pace.c)
 
 static unsigned g_rng = 1;
 static double rnd(void) { g_rng = g_rng * 1103515245u + 12345u; return ((g_rng >> 8) & 0xffff) / 65535.0; }

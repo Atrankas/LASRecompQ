@@ -54,6 +54,19 @@ foreach(f tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passe
 endforeach()
 message(STATUS "game code library id ${GAMELIB_ID}")
 
+# ---- the shader translator's id (as the Makefile's TRANSLATOR_ID): part of the shader caches' tag (shader_prep.c
+# shader_cache_tag), so a changed translator - or a changed way of making pipelines (exec.c) - starts the SPIR-V and
+# pipeline caches anew instead of piling new entries onto stale ones the driver keeps in memory ("dev" before: the
+# phone's caches only grew)
+set(TRANSLATOR_CAT "")
+foreach(f runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h runtime/nvn/vulkan/exec.c)
+  file(SHA256 ${ROOT}/${f} h)
+  string(APPEND TRANSLATOR_CAT ${h})
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${ROOT}/${f})
+endforeach()
+string(SHA256 TRANSLATOR_ID "${TRANSLATOR_CAT}")
+string(SUBSTRING ${TRANSLATOR_ID} 0 12 TRANSLATOR_ID)
+
 # ---- SMAA's reference shader as a C string (as the Makefile: non-ASCII -> '?', no CR)
 set(SMAA_INC ${CMAKE_BINARY_DIR}/inc/smaa_hlsl.inc)
 add_custom_command(OUTPUT ${SMAA_INC}
@@ -88,7 +101,7 @@ target_include_directories(main PRIVATE ${ROOT}/runtime ${ROOT}/runtime/nvn ${IM
 target_compile_definitions(main PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_ANDROID_KHR IMGUI_IMPL_VULKAN_USE_VOLK
                                         "GAMELIB_ID=\"${GAMELIB_ID}\"" "GAMELIB_CFLAGS=\"${GAMELIB_FLAGS} ${GAMELIB_CC22}\""
                                         "GAMELIB_SHARED=\"-shared\"" "GAMELIB_SPLIT_FLAGS=\"${GAMELIB_SPLIT}\""
-                                        "GAMELIB_GEN_ARGS=\"${GAMELIB_GENARGS}\"")
+                                        "GAMELIB_GEN_ARGS=\"${GAMELIB_GENARGS}\"" "SHADER_TRANSLATOR_ID=\"${TRANSLATOR_ID}\"")
 target_compile_options(main PRIVATE -fsigned-char -fno-strict-aliasing
                                     $<$<COMPILE_LANGUAGE:C>:-Wall -Wno-unused-function -Wno-format>
                                     $<$<COMPILE_LANGUAGE:CXX>:-std=c++17 -Wno-format>)

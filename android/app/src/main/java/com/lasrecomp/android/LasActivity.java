@@ -438,6 +438,13 @@ public class LasActivity extends SDLActivity {
     // into dest/exefs and dest/romfs, reporting progress through nativeImportProgress. Runs on the calling (native)
     // thread. Returns null when done, else what went wrong: "nofolder", "notfound", "unusable" (game packages such
     // as .nsp / .xci instead of their files), "space:<bytes needed>" or "copy:<details>".
+    // buildId: the supported versions' main build IDs (the first 8 bytes, hex), comma-separated
+    static boolean buildIdMatches(String buildIds, String have) {
+        if (have == null) return false;
+        for (String b : buildIds.split(",")) if (b.trim().equalsIgnoreCase(have)) return true;
+        return false;
+    }
+
     public static String importGameFiles(String dest, String buildId) {
         LasActivity a = (LasActivity) mSingleton;
         if (a == null || (sTree == null && !sUsePackage)) return "nofolder";
@@ -477,7 +484,7 @@ public class LasActivity extends SDLActivity {
                         }
                     }
                 }
-                if (!buildId.equalsIgnoreCase(have)) {
+                if (!buildIdMatches(buildId, have)) {
                     Log.w(TAG, "exefs/main build id " + have + ", wanted " + buildId);
                     return "version";
                 }

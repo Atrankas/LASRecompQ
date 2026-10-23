@@ -423,6 +423,8 @@ static void add_cflags(Args *a, const Tools *t, bool cold) {
     }
 }
 
+static char g_full_id[GAMELIB_FULL_ID_SIZE];  // this build's library id (gamelib_full_id): GAMELIB_ID-<build ID>
+
 static PlatProc start_compile(const Tools *t, const Unit *u) {
     Args a = {0};
     compiler(&a, t);
@@ -431,7 +433,9 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
-    add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID "\"");
+    char id[GAMELIB_FULL_ID_SIZE + 32];
+    snprintf(id, sizeof id, "-DGAMELIB_ID=\"%s\"", g_full_id);
+    add(&a, id);
     add(&a, "-c");
     add(&a, u->src);
     add(&a, "-o");
@@ -522,6 +526,10 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     static bool registered;
     if (!registered) registered = true, atexit(end_all);
     g_killed = false;
+    if (!gamelib_full_id(game_dir, g_full_id, sizeof g_full_id)) {
+        snprintf(why, why_size, "the game files' exefs/main is missing or unreadable");
+        return false;
+    }
     Tools t;
 #ifdef __ANDROID__
     // the generator and the NDK pieces out of the APK's assets (once per app version: LasActivity.buildTools)
@@ -574,7 +582,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     const char *headers[] = {"cpu.h", "simd.h", "simd_fp.h", "gamelib.h"};
     for (int i = 0; i < 4; ++i) snprintf(input_paths[i+2], sizeof input_paths[i+2], "%s" SEP "%s", t.inc, headers[i]);
     // Generator changes should rebuild only chunks whose C changed, as in the existing incremental builder.
-    // Compiler/header/flag changes invalidate every object; entry always rebuilds because it embeds GAMELIB_ID.
+    // Compiler/header/flag changes invalidate every object; entry always rebuilds because it embeds the library id.
     const char *inputs[] = {input_paths[2], input_paths[3], input_paths[4], input_paths[5], t.cc};
     // The compiler's contents identify it, so relocating the app does not discard reusable objects.
     snprintf(spec, sizeof spec, "LASBUILD3\n%s\n%s\n%s\nzig=%d pointer=%d%s%s\n%s\n", GAMELIB_BASE_ID,
@@ -886,7 +894,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             ok = false;
         }
     }
-    if (ok) ok = build_cache_publish(cache, GAMELIB_NAME, GAMELIB_ID, why, why_size);
+    if (ok) ok = build_cache_publish(cache, GAMELIB_NAME, g_full_id, why, why_size);
 #ifdef __ANDROID__
     if (ok) ok = install_internal(game_dir, t.ondev, why, why_size);
 #endif

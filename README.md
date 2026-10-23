@@ -153,6 +153,8 @@ code on a computer instead (a personal APK): `tools/android/build_game.sh <game 
 - **[@gitarre1234rr5](https://github.com/gitarre1234rr5)** - controller rumble: the game's vibration on your controller
   (#104), and a regression test for the kernel's timed condition-variable wait (#88)
 - **[@rkammoun](https://github.com/rkammoun)** - diagnosed and patched the Metal 16-sampler limit behind the black walls in the Ukuku Prairie cave (#215, fixed in #216)
+- **[@NevesHenry](https://github.com/NevesHenry)** - a clear message on Linux when no folder or file window can open (#298), and the controller rumble test building again and running in CI (#299)
+- **[@ky1vstar](https://github.com/ky1vstar)** - the Linux aarch64 release built natively on an arm64 runner, cutting that build from about 1 h 20 to under 10 minutes (#319)
 
 Thanks also to everyone who reports issues and tests builds; your logs and screenshots find most of the bugs.
 
@@ -193,6 +195,9 @@ none of their files are used):
   (GPL 2.0; Python bindings BSD; runs small pieces of code to resolve jump tables) and
   [python-lz4](https://github.com/python-lz4/python-lz4) (BSD 3-clause, with the LZ4 library: BSD 2-clause)
 - [envytools](https://github.com/envytools/envytools) - NVIDIA GPU documentation used for the shader translator
+- An MIT-licensed open-source project's audio renderer and shader instruction decoders (license and copyright notice:
+  `third_party/ryujinx/LICENSE.txt`) - the audio renderer's reverb is a port of its reverb code and the mixer is
+  modelled on its renderer; its instruction decoders were the bit-layout reference for parts of the shader translator
 - **Dusklight** by the TwilitRealm team (https://github.com/TwilitRealm/dusklight) - design inspiration for the start
   screen (Play / Settings / Game Files layout)
 - The Switch homebrew community's documentation ([Switchbrew](https://switchbrew.org))
@@ -206,8 +211,8 @@ this repository and not in release builds. You must provide your own legally obt
 ## License
 
 LAS Recomp's own code (the recompiler tools, the runtime, the randomizer additions) is open source under the
-[MIT License](LICENSE). Third-party components keep their own licenses: LAS-Randomizer (MIT), Dear ImGui (MIT),
-Vulkan Memory Allocator (MIT), SMAA (MIT), AMD FSR 1 (MIT), the Baloo 2 font (SIL OFL 1.1), SDL 3 (zlib), FFmpeg (LGPL 2.1+, linked dynamically), the
+[MIT License](LICENSE). Third-party components keep their own licenses: LAS-Randomizer (MIT), ported audio renderer code (MIT, see `third_party/`), Dear ImGui (MIT),
+Vulkan Memory Allocator (MIT), SMAA (MIT), AMD FSR 1 (MIT), the Baloo 2 font (SIL OFL 1.1), the DejaVu Sans font (Bitstream Vera / DejaVu license), SDL 3 (zlib), FFmpeg (LGPL 2.1+, linked dynamically), the
 Zig compiler (MIT; its LLVM / Clang / LLD: Apache 2.0 with LLVM exceptions; its C library headers keep their own
 licenses), and the generator helpers' bundled libraries listed under Credits (oead / evfl / Keystone in the seed
 generator and Unicorn in the game code generator are under the GPL, versions in the table below: each helper is a separate program the game runs, and its

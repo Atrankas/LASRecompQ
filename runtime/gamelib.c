@@ -19,8 +19,9 @@
 static const GameLibTables *g_tables;
 static char g_error[256];
 
-// The library's id file (<library>.id, written next to it by the build): its GAMELIB_ID, read without loading it.
-static bool id_matches(const char *lib) {
+// The library's id file (<library>.id, written next to it by the build): its id (gamelib_full_id), read without
+// loading it.
+static bool id_matches(const char *lib, const char *want) {
     char path[1100], id[128] = {0};
     snprintf(path, sizeof path, "%s.id", lib);
     FILE *f = fopen(path, "rb");
@@ -28,7 +29,7 @@ static bool id_matches(const char *lib) {
     size_t n = fread(id, 1, sizeof id - 1, f);
     fclose(f);
     while (n && (id[n - 1] == '\n' || id[n - 1] == '\r')) id[--n] = 0;
-    return !strcmp(id, GAMELIB_ID);
+    return !strcmp(id, want);
 }
 
 static bool exists(const char *p) {
@@ -63,15 +64,17 @@ static bool in_apk(const char *c) { return !strchr(c, '/'); }  // (Android: a ba
 
 bool gamelib_present(const char *game_dir) {
     if (g_tables) return true;
+    char want[GAMELIB_FULL_ID_SIZE];
+    if (!game_dir || !gamelib_full_id(game_dir, want, sizeof want)) return false;
     char c[3][1100];
     int n = candidates(game_dir, c);
     for (int i = 0; i < n; i++) {
         if (in_apk(c[i])) {  // (loading it is the only way to look: the library stays loaded for the game)
             char why[8];
-            if (gamelib_load(NULL, why, sizeof why)) return true;
+            if (gamelib_load(game_dir, why, sizeof why)) return true;
             continue;
         }
-        if (exists(c[i]) && id_matches(c[i])) return true;
+        if (exists(c[i]) && id_matches(c[i], want)) return true;
     }
     return false;
 }
@@ -89,7 +92,7 @@ bool gamelib_pgo_dump(const char *path) {
     return false;
 }
 
-static const GameLibTables *open_lib(const char *path) {
+static const GameLibTables *open_lib(const char *path, const char *want) {
 #ifdef _WIN32
     HMODULE h = LoadLibraryA(path);
     if (!h) { snprintf(g_error, sizeof g_error, "can't load %s (error %lu)", path, GetLastError()); return NULL; }
@@ -102,7 +105,7 @@ static const GameLibTables *open_lib(const char *path) {
 #endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
     const GameLibTables *t = entry();
-    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, GAMELIB_ID)) {
+    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, want)) {
         snprintf(g_error, sizeof g_error, "%s was built for another version", path);
         return NULL;  // (left loaded: nothing of it runs)
     }
@@ -112,17 +115,23 @@ static const GameLibTables *open_lib(const char *path) {
 bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
     if (!g_tables) {  // (again until one loads: a library can be installed while the start screen is up)
         snprintf(g_error, sizeof g_error, "the game code hasn't been built: set up the game files on the start screen");
+        char want[GAMELIB_FULL_ID_SIZE] = "";
+        if (!game_dir || !gamelib_full_id(game_dir, want, sizeof want)) {
+            snprintf(g_error, sizeof g_error, "the game files' exefs/main is missing or unreadable");
+            if (why) snprintf(why, why_size, "%s", g_error);
+            return false;
+        }
         char c[3][1100];
         int n = candidates(game_dir, c);
         const char *env = getenv("LARECOMP_GAME_LIB");
         for (int i = 0; i < n && !g_tables; i++) {
             if (!in_apk(c[i]) && !exists(c[i])) continue;
             bool given = (i == 0 && env && *env) || in_apk(c[i]);  // LARECOMP_GAME_LIB: as given, its own id decides
-            if (!given && !id_matches(c[i])) {
+            if (!given && !id_matches(c[i], want)) {
                 snprintf(g_error, sizeof g_error, "%s was built for another version", c[i]);
                 continue;
             }
-            g_tables = open_lib(c[i]);
+            g_tables = open_lib(c[i], want);
             if (g_tables) LOG("[gamelib] %s (%llu + %llu functions)\n", c[i], (unsigned long long)*g_tables->main_count,
                               (unsigned long long)*g_tables->sdk_count);
         }

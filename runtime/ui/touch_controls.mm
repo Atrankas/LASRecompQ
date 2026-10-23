@@ -496,8 +496,8 @@ static uint32_t wanted(int ctx) {
         return m;
     }
     if (ctx == X_PLAY) {
-        g_items_word = LD32(GUEST(GA_LIVE_SAVE) + 0x5568);
-        g_slot_y = LD8(GUEST(GA_LIVE_SAVE) + 0x5562), g_slot_x = LD8(GUEST(GA_LIVE_SAVE) + 0x5563);
+        g_items_word = LD32(GA(LIVE_SAVE) + 0x5568);
+        g_slot_y = LD8(GA(LIVE_SAVE) + 0x5562), g_slot_x = LD8(GA(LIVE_SAVE) + 0x5563);
         if (!(g_items_word & 1)) m &= ~M(C_B);           // the sword
         if (!(g_items_word & 2)) m &= ~M(C_R);           // the shield
         if (!(g_items_word >> 11 & 1)) m &= ~M(C_L);     // the Pegasus Boots

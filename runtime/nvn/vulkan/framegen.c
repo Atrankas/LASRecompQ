@@ -14,6 +14,7 @@
 
 #include "../../rt.h"
 #include "../../settings.h"
+#include "record.h"
 #include "vk.h"
 
 // ---- the frame's inputs (render thread)
@@ -245,11 +246,11 @@ void fg_scene_composited(VkCommandBuffer cb, TexBackend *rt) {
         vk_full_barrier(cb);
         VkImageBlit b1 = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)rt->width, (int32_t)rt->height, 1}},
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)hw, (int32_t)hh, 1}}};
-        vkCmdBlitImage(cb, rt->image, VK_IMAGE_LAYOUT_GENERAL, g_scene_half.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b1, VK_FILTER_LINEAR);
+        rec_CmdBlitImage(cb, rt->image, VK_IMAGE_LAYOUT_GENERAL, g_scene_half.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b1, VK_FILTER_LINEAR);
         vk_full_barrier(cb);
         VkImageBlit b2 = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)hw, (int32_t)hh, 1}},
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)qw, (int32_t)qh, 1}}};
-        vkCmdBlitImage(cb, g_scene_half.image, VK_IMAGE_LAYOUT_GENERAL, g_scene.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b2, VK_FILTER_LINEAR);
+        rec_CmdBlitImage(cb, g_scene_half.image, VK_IMAGE_LAYOUT_GENERAL, g_scene.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b2, VK_FILTER_LINEAR);
         vk_full_barrier(cb);
         g_scene_ok = true;
         return;
@@ -258,7 +259,7 @@ void fg_scene_composited(VkCommandBuffer cb, TexBackend *rt) {
     if (!(fg_test() & 8)) vk_full_barrier(cb);
     VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                      .extent = {rt->width, rt->height, 1}};
-    if (!(fg_test() & 1)) vkCmdCopyImage(cb, rt->image, VK_IMAGE_LAYOUT_GENERAL, g_scene.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    if (!(fg_test() & 1)) rec_CmdCopyImage(cb, rt->image, VK_IMAGE_LAYOUT_GENERAL, g_scene.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     if (!(fg_test() & 8)) vk_full_barrier(cb);
     g_scene_ok = true;
 }
@@ -362,14 +363,14 @@ void fg_copy_window(VkCommandBuffer cb, VkImage sc, VkFormat fmt, uint32_t w, ui
          .dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
          .image = g_comp.image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}}};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 2, .pImageMemoryBarriers = b};
-    vkCmdPipelineBarrier2(cb, &di);
+    rec_CmdPipelineBarrier2(cb, &di);
     VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                      .extent = {w, h, 1}};
-    if (!(fg_test() & 2)) vkCmdCopyImage(cb, sc, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_comp.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    if (!(fg_test() & 2)) rec_CmdCopyImage(cb, sc, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_comp.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     b[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b[0].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     b[0].srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT, b[0].dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
     b[1].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, b[1].dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
-    vkCmdPipelineBarrier2(cb, &di);
+    rec_CmdPipelineBarrier2(cb, &di);
     g_comp_ok = (fg_test() & 4) ? true : build_mask(cb);
 }
 
@@ -445,8 +446,8 @@ static void bind_images(VkCommandBuffer cb, VkPipelineLayout layout, VkDescripto
         w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = (uint32_t)i,
                                       .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[i]};
     }
-    vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, NULL);
+    rec_UpdateDescriptorSets((uint32_t)n, w);
+    rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, NULL);
 }
 
 static VkImageView color_view(TexBackend *t) {
@@ -477,16 +478,16 @@ static bool build_mask(VkCommandBuffer cb) {
                                     .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {mw, mh}}, .layerCount = 1,
                           .colorAttachmentCount = 1, .pColorAttachments = &ca};
-    vkCmdBeginRendering(cb, &ri);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_mpipe);
+    rec_CmdBeginRendering(cb, &ri);
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_mpipe);
     static const bool lin[2] = {true, true};
     bind_images(cb, g_mlayout, g_mdsl, 2, v, lin);
     VkViewport vp = {0, 0, (float)mw, (float)mh, 0, 1};
     VkRect2D sc = {{0, 0}, {mw, mh}};
-    vkCmdSetViewport(cb, 0, 1, &vp);
-    vkCmdSetScissor(cb, 0, 1, &sc);
-    vkCmdDraw(cb, 3, 1, 0, 0);
-    vkCmdEndRendering(cb);
+    rec_CmdSetViewport(cb, 0, 1, &vp);
+    rec_CmdSetScissor(cb, 0, 1, &sc);
+    rec_CmdDraw(cb, 3, 1, 0, 0);
+    rec_CmdEndRendering(cb);
     vk_full_barrier(cb);
     return true;
 }
@@ -572,16 +573,16 @@ bool fg_draw(VkCommandBuffer cb, VkFormat fmt, uint32_t ww, uint32_t wh, TexBack
         LOG("[framegen] depth %ux%u scale %.3f %.3f, picture %ux%u, rect %.0f %.0f %.0f %.0f crop %.3f %.3f %.3f %.3f\n", db->width, db->height,
             g_depth_scale[0], g_depth_scale[1], fin->width, fin->height, rect[0], rect[1], rect[2], rect[3], crop[0], crop[1], crop[2], crop[3]);
     pc.b[2] = g_depth_scale[0], pc.b[3] = g_depth_scale[1];
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     static const bool lin[5] = {true, true, true, false, true};
     bind_images(cb, g_layout, g_dsl, 5, v, lin);
-    vkCmdPushConstants(cb, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+    rec_CmdPushConstants(cb, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
     extern int vk_sc_quarter(void);
     uint32_t pw = vk_sc_quarter() ? wh : ww, ph = vk_sc_quarter() ? ww : wh;  // (the swapchain image's own shape)
     VkViewport vp = {0, 0, (float)pw, (float)ph, 0, 1};
     VkRect2D sc = {{0, 0}, {pw, ph}};
-    vkCmdSetViewport(cb, 0, 1, &vp);
-    vkCmdSetScissor(cb, 0, 1, &sc);
-    vkCmdDraw(cb, 3, 1, 0, 0);
+    rec_CmdSetViewport(cb, 0, 1, &vp);
+    rec_CmdSetScissor(cb, 0, 1, &sc);
+    rec_CmdDraw(cb, 3, 1, 0, 0);
     return true;
 }

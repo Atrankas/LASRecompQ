@@ -9,7 +9,8 @@
 static uint32_t vsync_r, vsync_w;
 static KEvent *vsync_event;
 uint32_t vi_vsync_handle(void) { return vsync_r; }
-volatile uint64_t g_vsync_count;  // vsyncs signalled so far (runtime/hle/framepace.c)
+volatile uint64_t g_vsync_count;  // vsyncs signalled so far (runtime/hle/framepace.c, runtime/nvn/pace.c)
+volatile uint64_t g_vsync_ns;     // plat_now_ns() of the latest (stored after the count: count >= the vsync it's from)
 uint64_t g_native_window;
 static pthread_mutex_t vs_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t vs_cv = PTHREAD_COND_INITIALIZER;
@@ -40,7 +41,8 @@ static void *vsync_thread(void *arg) {
             next = now;  // don't burst-signal to catch up
         }
         pthread_mutex_lock(&vs_mu);
-        __atomic_add_fetch(&g_vsync_count, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_vsync_count, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_vsync_ns, now, __ATOMIC_RELEASE);
         pthread_cond_broadcast(&vs_cv);
         pthread_mutex_unlock(&vs_mu);
         pthread_mutex_lock(&g_klock);

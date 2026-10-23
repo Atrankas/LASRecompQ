@@ -544,6 +544,8 @@ double output_scale_dynamic_hold_fps(void) { return g_hold_dt > 0 ? 1000 / g_hol
 void output_scale_log(unsigned long long frame, double dw, double dh, const OutScale *o) {
     static double psx, psy, pdw, pdh;
     static int nlog;
+    extern void pace_hitch(const char *why);  // pace.c: new targets at the new size, a stall
+    if (psx && (o->sx != psx || o->sy != psy || dw != pdw || dh != pdh)) pace_hitch("a render scale change");
     if ((o->sx != psx || o->sy != psy || dw != pdw || dh != pdh) && nlog++ < 200)
         LOG("[scale] frame %llu drawable %.0fx%.0f -> render scale %.3fx%.3f (reshape %d)\n", frame, dw, dh, o->sx, o->sy,
             o->shape != 1.0);

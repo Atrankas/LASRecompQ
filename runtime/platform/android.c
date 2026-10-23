@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/ucontext.h>
@@ -322,6 +323,31 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
             if (fd >= 0) close(fd);
         }
     }
+    {   // the crashing thread and its callers by frame pointers from the signal's context (the unwinder can't get past
+        // the signal frame into code without unwind tables, e.g. a GPU driver): module + offset, for crash reports
+        char m[200], name[32] = "?";
+        prctl(PR_GET_NAME, name, 0, 0, 0);
+        int n = snprintf(m, sizeof m, "[crash] thread \"%s\", frames from the fault:\n", name);
+        write(2, m, n > 0 ? (size_t)n : 0);
+        uint64_t fp = uc->uc_mcontext.regs[29], f[18] = {pc, lr};
+        int nf = 2;
+        for (int i = 0; i < 16 && fp && !(fp & 15) && fp > 0x10000; i++) {
+            uint64_t ret = ((uint64_t *)(uintptr_t)fp)[1], next = ((uint64_t *)(uintptr_t)fp)[0];
+            if (!ret) break;
+            f[nf++] = ret;
+            if (next <= fp) break;
+            fp = next;
+        }
+        for (int i = 0; i < nf; i++) {
+            Dl_info di = {0};
+            bool ok = dladdr((void *)(uintptr_t)f[i], &di) && di.dli_fname;
+            const char *mod = ok ? (strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname) : "?";
+            n = snprintf(m, sizeof m, "  %016llx %s+%llx%s%s\n", (unsigned long long)f[i], mod,
+                         (unsigned long long)(ok ? f[i] - (uint64_t)(uintptr_t)di.dli_fbase : 0), di.dli_sname ? " " : "",
+                         di.dli_sname ? di.dli_sname : "");
+            write(2, m, n > 0 ? (size_t)n : 0);
+        }
+    }
     char what[32];
     snprintf(what, sizeof what, "signal %d", sig);
     rt_fault_report(what, fa, pc, lr);  // (ends in abort(): the system's tombstone follows)
@@ -513,3 +539,49 @@ int plat_cpu_count(void) {
 
 // (phones: in the log; the game keeps running)
 void plat_notice(const char *text) { __android_log_print(ANDROID_LOG_WARN, "LASRecomp", "[notice] %s", text); }
+
+// ---- the machine, for the log (runtime/main.c log_startup_info): the Android version, the phone and its SoC
+#include <sys/system_properties.h>
+#include <sys/sysinfo.h>
+#include <sys/utsname.h>
+void plat_system_info(PlatSysInfo *si) {
+    char rel[PROP_VALUE_MAX] = "", sdk[PROP_VALUE_MAX] = "", maker[PROP_VALUE_MAX] = "", model[PROP_VALUE_MAX] = "";
+    char soc_m[PROP_VALUE_MAX] = "", soc[PROP_VALUE_MAX] = "", plat[PROP_VALUE_MAX] = "";
+    __system_property_get("ro.build.version.release", rel);
+    __system_property_get("ro.build.version.sdk", sdk);
+    __system_property_get("ro.product.manufacturer", maker);
+    __system_property_get("ro.product.model", model);
+    __system_property_get("ro.soc.manufacturer", soc_m);
+    __system_property_get("ro.soc.model", soc);
+    __system_property_get("ro.board.platform", plat);
+    struct utsname u;
+    if (uname(&u) == 0) snprintf(si->os, sizeof si->os, "Android %s (API %s, %s, kernel %.32s)", rel, sdk, u.machine, u.release);
+    else snprintf(si->os, sizeof si->os, "Android %s (API %s)", rel, sdk);
+    snprintf(si->cpu, sizeof si->cpu, "%s %s, %s %s", maker, model, soc[0] ? soc_m : "", soc[0] ? soc : plat);
+    si->threads = si->cores = (int)sysconf(_SC_NPROCESSORS_CONF);
+    {   // big.LITTLE clusters by their top frequency: "1x2.84 + 3x2.42 + 4x1.80 GHz"
+        long khz[16] = {0};
+        int nk = 0, cnt[16] = {0};
+        for (int c = 0; c < si->cores && c < 64; c++) {
+            char p[96];
+            snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c);
+            FILE *f = fopen(p, "r");
+            long v = 0;
+            if (f) { if (fscanf(f, "%ld", &v) != 1) v = 0; fclose(f); }
+            if (!v) continue;
+            int i = 0;
+            while (i < nk && khz[i] != v) i++;
+            if (i == nk && nk < 16) khz[nk++] = v;
+            if (i < 16) cnt[i]++;
+        }
+        int n = 0;
+        for (int i = nk - 1; i >= 0 && n < (int)sizeof si->cores_detail - 16; i--)
+            n += snprintf(si->cores_detail + n, sizeof si->cores_detail - n, "%s%dx%.2f", n ? " + " : "", cnt[i], khz[i] / 1e6);
+        if (n) snprintf(si->cores_detail + n, sizeof si->cores_detail - n, " GHz");
+    }
+    struct sysinfo s;
+    if (sysinfo(&s) == 0) si->ram = (uint64_t)s.totalram * s.mem_unit;
+    si->package = "APK";
+}
+
+bool plat_onedrive_synced(const char *dir) { (void)dir; return false; }

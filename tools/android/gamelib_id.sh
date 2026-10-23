@@ -34,7 +34,7 @@ case "${1:-}" in
     --gen-args) echo "$GENARGS"; exit 0 ;;
     --cc22-flags) echo "$CC22FLAGS"; exit 0 ;;
 esac
-SRCS="tools/game_addresses.py runtime/game_addresses/patches_v1_0_0.h tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/simd_c.py
+SRCS="tools/game_addresses.py runtime/game_addresses/versions.h $(ls runtime/game_addresses/patches_v*.h | LC_ALL=C sort | tr '\n' ' ') tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py tools/simd_c.py
       tools/rando/patch_variants.json tools/gamelib_entry.c runtime/hle/hle_symbols.txt runtime/cpu.h runtime/simd.h
       runtime/simd_fp.h runtime/gamelib.h tools/hot_functions.txt"
 # (+ the shift: the same sources make another library on Android, runtime/cpu.h GUEST_SHIFT)
