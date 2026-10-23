@@ -1,0 +1,57 @@
+name: Compilar APK Android
+
+on:
+  workflow_dispatch: # Esto activa el botón manual para iniciar la compilación
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Clonar el repositorio
+      uses: actions/checkout@v4
+
+    - name: Configurar Java 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Configurar Android SDK y NDK
+      uses: android-actions/setup-android@v3
+
+    - name: Instalar NDK 27.2.12479018
+      run: |
+        ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.2.12479018"
+
+    - name: Modificar script para compilar en Linux de Actions
+      run: |
+        # Usamos el compilador de la máquina virtual como Host
+        sed -i 's|--host-cc=.*|--host-cc=gcc \\|g' tools/android/build_deps.sh
+        # Aseguramos que las rutas apunten al SDK/NDK virtual de la Action
+        sed -i 's|^SDK=.*|SDK="${ANDROID_HOME}"|g' tools/android/build_deps.sh
+        sed -i 's|^NDK=.*|NDK="${ANDROID_HOME}/ndk/27.2.12479018"|g' tools/android/build_deps.sh
+        # Eliminamos la línea de firmas SHA que te daba problemas
+        sed -i '/shasum -a 256/d' tools/android/build_deps.sh
+
+    - name: Compilar Dependencias Nativa (FFmpeg, Shaderc, etc)
+      run: |
+        chmod +x tools/android/build_deps.sh
+        ./tools/android/build_deps.sh
+
+    - name: Compilar Entorno Interno (On-Device Build)
+      run: |
+        chmod +x tools/android/ondevice/build_all.sh
+        ./tools/android/ondevice/build_all.sh
+
+    - name: Compilar el APK Final con Gradle
+      run: |
+        cd android
+        chmod +x gradlew
+        ./gradlew assembleRelease -PonDeviceBuild=true
+
+    - name: Subir el APK resultante como Artefacto
+      uses: actions/upload-artifact@v4
+      with:
+        name: LASRecomp-Android-APK
+        path: android/app/build/outputs/apk/release/app-Qrelease.apk
