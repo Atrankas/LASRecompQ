@@ -112,5 +112,5 @@ target_link_options(main PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,-Bsymbolic" "
                                  "-Wl,-z,nostart-stop-gc")  # (the HLE / service / reset tables: sections kept whole)
 target_link_libraries(main PRIVATE SDL3::SDL3-shared
                       ${DEPS}/lib/libavformat.a ${DEPS}/lib/libavcodec.a ${DEPS}/lib/libswscale.a ${DEPS}/lib/libavutil.a
-                      ${DEPS}/lib/libshaderc_combined.a adrenotools android log m dl openxr_loader)
+                      ${DEPS}/lib/libshaderc_combined.a adrenotools android log m dl openxr_loader_static)
                       
