@@ -1,7 +1,7 @@
 name: Compilar APK Android
 
 on:
-  workflow_dispatch: # Esto activa el botón manual para iniciar la compilación
+  workflow_dispatch:
 
 jobs:
   build:
@@ -51,17 +51,15 @@ jobs:
         chmod +x gradlew
         ./gradlew assembleRelease -PonDeviceBuild=true
 
-    - name: Generar Clave de Firma y Firmar APK (Opción B)
+    - name: Generar Clave de Firma y Firmar APK (Corregido)
       run: |
-        # 1. Generamos un almacén de claves (keystore) temporal de pruebas con la herramienta nativa de Java
-        keytool -genkey -v -keystore mi_clave_temporal.keystore -alias clave_alias -keyalg RSA -keysize 2048 -validity 10000 \
-          -storepass mi_contrasena_secreta -keypass mi_contrasena_secreta -dname "CN=Pruebas, OU=Desarrollo, O=Personal, L=Ciudad, S=Estado, C=ES"
+        keytool -genkey -v -keystore mi_clave.jks -alias mi_alias -keyalg RSA -keysize 2048 -validity 10000 \
+          -storepass password123 -keypass password123 -dname "CN=Pruebas, OU=Desarrollo, O=Personal, L=Ciudad, S=Estado, C=ES"
         
-        # 2. Buscamos la herramienta apksigner integrada en el SDK Build-Tools de Android
         APKSIGNER=$(find /usr/local/lib/android/sdk/build-tools/ -name apksigner | sort -V | tail -n 1)
         
-        # 3. Firmamos el APK que generó Gradle usando la clave recién creada
-        $APKSIGNER sign --keystore mi_clave_temporal.keystore --storepass mi_contrasena_secreta --keypass mi_contrasena_secreta \
+        # Corrección de parámetros: se usa ks en lugar de --keystore y se eliminan dobles guiones inválidos
+        $APKSIGNER sign --ks mi_clave.jks --ks-pass pass:password123 --key-pass pass:password123 \
           --out android/app/build/outputs/apk/release/LASRecomp-Android-Firmado.apk android/app/build/outputs/apk/release/app-release.apk
 
     - name: Subir el APK resultante como Artefacto
