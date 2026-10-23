@@ -150,6 +150,18 @@ static void boot(const char *root) {
     snprintf(npdm_path, sizeof npdm_path, "%s/main.npdm", exefs);
     if (!g_romfs_dir) g_romfs_dir = strdup(romfs);
 
+// --- HACK DIRECTO DE CARGA OPENXR PARA QUEST 3 ---
+#ifdef __ANDROID__
+    // Le decimos al sistema operativo de la Quest que cargue su motor de VR interno
+    void* openxr_lib = SDL_LoadObject("libopenxr_loader.so");
+    if (openxr_lib) {
+        SDL_Log("[VR_DIORAMA] Librería nativa OpenXR inyectada con éxito en el motor.");
+    } else {
+        SDL_Log("[VR_DIORAMA] Advertencia: No se detectó el cargador OpenXR en el sistema.");
+    }
+#endif
+// ----------------==================================
+
 #ifdef __linux__
     {   // the window and graphics device first (normally made by the start screen or ui_run), so the guest heap can be
         // the driver's memory before any game thread runs (runtime/nvn/vulkan/exec.c backend_guest_heap_prepare)
