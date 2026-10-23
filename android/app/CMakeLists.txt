@@ -29,10 +29,10 @@ add_subdirectory(${ROOT}/build/android/SDL3 ${CMAKE_BINARY_DIR}/SDL3)
 include(FetchContent)
 FetchContent_Declare(adrenotools GIT_REPOSITORY https://github.com/bylaws/libadrenotools.git
                      GIT_TAG 8fae8ce254dfc1344527e05301e43f37dea2df80 GIT_SUBMODULES_RECURSE ON)
-FetchContent_Declare(
-    openxr_loader_src
-    URL      https://github.com/KhronosGroup/OpenXR-SDK-Source/releases/download/release-1.1.65/OpenXR-SDK-Source-release-1.1.65.tar.gz
-    SOURCE_SUBDIR src/loader
+# Le decimos a CMake que busque la librería de OpenXR precompilada que acabas de meter en libs
+add_library(openxr_loader SHARED IMPORTED)
+set_target_properties(openxr_loader PROPERTIES
+    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/libs/openxr_loader_for_android-1.1.65.aar"
 )
 # Forzamos a que compile solo el cargador estático para ahorrar tiempo en la nube
 set(BUILD_LOADER ON CACHE BOOL "" FORCE)
