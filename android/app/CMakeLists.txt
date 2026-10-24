@@ -29,11 +29,6 @@ add_subdirectory(${ROOT}/build/android/SDL3 ${CMAKE_BINARY_DIR}/SDL3)
 include(FetchContent)
 FetchContent_Declare(adrenotools GIT_REPOSITORY https://github.com/bylaws/libadrenotools.git
                      GIT_TAG 8fae8ce254dfc1344527e05301e43f37dea2df80 GIT_SUBMODULES_RECURSE ON)
-# Forzamos a que compile solo el cargador estático para ahorrar tiempo en la nube
-set(BUILD_LOADER ON CACHE BOOL "" FORCE)
-set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
-set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(adrenotools)
 foreach(t main_hook hook_impl)
   target_link_options(${t} PRIVATE "-Wl,-z,max-page-size=16384")  # (16 KB page devices, as libmain.so)
@@ -95,7 +90,10 @@ set(IMGUI ${ROOT}/third_party/imgui)
 set(IMGUI_SRC ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.cpp ${IMGUI}/imgui_widgets.cpp
               ${IMGUI}/backends/imgui_impl_sdl3.cpp ${IMGUI}/backends/imgui_impl_vulkan.cpp)
 
-add_library(main SHARED ${RT_SRC} ${ROOT}/runtime/platform/android.c ${ROOT}/runtime/platform/android_jni.c ${RT_CXX} ${UI_SRC} ${IMGUI_SRC}
+# ---- OpenXR (Meta Quest): Khronos's loader from the AAR android/app/build.gradle depends on (prefab)
+find_package(OpenXR REQUIRED CONFIG)
+
+add_library(main SHARED ${RT_SRC} ${ROOT}/runtime/platform/android.c ${ROOT}/runtime/platform/android_jni.c ${ROOT}/runtime/platform/xr_quest.c ${RT_CXX} ${UI_SRC} ${IMGUI_SRC}
                         ${DEPS}/include/volk/volk.c ${SMAA_INC} ${VARIANTS_INC})
 # the start screen / menu sources are plain C++ apart from their __APPLE__ blocks (as the Makefile's UIFLAGS)
 set_source_files_properties(${UI_SRC} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-x;c++")
@@ -117,5 +115,4 @@ target_link_options(main PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,-Bsymbolic" "
                                  "-Wl,-z,nostart-stop-gc")  # (the HLE / service / reset tables: sections kept whole)
 target_link_libraries(main PRIVATE SDL3::SDL3-shared
                       ${DEPS}/lib/libavformat.a ${DEPS}/lib/libavcodec.a ${DEPS}/lib/libswscale.a ${DEPS}/lib/libavutil.a
-                      ${DEPS}/lib/libshaderc_combined.a adrenotools android lasrecomp log m dl vulkan)
-                      
+                      ${DEPS}/lib/libshaderc_combined.a adrenotools OpenXR::openxr_loader android log m dl)
