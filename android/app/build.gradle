@@ -97,6 +97,10 @@ android {
         }
     }
 
+    buildFeatures {
+        prefab true  // (the OpenXR loader's native library and headers, for CMakeLists.txt)
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
@@ -147,4 +151,9 @@ if (onDevice && !project.hasProperty('lasOnDeviceKitReady')) {
         commandLine 'bash', '-c', 'tools/android/ondevice/build_cckit.sh && tools/android/ondevice/make_assets.sh'
     }
     preBuild.dependsOn lasOnDeviceAssets
+}
+
+dependencies {
+    // Khronos's OpenXR loader for Android (Meta Quest: runtime/platform/xr_quest.c)
+    implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.57'
 }
