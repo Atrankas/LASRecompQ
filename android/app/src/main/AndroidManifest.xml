@@ -7,6 +7,9 @@
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <!-- Meta Quest: the "LAS Recomp VR" entry (below) runs the game in OpenXR; on other devices these change nothing -->
+    <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="false" />
+    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
 
     <!-- The app never goes online: no network permissions, even if a library asked for one. -->
     <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
@@ -52,9 +55,23 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-                <category android:name="com.oculus.intent.category.VR" />
             </intent-filter>
         </activity>
+        <!-- Meta Quest: the same activity as an immersive (OpenXR) app. LasActivity sees it was started through this
+             entry (its name) and sets LARECOMP_XR=1, which runtime/platform/xr_quest.c looks for. Without the Quest's
+             library entry: adb shell am start -n com.lasrecomp.android/.LasVrActivity -->
+        <activity-alias
+            android:name=".LasVrActivity"
+            android:targetActivity=".LasActivity"
+            android:exported="true"
+            android:label="LAS Recomp VR">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="com.oculus.intent.category.VR" />
+                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
+            </intent-filter>
+        </activity-alias>
         <!-- keeps the app alive while the game code is built on the phone (runtime/gamebuild.c). extractNativeLibs
              above: true in the builds that do that (build.gradle onDeviceBuild) - their programs (python, zig: lib*.so)
              must exist as files in the native library folder to run -->
