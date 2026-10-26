@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "settings.h"
+#include "platform/xr_quest.h"  // (XR_PANEL_MIN_*: the floating panel's ranges)
 
 bool bind_settings_load(const char *key, const char *val) { (void)key; (void)val; return false; }
 void bind_settings_save(FILE *file) { (void)file; }
@@ -53,6 +54,14 @@ int main(int argc, char **argv) {
         assert(g_settings.shield.pick == COL_DEFAULT);                               // unknown -> Default
         assert(g_settings.skin.pick == COL_RANDOM);
         settings_save();
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "panel")) {  // Meta Quest: the floating panel (vr_panel / vr_panel_adjust)
+        settings_load();
+        assert(g_settings.vr_panel_width >= XR_PANEL_MIN_WIDTH && g_settings.vr_panel_width <= XR_PANEL_MAX_WIDTH);
+        assert(g_settings.vr_panel_distance >= XR_PANEL_MIN_DISTANCE && g_settings.vr_panel_distance <= XR_PANEL_MAX_DISTANCE);
+        assert(g_settings.vr_panel_off_x >= -XR_PANEL_MAX_OFF && g_settings.vr_panel_off_x <= XR_PANEL_MAX_OFF);
+        settings_save();  // (what was loaded - clamped - or the defaults, goes back out)
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "rando-options")) {  // the New seed options (an opaque seed ID), kept as saved

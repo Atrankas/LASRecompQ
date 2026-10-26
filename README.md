@@ -104,6 +104,68 @@ blur removal, cheats, the warp menu, the save editor and more.
 
 ![The start screen](docs/android/start_screen.jpg)
 
+## Meta Quest 3: the game in a floating panel
+
+On a headset the game runs inside an **OpenXR** session and the picture is a **panel floating in front of you**, over
+passthrough (the room around you stays visible; `LARECOMP_XR_PASSTHROUGH=0` in `env.txt` for a black room instead).
+The app starts that way by itself on a Quest (`LasActivity.isHeadset()`); the launcher entry **LAS Recomp VR**
+(AndroidManifest.xml) does the same on any headset, and `LARECOMP_XR=0` in `env.txt` brings the ordinary flat window
+back. `env.txt` is a `KEY=VALUE` file next to `larecomp.ini` in the app's data folder.
+
+**The panel is yours to place**, while you play - nothing restarts, nothing is rebuilt:
+
+- In the game's menu (Minus + Plus on the controllers, or the button at the top of the screen): **Video tab >
+  Headset panel** - size, distance, right/left and up/down, each one metre by metre, and **Reset the panel**.
+- Or with the controllers themselves: turn on **Adjust with the controllers** there. With the game's own menu closed,
+  the **right stick moves the panel** across and up and the **left stick** pulls it closer / pushes it further away
+  and makes it bigger / smaller. Link holds still while you do it, every button keeps working, and where you leave the
+  panel is saved to `larecomp.ini` (`vr_panel`). With the menu open the sticks navigate it, as always.
+
+The panel keeps the game window's shape, so a bigger panel is a bigger picture, never a stretched one; the internal
+resolution is still the Video tab's business (a large panel rewards 1.5x or 2x).
+
+### The Touch controllers as a Switch controller
+
+The Touch controllers arrive at the game as one ordinary gamepad, laid out the way a Switch's own controller is (the
+game's prompts, its menus and its bindings read the same on both):
+
+| Quest 3 | Switch / game |
+|---|---|
+| A / B (right hand), X / Y (left hand) | **A / B / X / Y**, by the letter on the button (the Android default) |
+| grips | **L / R** |
+| triggers | **ZL / ZR** (analog) |
+| left Menu button | **Minus** (as on a Switch, where Minus is the left one) |
+| right stick click | **Plus** |
+| left stick click | the game's left stick press |
+| sticks | the sticks (the right one is free: it moves the panel while adjusting) |
+
+Minus + Plus still opens the app's menu, and the game's own rumble reaches the controllers' haptics, with the game's
+low motor on the left hand and its high one on the right. The Touch controllers have no d-pad: the left stick moves
+Link and the game's own menus take the stick. Every one of these can be rebound in the menu's **Controls** tab, and
+"Face buttons" there switches the letters to the Switch's own positions (A right, B bottom, X top, Y left) if you
+would rather have a Switch's places than its letters.
+
+### When the headset shows nothing but the passthrough
+
+The picture is the panel's own Surface: the game's Vulkan swapchain presents into it and the compositor shows those
+buffers, so *the size the game draws at, the size the UI is laid out in and the touch coordinates all come from the
+panel* (`rt_window_pixels`, runtime/nvn/vulkan/device.c) - never from the app's activity window, which in an immersive
+session need not have a surface of its own (SDL then reports 0x0, and every frame was refused as a minimised window).
+The window going away, for the same reason, does not pause the game while a session is running: only the session
+ending does.
+
+`adb logcat -s LASRecomp-XR` shows what OpenXR is doing; the app's own log (`LASRecomp`) shows the drawing side:
+
+- `[vk] XR: the picture is the panel, 1920x1080 px (the activity window reports 0x0)` - the sizes did disagree, and
+  the panel's are being used.
+- `[vk] the first frame is drawn into the OpenXR panel (1920x1080)` - the game's frames are reaching the panel.
+- `composing 2 layer(s): panel 1920x1080, 3.20 x 1.80 m at 2.20 m, +0.00 right / -0.10 up` - what the compositor is
+  being handed each time it changes (`composing (no frame asked for) 1 layer(s)` means the runtime asked for no frame
+  at all, and only the passthrough layer went in).
+- `the runtime lacks XR_KHR_android_surface_swapchain` / `xrCreateSwapchainAndroidSurfaceKHR ... failed` / `no picture
+  size`: OpenXR or the panel's Surface did not come up (the game then falls back to the ordinary flat window, or does
+  not draw at all).
+
 ## Requirements
 
 - An **arm64 Android phone, Android 11 or newer**. Adreno (Snapdragon) GPUs are what it's built and tested for; the

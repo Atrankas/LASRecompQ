@@ -111,6 +111,14 @@ typedef struct {
     float touch_pos[TOUCH_NCTL][2];
     float touch_scale[TOUCH_NCTL];
     bool touch_hidden[TOUCH_NCTL];
+    // Meta Quest: the game's floating panel (runtime/platform/xr_quest.h). Size and place in metres, live while the
+    // game runs - the menu's Headset section (Video tab) and, with Adjust on, the controllers' sticks change them, and
+    // the values the sticks leave come back here (runtime/settings.c vr_panel_settled) to be saved.
+    float vr_panel_width;   // how wide the picture hangs (XR_PANEL_MIN_WIDTH..MAX)
+    float vr_panel_distance;  // how far ahead of the player its centre is
+    float vr_panel_off_x, vr_panel_off_y;  // the centre's offsets, metres to the right and up
+    bool vr_panel_adjust;   // "Adjust with the controllers": the sticks move the panel, the game's own stay centred
+                            // (session only, never saved: after a restart it would leave Link unable to walk)
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
     char rando_options[48];  // the Randomizer tab's New seed options: a seed ID without its random part (empty = defaults)
 } Settings;

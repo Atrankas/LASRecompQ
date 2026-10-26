@@ -51,6 +51,8 @@ bool rando_tab_took_back(void);  // rando_tab.mm: B went back from the Triforce 
 #include "../platform/android.h"
 bool vk_gpu_driver_custom(const char **failed);  // nvn/vulkan/device.c
 #endif
+#include "../platform/xr_quest.h"  // Meta Quest: the floating panel (every platform has the module; false off Android)
+void rt_window_pixels(int *w, int *h);  // runtime/rt.h: the pixels the picture is drawn into (device.c / metal.m)
 }
 
 // ------------------------------------------------------------------ state shared with the main thread
@@ -278,7 +280,7 @@ extern "C" uint32_t g_window_resize_request;  // (test scripts: runtime/hle/inpu
 void menu_apply_window_requests(void *win) {
     SDL_Window *w = (SDL_Window *)win;
     g_pixel_density = SDL_GetWindowPixelDensity(w);
-    SDL_GetWindowSizeInPixels(w, &g_win_px_w, &g_win_px_h);
+    rt_window_pixels(&g_win_px_w, &g_win_px_h);  // (the OpenXR panel's pixels when the game is in one: rt.h)
     static bool text_input;
 #ifdef __ANDROID__
     // phones: text input shows the on-screen keyboard - only while a text field has the focus, not the whole time
@@ -663,6 +665,50 @@ static void tab_display(void) {
                "picture for a warm phone, while the battery stays under 45 C. Maximum performance holds every clock at "
                "the top, past those limits: a hot phone, and a worn battery may not keep up (the phone restarts).");
 #endif
+
+    // Meta Quest: the game's floating panel (runtime/platform/xr_quest.h). Only while the OpenXR session is running -
+    // on a phone, or through the flat Quest entry, none of these rows is here at all. The values are the live ones
+    // (the controllers' sticks may have moved the panel since the last time this page was drawn), so every row shows
+    // where the picture is right now, and moving one moves it as the menu is drawn.
+    if (xr_quest_active()) {
+        XrQuestPanel cur, def;
+        xr_quest_panel(&cur);
+        xr_quest_panel_defaults(&def);
+        opt_section("Headset panel");
+        bool changed = false;
+        changed |= opt_slider("Panel size", &cur.width, XR_PANEL_MIN_WIDTH, XR_PANEL_MAX_WIDTH, 0.1f, def.width, "%.1f m",
+                              "How wide the floating picture is, in metres. 3.2 m at 2.2 m is about 70 degrees of "
+                              "view; nearer, and it fills more of it. The picture always keeps the game window's "
+                              "shape.");
+        changed |= opt_slider("Distance", &cur.distance, XR_PANEL_MIN_DISTANCE, XR_PANEL_MAX_DISTANCE, 0.1f, def.distance,
+                              "%.1f m",
+                              "How far ahead of you the panel's centre hangs: nearer fills more of the view and feels "
+                              "bigger, further away sits it farther into the room.");
+        changed |= opt_slider("Right / left", &cur.off_x, -XR_PANEL_MAX_OFF, XR_PANEL_MAX_OFF, 0.05f, def.off_x, "%+.2f m",
+                              "Moves the panel to your right (positive) or to your left.");
+        changed |= opt_slider("Up / down", &cur.off_y, -XR_PANEL_MAX_OFF, XR_PANEL_MAX_OFF, 0.05f, def.off_y, "%+.2f m",
+                              "Moves the panel up (positive) or down. A little below eye level is the comfortable "
+                              "default.");
+        changed |= opt_toggle("Adjust with the controllers", &g_settings.vr_panel_adjust, false,
+                              "With this on, the Touch sticks move the panel as you play: the right stick moves it "
+                              "across and up, the left one pulls it closer / pushes it further away and makes it "
+                              "bigger / smaller. Link holds still while it is moved, and every button keeps working - "
+                              "while this menu is open the sticks go on navigating it, as always. Where you leave the "
+                              "panel is saved.");
+        if (changed) {
+            xr_quest_panel_set(&cur);
+            g_settings.vr_panel_width = cur.width, g_settings.vr_panel_distance = cur.distance;
+            g_settings.vr_panel_off_x = cur.off_x, g_settings.vr_panel_off_y = cur.off_y;
+            xr_quest_adjust_set(g_settings.vr_panel_adjust);
+            settings_save();
+        }
+        if (opt_button("Reset the panel", "Back to 3.2 m wide at 2.2 m ahead, centred and a little below eye level.")) {
+            xr_quest_panel_set(&def);
+            g_settings.vr_panel_width = def.width, g_settings.vr_panel_distance = def.distance;
+            g_settings.vr_panel_off_x = def.off_x, g_settings.vr_panel_off_y = def.off_y;
+            settings_save();
+        }
+    }
 
     opt_section("Game");
     opt_toggle("Remove blur", &g_settings.blur_removal, false,

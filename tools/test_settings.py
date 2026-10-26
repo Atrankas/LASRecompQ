@@ -10,8 +10,11 @@ ROOT = Path(__file__).resolve().parent.parent
 with tempfile.TemporaryDirectory() as directory:
     directory = Path(directory)
     exe = directory / ('settings-test.exe' if os.name == 'nt' else 'settings-test')
+    # runtime/platform/xr_quest.c: settings.c hands the Quest's floating-panel values to it (its own module is a no-op
+    # off Android, so this also keeps that branch compiling)
     subprocess.run(shlex.split(os.environ.get('CC', 'clang')) +
-                   ['-std=gnu11', '-Iruntime', 'runtime/settings.c', 'runtime/cosmetic_colour.c', 'tools/test_settings.c', '-o', str(exe), '-lm'],
+                   ['-std=gnu11', '-Iruntime', 'runtime/settings.c', 'runtime/cosmetic_colour.c', 'runtime/platform/xr_quest.c',
+                    'tools/test_settings.c', '-o', str(exe), '-lm'],
                    cwd=ROOT, check=True)
     cases = [(setting, {}, code) for setting, code in
              [('zh-CN', 'zh-Hans'), ('zh-TW', 'zh-Hant'), ('zh-Hans', 'zh-Hans'),
@@ -80,4 +83,18 @@ with tempfile.TemporaryDirectory() as directory:
         saved = ini.read_text()
         assert (f'rando_options = {value}\n' in saved) if value else 'rando_options' not in saved, saved
         count += 1
-    print(f'{count} parser, locale, upscaler / resolution default and roundtrip cases passed (LF/CRLF, empty/nonempty seeds)')
+    # Meta Quest: the floating panel (runtime/settings.c vr_panel / vr_panel_adjust, runtime/platform/xr_quest.c): a
+    # saved size and place are kept, a file from before this (or a fresh install) gets the defaults
+    for lines, want in [([], 'vr_panel = 3.20, 2.20, 0.00, -0.10'),
+                        (['vr_panel = 5.00, 1.50, -0.50, 0.25'], 'vr_panel = 5.00, 1.50, -0.50, 0.25'),
+                        (['vr_panel = 8, 3, 1, 2'], 'vr_panel = 8.00, 3.00, 1.00, 2.00'),
+                        (['vr_panel = 8, 3, -0.5, 0.25', 'vr_panel_adjust = 1'], 'vr_panel = 8.00, 3.00, -0.50, 0.25'),
+                        (['vr_panel = 30, 0.1, 9, -9'], 'vr_panel = 20.00, 0.40, 6.00, -6.00')]:  # out of range: clamped
+        ini = directory / 'test.ini'
+        ini.write_text('\n'.join(lines + ['rando_seed = X']) + '\n')
+        subprocess.run([str(exe), 'panel'], env=dict(os.environ, LARECOMP_SETTINGS=str(ini)), check=True, capture_output=True)
+        saved = ini.read_text()
+        assert want + '\n' in saved, (lines, saved)
+        assert 'vr_panel_adjust' not in saved, saved  # (session state: never written)
+        count += 1
+    print(f'{count} parser, locale, upscaler / resolution default, panel and roundtrip cases passed (LF/CRLF, empty/nonempty seeds)')

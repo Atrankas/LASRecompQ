@@ -51,6 +51,8 @@ extern "C" {
 #include "input_bind.h"
 #ifdef __ANDROID__
 #include "platform/android.h"
+#include "platform/xr_quest.h"  // (the OpenXR panel: the picture the start screen is laid out for in a session)
+void rt_window_pixels(int *w, int *h);  // runtime/rt.h / nvn/vulkan/device.c
 #endif
 #include "nvn/shader_prep.h"
 bool controls_ui_took_back(void);  // ui/controls_ui.mm: B went back a step on Configure inputs
@@ -1920,6 +1922,15 @@ extern "C" void launcher_run(const char *root) {
             if (input_cursor_hidden()) io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
             else io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
             ImGui_ImplSDL3_NewFrame();
+#ifdef __ANDROID__
+            // In an OpenXR session the picture is the panel, not the activity's window: SDL's window may report 0x0
+            // (or a portrait shape) there, and the start screen would be laid out into that and so drawn nowhere.
+            if (xr_quest_active()) {
+                int pw = 0, ph = 0;
+                rt_window_pixels(&pw, &ph);
+                if (pw > 0 && ph > 0) io.DisplaySize = ImVec2((float)pw, (float)ph), io.DisplayFramebufferScale = ImVec2(1, 1);
+            }
+#endif
             // the backend (manual mode, no gamepads of its own) clears HasGamepad every frame, and ImGui then drops the
             // controller presses launcher_pad_event fed in and turns gamepad navigation off: set it again while a
             // controller is connected

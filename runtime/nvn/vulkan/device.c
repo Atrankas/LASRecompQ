@@ -1041,20 +1041,35 @@ static VkPresentModeKHR present_mode(void) {
 
 static bool g_sc_turned, g_fifo_present;  // (FIFO: a second picture per game frame shows a refresh later)
 static atomic_bool g_background, g_surface_stale;  // (the app in the background: below)
+// rt.h: the pixels the picture is drawn into. With an OpenXR session running (Meta Quest) that is the panel the
+// compositor shows: the game's Vulkan swapchain lives on the panel's own Surface, and the activity's window need not
+// have a surface of its own - SDL then reports 0x0, every frame comes back refused as a minimised window and the
+// headset shows nothing but the passthrough behind the panel. The swapchain, the UI and the touch coordinates all ask
+// here (metal.m has the Mac's own: the window's, there is no panel).
+void rt_window_pixels(int *w, int *h) {
+    SDL_GetWindowSizeInPixels(window, w, h);
+    uint32_t xw, xh;
+    if (!xr_quest_extent(&xw, &xh) || ((uint32_t)*w == xw && (uint32_t)*h == xh)) return;
+    static bool said;
+    if (!said) {
+        said = true;
+        LOG("[vk] XR: the picture is the panel, %ux%u px (the activity window reports %dx%d)\n", xw, xh, *w, *h);
+    }
+    *w = (int)xw, *h = (int)xh;
+}
 static void create_swapchain(void) {
     VkSurfaceCapabilitiesKHR caps;
     VkResult capr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_vk.phys, g_vk.surface, &caps);
     if (capr == VK_ERROR_SURFACE_LOST_KHR) { atomic_store(&g_surface_stale, true); return; }  // (Android: window gone)
     VK_CHECK(capr);
     int w, h;
-    SDL_GetWindowSizeInPixels(window, &w, &h);
-    VkExtent2D ext = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : (VkExtent2D){(uint32_t)w, (uint32_t)h};
-    {   // the OpenXR panel (Quest): its surface may not say how big it is - it is as big as it was made
-        uint32_t xw, xh;
-        if ((caps.currentExtent.width == UINT32_MAX || !caps.currentExtent.width || !caps.currentExtent.height) &&
-            xr_quest_extent(&xw, &xh))
-            ext = (VkExtent2D){xw, xh};
-    }
+    rt_window_pixels(&w, &h);
+    uint32_t xw, xh;
+    // (with an OpenXR session the panel decides: it is as big as it was made, whatever the Surface reports - the
+    //  compositor shows the buffers the game presents into it, so the swapchain is made at exactly that size)
+    VkExtent2D ext = xr_quest_extent(&xw, &xh) ? (VkExtent2D){xw, xh}
+                     : caps.currentExtent.width != UINT32_MAX ? caps.currentExtent
+                                                              : (VkExtent2D){(uint32_t)w, (uint32_t)h};
     VkSurfaceTransformFlagBitsKHR xf = caps.currentTransform;
 #ifdef __ANDROID__
     // Phones are portrait underneath: in landscape the surface reports a 90 / 270 degree transform. The images are
@@ -1089,10 +1104,21 @@ static void create_swapchain(void) {
     if (count > 8) count = 8;
     VkSwapchainKHR old = g_vk.swapchain;
     VkExtent2D phys = g_vk.sc_quarter ? (VkExtent2D){ext.height, ext.width} : ext;
+    // The bits this Surface offers: the OpenXR panel's need not offer the transfer ones the recorder (record.c) and
+    // frame generation (framegen.c) use, and the game shows without them - they are dropped rather than the swapchain
+    // being refused over an unsupported combination.
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (!(usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || !(usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        static bool said;
+        if (!said) said = true, LOG("[vk] the surface's images take no %s: recording / frame generation are off here\n",
+                                    (usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ? "writes" : "reads");
+    }
     VkSwapchainCreateInfoKHR ci = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_vk.surface, .minImageCount = count,
         .imageFormat = sf.format, .imageColorSpace = sf.colorSpace, .imageExtent = phys, .imageArrayLayers = 1,
-        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .imageUsage = usage,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = xf,
         .compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
                                                                                           : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
@@ -1146,6 +1172,15 @@ static void recreate_swapchain(void) {
 static bool SDLCALL lifecycle_watch(void *user, SDL_Event *e) {
     (void)user;
     if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND || e->type == SDL_EVENT_DID_ENTER_BACKGROUND) {
+        // In an OpenXR session (Meta Quest) the picture is the panel, not the activity's window: the window going away
+        // - an immersive app's activity may have no surface of its own - is not the app going to the background. The
+        // game has to keep drawing, or the panel holds nothing with only the passthrough behind it. The session ending
+        // is what pauses it, and that says so (xr_quest_wants_pause) before it pushes this event.
+        if (xr_quest_active() && !xr_quest_wants_pause()) {
+            static bool said;
+            if (!said) said = true, LOG("[vk] the activity window went away: the picture stays the OpenXR panel\n");
+            return true;
+        }
         if (!atomic_exchange(&g_background, true)) {
             LOG("[vk] in the background: game paused\n");
             vk_pipeline_cache_save();  // (phones end apps in the background without exit(): the exit handler never runs)
@@ -1165,7 +1200,9 @@ static bool create_surface(void) {
     if (xr_quest_requested()) {  // Meta Quest, started as the VR entry: the panel OpenXR shows (platform/xr_quest.c)
         int xw = 0, xh = 0;
         SDL_GetWindowSizeInPixels(window, &xw, &xh);
-        if (xw < 640 || xh < 360) xw = 1920, xh = 1080;
+        // The panel is the window here: an immersive activity's own window may be 0x0, or portrait (the headset's
+        // display), and the picture would be made that shape. 16:9 landscape is what a fresh headset panel shows.
+        if (xw < 640 || xh < 360 || xw <= xh) xw = 1920, xh = 1080;
         struct ANativeWindow *xnw = xr_quest_window(xw, xh);
         if (xnw) {
             VkAndroidSurfaceCreateInfoKHR si = {.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = xnw};
@@ -1257,8 +1294,12 @@ bool vk_frame_begin(const float clear[4]) {
     if (atomic_exchange(&g_surface_stale, false)) new_surface();
     if (!g_vk.surface || atomic_load(&g_surface_stale)) return false;
     int w, h;
-    SDL_GetWindowSizeInPixels(window, &w, &h);
-    if (!w || !h) return false;  // minimised
+    rt_window_pixels(&w, &h);  // (the panel's pixels in a session: an immersive app's own window can be 0x0)
+    if (!w || !h) {  // minimised: neither a window nor a panel to draw into
+        static bool said;
+        if (!said) said = true, LOG("[vk] no picture size (window %dx%d, OpenXR panel %d)\n", w, h, xr_quest_active());
+        return false;
+    }
     // The last present (the recorder's, record.c) must be done before the swapchain is used again - acquire and present
     // on the same swapchain are not allowed at the same time - and it may have asked for a new swapchain
     WAITING(rec_wait_presents(rec_presents_queued()));
@@ -1328,6 +1369,11 @@ bool vk_frame_begin(const float clear[4]) {
     extern void vk_imgui_prerotation(int quarter);  // (the UI drawn into this image turned like it: imgui_glue.cpp)
     vk_imgui_prerotation(g_vk.sc_quarter);
     cur_frame.ok = true;
+    if (xr_quest_active()) {  // (the game's first frame into the panel: the compositor has something to show now)
+        static bool said;
+        if (!said) said = true, LOG("[vk] the first frame is drawn into the OpenXR panel (%ux%u)\n",
+                                    g_vk.sc_extent.width, g_vk.sc_extent.height);
+    }
     return true;
 }
 

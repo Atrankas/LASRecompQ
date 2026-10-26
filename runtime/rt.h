@@ -98,6 +98,10 @@ void rt_unwind_point(void);        // guest threads: unwind to thread_main if a 
 
 // ---- ui (runtime/nvn/metal.m)
 int ui_run(void);  // window loop; returns the reboot kind requested (the window stays open)
+// The pixels the picture is drawn into: the window's own, or - inside an OpenXR session (Meta Quest) - the panel the
+// compositor shows, which is a Surface of its own and the one the game's Vulkan swapchain lives on. An immersive
+// app's activity window may have no surface at all, and SDL then reports 0x0. (vulkan/device.c, metal.m)
+void rt_window_pixels(int *w, int *h);
 
 // ---- helpers
 void guest_call(Cpu *c, uint64_t addr);   // call guest function at addr (saves/restores x30)

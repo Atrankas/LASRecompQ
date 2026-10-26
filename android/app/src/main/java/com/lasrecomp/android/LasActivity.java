@@ -52,15 +52,32 @@ public class LasActivity extends SDLActivity {
         return new String[] {"SDL3", "main"};
     }
 
+    // A headset (Meta Quest: manufacturer Oculus, a model called Quest..., or the head-tracking feature it advertises):
+    // the app is made for one, so it goes straight into VR whichever entry started it. Anywhere else (a phone, an
+    // emulator) this is false and nothing changes.
+    private boolean isHeadset() {
+        try {
+            String man = android.os.Build.MANUFACTURER, brand = android.os.Build.BRAND, model = android.os.Build.MODEL;
+            if (man != null && man.toLowerCase(java.util.Locale.ROOT).contains("oculus")) return true;
+            if (brand != null && brand.toLowerCase(java.util.Locale.ROOT).contains("oculus")) return true;
+            if (model != null && model.toLowerCase(java.util.Locale.ROOT).startsWith("quest")) return true;
+            return getPackageManager().hasSystemFeature("android.hardware.vr.headtracking");
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
     @Override
     protected void onCreate(Bundle state) {
-        // Meta Quest: started through the "LAS Recomp VR" entry (AndroidManifest.xml), or with --ez vr true: the game runs
-        // inside OpenXR (runtime/platform/xr_quest.c looks for LARECOMP_XR). Set before the native side starts.
+        // Meta Quest: the game runs inside OpenXR (runtime/platform/xr_quest.c looks for LARECOMP_XR) when it was
+        // started through the "LAS Recomp VR" entry (AndroidManifest.xml), with --ez vr true, or on a headset at all.
+        // Set before the native side starts. A headset that should bring up the flat window (or the other way round)
+        // says so in env.txt: LARECOMP_XR=0 / 1 (runtime/main.c android_env_file).
         try {
             android.content.Intent it = getIntent();
             android.content.ComponentName cn = it != null ? it.getComponent() : null;
             boolean vr = (cn != null && cn.getClassName().endsWith("LasVrActivity")) || (it != null && it.getBooleanExtra("vr", false));
-            if (vr) android.system.Os.setenv("LARECOMP_XR", "1", true);
+            if (vr || isHeadset()) android.system.Os.setenv("LARECOMP_XR", "1", true);
         } catch (Throwable ignored) {
         }
         super.onCreate(state);

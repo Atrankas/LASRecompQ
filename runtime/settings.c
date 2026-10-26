@@ -13,6 +13,7 @@
 
 #include "hle.h"
 #include "input_bind.h"
+#include "platform/xr_quest.h"  // the Quest's floating panel (its module exists on every platform: no-ops off Android)
 
 #define SETTINGS_FILE settings_file()
 
@@ -51,6 +52,11 @@ Settings g_settings = {
     .upscaler_auto = true,
     .res_auto = true,
     .livesplit_host = "localhost:16834",
+    // Meta Quest: the floating panel (runtime/platform/xr_quest.h; the same defaults as xr_quest.c's)
+    .vr_panel_width = 3.2f,
+    .vr_panel_distance = 2.2f,
+    .vr_panel_off_x = 0.0f,
+    .vr_panel_off_y = -0.1f,
 #ifndef __APPLE__
     .bg_input = true,  // (as before the setting; on macOS it needs Input Monitoring permission, so Off there)
 #endif
@@ -175,6 +181,34 @@ void settings_resolve_defaults(bool integrated) {
         g_settings.antialias == AA_SMAA ? "smaa" : "off");
 }
 
+static float vr_clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+// Meta Quest: the floating panel's size and place (runtime/platform/xr_quest.h). g_settings holds them for
+// larecomp.ini, runtime/platform/xr_quest.c the live ones; this hands the loaded values over, pulled into what a panel
+// can be (a file from an older build, or a hand-edited one, may say anything), so both sides always agree.
+static void vr_panel_push(void) {
+    g_settings.vr_panel_width = vr_clampf(g_settings.vr_panel_width, XR_PANEL_MIN_WIDTH, XR_PANEL_MAX_WIDTH);
+    g_settings.vr_panel_distance = vr_clampf(g_settings.vr_panel_distance, XR_PANEL_MIN_DISTANCE, XR_PANEL_MAX_DISTANCE);
+    g_settings.vr_panel_off_x = vr_clampf(g_settings.vr_panel_off_x, -XR_PANEL_MAX_OFF, XR_PANEL_MAX_OFF);
+    g_settings.vr_panel_off_y = vr_clampf(g_settings.vr_panel_off_y, -XR_PANEL_MAX_OFF, XR_PANEL_MAX_OFF);
+    XrQuestPanel p = {g_settings.vr_panel_width, g_settings.vr_panel_distance, g_settings.vr_panel_off_x,
+                      g_settings.vr_panel_off_y};
+    xr_quest_panel_set(&p);  // (kept even when the session hasn't started yet)
+    xr_quest_adjust_set(g_settings.vr_panel_adjust);
+}
+
+// The controllers in the headset moved the panel (runtime/platform/xr_quest.c calls this from the session's thread):
+// what they left is the player's choice, so it goes into larecomp.ini right away - that thread may be the last one
+// running. The write is the one settings_save makes anywhere (its own lock, a temporary file, then a rename).
+void vr_panel_settled(float width, float distance, float off_x, float off_y, bool adjusting) {
+    g_settings.vr_panel_width = width, g_settings.vr_panel_distance = distance;
+    g_settings.vr_panel_off_x = off_x, g_settings.vr_panel_off_y = off_y;
+    g_settings.vr_panel_adjust = adjusting;
+    settings_save();
+    LOG("[vr] panel %.2f m wide at %.2f m, %+.2f right / %+.2f up%s\n", width, distance, off_x, off_y,
+        adjusting ? ", still adjusting" : "");
+}
+
 void settings_load(void) {
     static bool loaded;
     if (loaded) return;
@@ -216,6 +250,13 @@ void settings_load(void) {
                     g_settings.touch_pos[i][0] = x, g_settings.touch_pos[i][1] = y;
                     g_settings.touch_scale[i] = s, g_settings.touch_hidden[i] = hid != 0;
                 }
+            }
+        }
+        else if (!strcmp(key, "vr_panel")) {  // (width, distance, right, up: metres; runtime/platform/xr_quest.h)
+            float w = 0, d = 0, x = 0, y = 0;
+            if (sscanf(val, "%f , %f , %f , %f", &w, &d, &x, &y) == 4) {
+                g_settings.vr_panel_width = w, g_settings.vr_panel_distance = d;
+                g_settings.vr_panel_off_x = x, g_settings.vr_panel_off_y = y;
             }
         }
         else if (!strcmp(key, "resolution")) {
@@ -303,6 +344,7 @@ void settings_load(void) {
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
+    vr_panel_push();
     if (!tip_key) g_settings.menu_tip_seen = true;  // (a settings file from before the note: not a first launch)
     if (!aspect_key) g_settings.aspect_asked = true;  // (likewise: the aspect ratio was chosen already)
     if (g_settings.volume < 0) g_settings.volume = 0;
@@ -404,6 +446,10 @@ static void settings_write(FILE *f) {
     fprintf(f, "enemy_colours = %s\n", k_enemy_colour_keys[g_settings.enemy_colours]);
     fprintf(f, "screen_filter = %s\n", k_screen_filter_keys[g_settings.screen_filter]);
     bind_settings_save(f);
+    // Meta Quest: the floating panel's size and place (runtime/platform/xr_quest.h). "Adjust with the controllers"
+    // is not written: it is for the session that turned it on (a restart with it on would leave Link unable to walk).
+    fprintf(f, "vr_panel = %.2f, %.2f, %.2f, %.2f\n", g_settings.vr_panel_width, g_settings.vr_panel_distance,
+            g_settings.vr_panel_off_x, g_settings.vr_panel_off_y);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     if (g_settings.rando_options[0]) fprintf(f, "rando_options = %s\n", g_settings.rando_options);
 }

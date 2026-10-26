@@ -154,6 +154,8 @@ if (onDevice && !project.hasProperty('lasOnDeviceKitReady')) {
 }
 
 dependencies {
-    // Khronos's OpenXR loader for Android (Meta Quest: runtime/platform/xr_quest.c)
-    implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.57'
+    // Khronos's OpenXR loader for Android (Meta Quest: runtime/platform/xr_quest.c; its headers come from the AAR's
+    // prefab, app/CMakeLists.txt find_package(OpenXR)). The version matches the AAR kept in app/libs and the OpenXR
+    // headers the code is written against.
+    implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.65'
 }

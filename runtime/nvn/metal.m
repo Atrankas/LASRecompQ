@@ -1544,6 +1544,9 @@ void backend_quit(void) {
     }
 }
 
+// The picture's pixels: the window's (there is no OpenXR session on a Mac). See runtime/rt.h.
+void rt_window_pixels(int *w, int *h) { SDL_GetWindowSizeInPixels(window, w, h); }
+
 int ui_run(void) {
     // The emulated vsync/timer threads need precise sleeps; App Nap timer coalescing
     // otherwise stretches 16ms sleeps to ~100ms whenever the window isn't frontmost.
