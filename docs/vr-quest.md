@@ -13,6 +13,8 @@ setting here is ignored outside it.
 | `android/app/src/main/java/com/lasrecomp/android/LasActivity.java` | sets `LARECOMP_XR=1` when started through that entry |
 | `runtime/settings.{c,h}`, `runtime/ui/menu.mm` | the settings and their rows (Video tab, "VR (Meta Quest)") |
 
+A step-by-step guide in Spanish (WSL setup, signing, build, install, controls, limits): [vr-quest-es.md](vr-quest-es.md).
+
 ## Modes
 
 Video > **VR mode** picks what the picture is. Changing it also sets the distance, size, tilt and stereo depth to values
