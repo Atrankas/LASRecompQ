@@ -269,9 +269,11 @@ static bool make_actions(void) {
     X.a_menu = make_action("menu", XR_ACTION_TYPE_BOOLEAN_INPUT);
     X.a_trig_l = make_action("trigger_left", XR_ACTION_TYPE_FLOAT_INPUT);
     X.a_trig_r = make_action("trigger_right", XR_ACTION_TYPE_FLOAT_INPUT);
-    // (a click, not the analog squeeze: a headset whose grip never reads a clean zero left the game's R held down)
-    X.a_sq_l = make_action("grip_left", XR_ACTION_TYPE_BOOLEAN_INPUT);
-    X.a_sq_r = make_action("grip_right", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    // (float: the Touch profile offers squeeze/value and *not* squeeze/click - asking for a path a runtime does not know
+    //  fails the whole binding call, XR_ERROR_PATH_UNSUPPORTED (-22), and with it the session: the app then fell back to
+    //  the phone's window, which in the headset is a black screen. Below: the value read with room above any rest value)
+    X.a_sq_l = make_action("grip_left", XR_ACTION_TYPE_FLOAT_INPUT);
+    X.a_sq_r = make_action("grip_right", XR_ACTION_TYPE_FLOAT_INPUT);
     X.a_aim = make_action("aim", XR_ACTION_TYPE_POSE_INPUT);
 
     const struct { XrAction a; const char *path; } map[] = {
@@ -281,7 +283,7 @@ static bool make_actions(void) {
         {X.a_thumbl, "/user/hand/left/input/thumbstick/click"}, {X.a_thumbr, "/user/hand/right/input/thumbstick/click"},
         {X.a_menu, "/user/hand/left/input/menu/click"},
         {X.a_trig_l, "/user/hand/left/input/trigger/value"},    {X.a_trig_r, "/user/hand/right/input/trigger/value"},
-        {X.a_sq_l, "/user/hand/left/input/squeeze/click"},      {X.a_sq_r, "/user/hand/right/input/squeeze/click"},
+        {X.a_sq_l, "/user/hand/left/input/squeeze/value"},      {X.a_sq_r, "/user/hand/right/input/squeeze/value"},
         {X.a_aim, "/user/hand/right/input/aim/pose"},
     };
     XrActionSuggestedBinding b[sizeof map / sizeof map[0]];
@@ -292,7 +294,22 @@ static bool make_actions(void) {
     sb.interactionProfile = path_of("/interaction_profiles/oculus/touch_controller");
     sb.countSuggestedBindings = n;
     sb.suggestedBindings = b;
-    TRY(xrSuggestInteractionProfileBindings(X.inst, &sb), "xrSuggestInteractionProfileBindings");
+    // A path the runtime does not know fails the whole call (XR_ERROR_PATH_UNSUPPORTED, -22) and with it every binding -
+    // and xr_start: VR never started and the app fell back to the activity's own window, a black screen in the headset.
+    // The grips are the exotic ones here: offer the rest again rather than lose the session.
+    XrResult sbr = xrSuggestInteractionProfileBindings(X.inst, &sb);
+    if (XR_FAILED(sbr)) {
+        XLOG("xrSuggestInteractionProfileBindings: %d: offering the rest without the grips", (int)sbr);
+        uint32_t n2 = 0;
+        for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
+            if (map[i].a && map[i].a != X.a_sq_l && map[i].a != X.a_sq_r) {
+                b[n2].action = map[i].a, b[n2].binding = path_of(map[i].path), n2++;
+            }
+        sb.countSuggestedBindings = n2;
+        sbr = xrSuggestInteractionProfileBindings(X.inst, &sb);
+        if (XR_FAILED(sbr)) { XLOG("xrSuggestInteractionProfileBindings without the grips: %d", (int)sbr); return false; }
+        XLOG("grips unavailable on this runtime: L and R stay unbound");
+    }
     XrSessionActionSetsAttachInfo ai = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
     ai.countActionSets = 1;
     ai.actionSets = &X.aset;
@@ -432,7 +449,13 @@ static void pad_update(void) {
     si.countActiveActionSets = 1;
     si.activeActionSets = &as;
     if (XR_FAILED(xrSyncActions(X.sess, &si))) return;
-    bool grip_l = get_b(X.a_sq_l), grip_r = get_b(X.a_sq_r);
+    // (pressed well above any rest value and let go early: a runtime whose squeeze never reads a clean zero kept the
+    //  game's R held down)
+    static bool grip_l, grip_r;
+    float gv = get_f(X.a_sq_l);
+    if (gv > 0.85f) grip_l = true; else if (gv < 0.6f) grip_l = false;
+    gv = get_f(X.a_sq_r);
+    if (gv > 0.85f) grip_r = true; else if (gv < 0.6f) grip_r = false;
     float x, y, rx, ry;
     get_v2(X.a_move, &x, &y);
     deadzone(&x, &y);
