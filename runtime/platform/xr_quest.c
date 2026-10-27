@@ -154,6 +154,10 @@ static struct {
     uint32_t ew, eh;  // one eye's half
     bool stereo;      // the panel was made with a stereo mode's layout (vr_stereo_on; fixed for the session)
     uint32_t pw, ph;  // the size the swapchain really got (device.c xr_quest_note_panel); 0: as asked for
+    bool fb_surf;     // the runtime's own android-surface swapchain extension (make_panel)
+    bool relayout;    // the menu asked for another panel (the mode's layout changed: xr_quest_relayout)
+    atomic_int qframes;      // the frame loop's pass counter (a relayout waits on it: the loop out of its frame)
+    atomic_bool rebuilding;  // the panel is being made again: the frame loop skips its frames until it is
     void *vklib;
     PFN_vkGetInstanceProcAddr gipa;
     VkInstance vki;
@@ -178,10 +182,9 @@ static struct {
 static bool mode_is_stereo(void) { return g_settings.vr_mode == VR_MODE_STEREO || g_settings.vr_mode == VR_MODE_DIORAMA; }
 
 bool vr_stereo_on(void) {
-    // The layout the panel was made with, not the settings' mode: the mode row may have been changed since, and
-    // applying that half-way split the picture - the game drew into one eye's half of a panel showing one picture, and
-    // the warping then doubled what was there. A mode whose layout differs is used from the next start (the row says so,
-    // in red); flat and curved, which share the layout, change at once.
+    // The layout the panel in use was made with, not the settings' mode: between a mode change and the panel being made
+    // again (xr_quest_relayout) applying it half-way would split the picture - the game drawing into one eye's half of a
+    // panel showing one picture, with the warping then doubling what was there.
     return X.ok && X.stereo;
 }
 
@@ -591,7 +594,10 @@ static void build_layers(const XrFrameState *fs, const XrCompositionLayerBaseHea
     uint32_t nseg = (!stereo && g_settings.vr_mode == VR_MODE_CURVED) ? XR_QUEST_ARC_SEGMENTS : 1;
     if (nseg > XR_QUEST_ARC_SEGMENTS) nseg = XR_QUEST_ARC_SEGMENTS;
     Panel p = panel_place(stereo, aspect, nseg);
-    for (uint32_t i = 0; i < nseg && n < 8; i++) {
+    // (the stereo modes make one quad per eye - the same loop, one layer each; with only the segments' count the right
+    //  eye got no layer at all and saw the passthrough)
+    uint32_t nlayers = stereo ? 2 : nseg;
+    for (uint32_t i = 0; i < nlayers && n < 8; i++) {
         XrCompositionLayerQuad *q = &quads[i];
         *q = (XrCompositionLayerQuad){XR_TYPE_COMPOSITION_LAYER_QUAD};
         q->space = X.space;
@@ -639,6 +645,8 @@ static void *xr_thread(void *arg) {
     while (!atomic_load(&X.quit)) {
         handle_events();
         if (!atomic_load(&X.running)) { usleep(20000); continue; }
+        atomic_fetch_add(&X.qframes, 1);
+        while (atomic_load(&X.rebuilding)) usleep(1000);  // (the panel is made again: xr_quest_window)
         XrFrameState fs = {XR_TYPE_FRAME_STATE};
         if (XR_FAILED(xrWaitFrame(X.sess, NULL, &fs))) { usleep(20000); continue; }
         if (XR_FAILED(xrBeginFrame(X.sess, NULL))) continue;
@@ -658,6 +666,51 @@ static void *xr_thread(void *arg) {
     }
     (*X.vm)->DetachCurrentThread(X.vm);
     return NULL;
+}
+
+// ---- the panel (xr_quest.h xr_quest_window): the window the compositor shows the game's picture on. Its size is the
+// settings' (a headset's own window is far bigger than it needs to be, and the game then renders at that size: Video >
+// Internal resolution, Match display) and its layout is the VR mode's: one picture, or one eye per half of a panel twice
+// as wide. Made at start-up and again when the mode's layout changes (xr_quest_relayout); the panel in use is only
+// dropped once the new one is ready, so a runtime that refuses leaves the app with the one it had.
+static bool make_panel(JNIEnv *env, int win_w, int win_h) {
+    uint32_t ew, eh;
+    panel_pixels(&ew, &eh, win_w, win_h);
+    bool stereo = mode_is_stereo();
+    uint32_t w = stereo ? ew * 2 : ew, h = eh;
+    XrAndroidSurfaceSwapchainCreateInfoFB sfi = {XR_TYPE_ANDROID_SURFACE_SWAPCHAIN_CREATE_INFO_FB};
+    XrSwapchainCreateInfo sc = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    sc.next = X.fb_surf ? &sfi : NULL;
+    sc.width = w;
+    sc.height = h;
+    XrSwapchain nsc = XR_NULL_HANDLE;
+    XrResult sr = XR_ERROR_RUNTIME_FAILURE;
+    jobject jsurf = NULL;
+    for (int attempt = 0; attempt < 2 && XR_FAILED(sr); attempt++) {
+        sc.usageFlags = attempt == 0 ? (XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) : 0;
+        sr = p_xrCreateSwapchainAndroidSurfaceKHR(X.sess, &sc, &nsc, &jsurf);
+        if (XR_FAILED(sr)) XLOG("xrCreateSwapchainAndroidSurfaceKHR (usage %#llx): %d", (unsigned long long)sc.usageFlags, (int)sr);
+    }
+    if (XR_FAILED(sr) || !jsurf || nsc == XR_NULL_HANDLE) { XLOG("the panel could not be made: %d", (int)sr); return false; }
+    jobject nsurf = (*env)->NewGlobalRef(env, jsurf);
+    (*env)->DeleteLocalRef(env, jsurf);
+    struct ANativeWindow *nwin = nsurf ? ANativeWindow_fromSurface(env, nsurf) : NULL;
+    if (!nwin) {
+        if (nsurf) (*env)->DeleteGlobalRef(env, nsurf);
+        XLOG("ANativeWindow_fromSurface failed");
+        return false;
+    }
+    ANativeWindow_setBuffersGeometry(nwin, (int32_t)w, (int32_t)h, 0);  // (0: the surface picks the format)
+    if (X.sc != XR_NULL_HANDLE) xrDestroySwapchain(X.sc);
+    if (X.win) ANativeWindow_release(X.win);
+    if (X.surf) (*env)->DeleteGlobalRef(env, X.surf);
+    X.sc = nsc, X.surf = nsurf, X.win = nwin;
+    X.stereo = stereo;
+    X.ew = ew, X.eh = eh;
+    X.w = w, X.h = h;
+    X.pw = X.ph = 0;  // (device.c notes the size its own swapchain really got: xr_quest_note_panel)
+    XLOG("panel %ux%u (%s, %u x %u per eye)", w, h, stereo ? "stereo" : "one picture", stereo ? ew : w, h);
+    return true;
 }
 
 // ---- start-up
@@ -807,33 +860,8 @@ static bool xr_start(int win_w, int win_h) {
     TRY(xrCreateReferenceSpace(X.sess, &rsi, &X.space), "xrCreateReferenceSpace");
     if (!make_actions()) return false;
 
-    // the game's panel: an Android Surface (width / height in pixels; format, samples, faces, array size, mips: 0).
-    // The size is the settings': a headset's own window is far bigger than the panel needs to be, and the game then
-    // renders at that size (Video > Internal resolution: Match display) - a 4K-wide picture per frame for nothing.
-    uint32_t ew, eh;
-    panel_pixels(&ew, &eh, win_w, win_h);
-    X.stereo = mode_is_stereo();  // (not vr_stereo_on: that one asks X.ok, which is the caller's to set)
-    X.ew = ew, X.eh = eh;
-    X.w = X.stereo ? ew * 2 : ew, X.h = eh;
-    XLOG("panel %ux%u (%s, %u x %u per eye)", X.w, X.h, X.stereo ? "stereo" : "one picture",
-         X.stereo ? X.ew : X.w, X.h);
-    XrAndroidSurfaceSwapchainCreateInfoFB sfi = {XR_TYPE_ANDROID_SURFACE_SWAPCHAIN_CREATE_INFO_FB};
-    XrSwapchainCreateInfo sc = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
-    sc.next = fb_surf ? &sfi : NULL;
-    sc.width = X.w;
-    sc.height = X.h;
-    XrResult sr = XR_ERROR_RUNTIME_FAILURE;
-    jobject jsurf = NULL;
-    for (int attempt = 0; attempt < 2 && XR_FAILED(sr); attempt++) {
-        sc.usageFlags = attempt == 0 ? (XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) : 0;
-        sr = p_xrCreateSwapchainAndroidSurfaceKHR(X.sess, &sc, &X.sc, &jsurf);
-        if (XR_FAILED(sr)) XLOG("xrCreateSwapchainAndroidSurfaceKHR (usage %#llx): %d", (unsigned long long)sc.usageFlags, (int)sr);
-    }
-    if (XR_FAILED(sr) || !jsurf) return false;
-    X.surf = (*env)->NewGlobalRef(env, jsurf);
-    X.win = ANativeWindow_fromSurface(env, X.surf);
-    if (!X.win) { XLOG("ANativeWindow_fromSurface failed"); return false; }
-    ANativeWindow_setBuffersGeometry(X.win, (int32_t)X.w, (int32_t)X.h, 0);  // (0: the surface picks the format)
+    X.fb_surf = fb_surf;
+    if (!make_panel(env, win_w, win_h)) return false;
 
     if (X.has_pt) {
         XrPassthroughCreateInfoFB pci = {XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
@@ -854,6 +882,15 @@ static bool xr_start(int win_w, int win_h) {
     return true;
 }
 
+// The VR mode's layout changed (the menu's mode row): another panel is made when device.c asks for the window again
+// (it makes its own surface anew on xr_quest_relayout_pending). Nothing when the layout is the one already in use.
+void xr_quest_relayout(void) {
+    pthread_mutex_lock(&X.lock);
+    if (X.ok && mode_is_stereo() != X.stereo) X.relayout = true;
+    pthread_mutex_unlock(&X.lock);
+}
+bool xr_quest_relayout_pending(void) { return X.relayout; }
+
 struct ANativeWindow *xr_quest_window(int w, int h) {
     if (!xr_quest_requested()) return NULL;
     pthread_mutex_lock(&X.lock);
@@ -861,6 +898,17 @@ struct ANativeWindow *xr_quest_window(int w, int h) {
         X.tried = true;
         X.ok = xr_start(w, h);
         if (!X.ok) XLOG("OpenXR did not start: the game uses the activity's own window");
+    } else if (X.relayout) {
+        X.relayout = false;
+        // The frame loop has to be out of its frame: it counts its passes and skips them while rebuilding, so waiting
+        // for the count to move guarantees it is done with the swapchain being dropped.
+        int was = atomic_load(&X.qframes);
+        atomic_store(&X.rebuilding, true);
+        for (int i = 0; i < 500 && atomic_load(&X.qframes) == was; i++) usleep(1000);
+        XLOG("the mode's layout changed: another panel is made");
+        if (!make_panel((JNIEnv *)SDL_GetAndroidJNIEnv(), w, h))
+            XLOG("the panel was not made again: the mode in use stays");
+        atomic_store(&X.rebuilding, false);
     }
     struct ANativeWindow *r = X.ok ? X.win : NULL;
     pthread_mutex_unlock(&X.lock);
@@ -873,6 +921,8 @@ bool xr_quest_requested(void) { return false; }
 struct ANativeWindow *xr_quest_window(int w, int h) { (void)w; (void)h; return 0; }
 bool xr_quest_extent(uint32_t *w, uint32_t *h) { (void)w; (void)h; return false; }
 bool xr_quest_active(void) { return false; }
+void xr_quest_relayout(void) {}
+bool xr_quest_relayout_pending(void) { return false; }
 void xr_quest_note_panel(uint32_t w, uint32_t h) { (void)w; (void)h; }
 bool vr_stereo_on(void) { return false; }
 void vr_stereo_split_panel(double *w, double *h) { (void)w; (void)h; }

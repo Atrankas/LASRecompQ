@@ -44,6 +44,12 @@ bool xr_quest_active(void);
 // device.c: the swapchain's real size once it was made (the runtime may have given the surface another size than the
 // one asked for; the layers' sub-rects follow this, so the two eyes' halves always land where they should)
 void xr_quest_note_panel(uint32_t w, uint32_t h);
+// The VR mode's layout changed (one picture, or one eye per half of a panel twice as wide): the menu calls this after
+// changing the mode, device.c sees the request (relayout_pending) and makes its window surface anew, and the panel is
+// made again in place at that moment - the app keeps running, no restart. Nothing while the layout asked for is the one
+// already in use (or when the new panel could not be made: then the mode in use stays).
+void xr_quest_relayout(void);
+bool xr_quest_relayout_pending(void);
 
 // The stereo modes (VR_MODE_STEREO / VR_MODE_DIORAMA) are on: the game's window is the left eye's half of the panel,
 // the warping fills both halves (vr_stereo.c), and frame generation stands down (framegen.c cannot make an in-between

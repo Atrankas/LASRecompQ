@@ -701,8 +701,8 @@ static void tab_display(void) {
     opt_section("VR (Meta Quest)");
     {
         int m = g_settings.vr_mode;
-        // The stereo modes' panel is twice as wide and is made once, at start: until the app is started again the value
-        // says in red that this change still has to be used (the game keeps the layout it is running)
+        // The stereo modes' panel is twice as wide: changing to (or from) one has it made again in place. The value
+        // shows in red only while that has not happened (or when the runtime refused it)
         bool pending = xr_quest_active() &&
                        ((m == VR_MODE_STEREO || m == VR_MODE_DIORAMA) != vr_stereo_on());
         if (pending) opt_warn_next();
@@ -716,14 +716,14 @@ static void tab_display(void) {
                        "a model on a table.\n\n"
                        "Choosing a mode also sets the distance, the size, the tilt and the depth to values that suit "
                        "it; each can then be changed on its own below.\n\n"
-                       "Window (3D depth) and Diorama make the panel twice as wide (one eye per half), and the panel is "
-                       "made once, when the app starts: choosing one of them - or coming back from one - takes effect "
-                       "from the next start of the app, and the value shows in red until then. Until the app is started "
-                       "again the picture keeps the mode it is running. Flat and Cinema (curved) share the panel's "
-                       "layout: they apply at once.")) {
+                       "Window (3D depth) and Diorama give each eye its own half of a panel twice as wide: choosing one "
+                       "of them - or coming back from one - has that panel made again, which shows as a short hitch "
+                       "(the app keeps running). A runtime that refuses it leaves the value in red and the mode in use "
+                       "where it was. Flat and Cinema (curved) share the panel's layout: no hitch at all.")) {
             g_settings.vr_mode = m;
             vr_mode_preset(m);
             settings_save();
+            xr_quest_relayout();  // (another panel layout: made again in place, no restart)
         }
     }
     {

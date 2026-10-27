@@ -1273,6 +1273,9 @@ bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = false;
     if (rq_stopping()) return false;  // quitting: no window image after the window closed (#40)
     if (atomic_load(&g_background)) return false;
+    // (the VR mode's layout changed: another panel. The surface is made anew around it - create_surface's
+    //  xr_quest_window makes the panel again - and the swapchain follows the new size)
+    if (xr_quest_relayout_pending()) atomic_store(&g_surface_stale, true);
     if (atomic_exchange(&g_surface_stale, false)) new_surface();
     if (!g_vk.surface || atomic_load(&g_surface_stale)) return false;
     int w, h;
