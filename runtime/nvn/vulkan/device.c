@@ -1165,6 +1165,10 @@ static void recreate_swapchain(void) {
 static bool SDLCALL lifecycle_watch(void *user, SDL_Event *e) {
     (void)user;
     if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND || e->type == SDL_EVENT_DID_ENTER_BACKGROUND) {
+        // (Meta Quest: what counts is the VR session - the activity behind the panel is paused while the player is in
+        //  the headset. Taken as "in the background", every present waited for a foreground that never came, and the app
+        //  sat on a black frame for ever)
+        if (xr_quest_active()) return true;
         if (!atomic_exchange(&g_background, true)) {
             LOG("[vk] in the background: game paused\n");
             vk_pipeline_cache_save();  // (phones end apps in the background without exit(): the exit handler never runs)
@@ -1214,7 +1218,8 @@ static void new_surface(void) {
     if (g_vk.surface) vkDestroySurfaceKHR(g_vk.inst, g_vk.surface, NULL);
     g_vk.surface = VK_NULL_HANDLE;
     if (!create_surface()) {
-        LOG("[vk] new surface: %s\n", SDL_GetError());
+        static int fails;
+        if (fails++ % 300 == 0) LOG("[vk] new surface (%d failed tries): %s\n", fails, SDL_GetError());
         atomic_store(&g_surface_stale, true);  // (the window isn't back yet: next frame)
         return;
     }
@@ -1223,7 +1228,15 @@ static void new_surface(void) {
 
 // Called by the game's presenting thread: blocks while the app is in the background.
 static void wait_foreground(void) {
-    while (atomic_load(&g_background)) SDL_Delay(50);
+    static int warned;
+    while (atomic_load(&g_background)) {
+        if (xr_quest_active()) {  // (the panel is in front of the player: a background state here is SDL's, not the truth)
+            if (warned++ < 1) LOG("[vk] background by SDL's count while the VR session runs: presenting anyway\n");
+            atomic_store(&g_background, false);
+            break;
+        }
+        SDL_Delay(50);
+    }
 }
 
 // Time this thread spends waiting here - for a frame slot's GPU work, a window image, the presentation engine -
