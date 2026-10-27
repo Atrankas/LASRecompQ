@@ -1,8 +1,9 @@
 // Meta Quest (Horizon OS): the game inside an OpenXR session (runtime/platform/xr_quest.c).
 //
-// Started by the "LAS Recomp VR" launcher entry (LasVrActivity, AndroidManifest.xml), which sets LARECOMP_XR=1. The
-// game renders as usual into a Vulkan swapchain, but that swapchain is made on an Android Surface the OpenXR runtime
-// gives us (XR_KHR_android_surface_swapchain) and shown by the compositor as a panel in front of the player:
+// Started by the app itself: the launcher tile declares the VR categories (AndroidManifest.xml) and LasActivity sets
+// LARECOMP_XR=1 before the native side starts - one entry in the headset's library, the VR one. The game renders as
+// usual into a Vulkan swapchain, but that swapchain is made on an Android Surface the OpenXR runtime gives us
+// (XR_KHR_android_surface_swapchain) and shown by the compositor as a panel in front of the player:
 //
 //   VR_MODE_FLAT      one quad layer with the picture (the port's usual flat screen, in VR)
 //   VR_MODE_CURVED    the same picture on a fan of quads wrapping around the player (a curved cinema screen)
@@ -31,7 +32,7 @@ struct ANativeWindow;
 // to depend on). Six of them over 80 degrees are smooth enough that the seams are not visible.
 #define XR_QUEST_ARC_SEGMENTS 6
 
-// LARECOMP_XR=1: the app was started as the VR entry
+// LARECOMP_XR=1: run inside OpenXR (the app sets it on every start)
 bool xr_quest_requested(void);
 // Starts OpenXR on the first call and returns the Android window the compositor shows as the game's panel, or NULL
 // when OpenXR could not start (the caller then uses the activity's own window as usual). w/h: the window the app asked

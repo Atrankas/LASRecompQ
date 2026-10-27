@@ -1,16 +1,17 @@
 # Meta Quest (Horizon OS): the game in VR
 
-The app has a second launcher entry, **LAS Recomp VR**, that runs the game inside an OpenXR session instead of a flat
-window: the game's picture becomes a panel floating in front of you, the Touch controllers act as a gamepad, and the
-panel can be a cinema screen or a stereo window with depth. The flat entry (**LAS Recomp**) is unchanged and every
-setting here is ignored outside it.
+On a headset the Android app runs the game inside an OpenXR session: the game's picture becomes a panel floating in
+front of you, the Touch controllers act as a gamepad, and the panel can be a cinema screen or a stereo window with
+depth. There is one launcher entry, **LAS Recomp**: the headset's library lists one per package, so a second
+(`activity-alias`) entry would never be shown - the single entry is the VR one and every start sets `LARECOMP_XR=1`.
+On a device with no headset runtime (a phone) OpenXR fails to start and the app carries on with its own window.
 
 | file | what it is |
 | --- | --- |
 | `runtime/platform/xr_quest.c` | the OpenXR instance, session, the panel's swapchain (an Android Surface), the layers, the Touch controllers, the menus' ray pointer |
 | `runtime/nvn/vulkan/vr_stereo.c` | the stereo modes: each eye's half of the panel, warped by the scene's depth |
-| `android/app/src/main/AndroidManifest.xml` | the `LasVrActivity` alias (the VR launcher entry, VR intent filters) |
-| `android/app/src/main/java/com/lasrecomp/android/LasActivity.java` | sets `LARECOMP_XR=1` when started through that entry |
+| `android/app/src/main/AndroidManifest.xml` | the launcher entry's VR intent filters (`com.oculus.intent.category.VR`, `org.khronos.openxr.intent.category.IMMERSIVE_HMD`) |
+| `android/app/src/main/java/com/lasrecomp/android/LasActivity.java` | sets `LARECOMP_XR=1` before the native side starts (every start) |
 | `runtime/settings.{c,h}`, `runtime/ui/menu.mm` | the settings and their rows (Video tab, "VR (Meta Quest)") |
 
 A step-by-step guide in Spanish (WSL setup, signing, build, install, controls, limits): [vr-quest-es.md](vr-quest-es.md).
@@ -114,9 +115,9 @@ Install over USB with developer mode on (Settings > System > Developer in the he
 
     adb install -r android/app/build/outputs/apk/release/app-release.apk
 
-Then start **LAS Recomp VR** from *Unknown Sources* / the app library. Without the library entry:
+Then start **LAS Recomp** from *Unknown Sources* / the app library: it opens inside OpenXR. Over adb:
 
-    adb shell am start -n com.lasrecomp.android/.LasVrActivity
+    adb shell am start -n com.lasrecomp.android/.LasActivity
 
 ## Settings file
 
@@ -139,7 +140,7 @@ Everything the VR side does goes to logcat with the tag `LASRecomp-XR`:
 
 | variable | effect |
 | --- | --- |
-| `LARECOMP_XR=1` | start in OpenXR (what the `LasVrActivity` entry sets) |
+| `LARECOMP_XR=1` | start in OpenXR (what the app sets on every start; `0` in env.txt turns it off) |
 | `LARECOMP_XR_PASSTHROUGH=0` | never create the passthrough layer (black background instead of your room) |
 
 Put them in `env.txt` in the app's data folder (one `NAME=value` per line), as the other `LARECOMP_*` variables.

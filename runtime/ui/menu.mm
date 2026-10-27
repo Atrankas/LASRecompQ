@@ -696,13 +696,13 @@ static void tab_display(void) {
 #endif
 
 #ifdef __ANDROID__
-    // ---- Meta Quest: what the "LAS Recomp VR" launcher entry shows the game's picture on (runtime/platform/xr_quest.c,
+    // ---- Meta Quest: what the OpenXR panel shows the game's picture on (runtime/platform/xr_quest.c,
     // runtime/nvn/vulkan/vr_stereo.c). Nothing here does anything on a phone: it is the VR entry's settings.
     opt_section("VR (Meta Quest)");
     {
         int m = g_settings.vr_mode;
         if (opt_choice("VR mode", &m, g_vr_modes, N_VR_MODES, VR_MODE_FLAT,
-                       "What the game's picture is, in the headset (the app's LAS Recomp VR entry).\n\n"
+                       "What the game's picture is, in the headset.\n\n"
                        "Cinema (flat): one big screen in front of you. Cinema (curved): the screen wraps around you.\n\n"
                        "Window (3D depth): each eye gets its own picture, displaced pixel by pixel by the scene's depth - "
                        "the picture reads as a window with real depth. It costs a little GPU: the warping pass over "

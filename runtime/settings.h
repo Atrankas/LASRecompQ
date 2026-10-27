@@ -113,8 +113,8 @@ typedef struct {
     bool touch_hidden[TOUCH_NCTL];
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
     char rando_options[48];  // the Randomizer tab's New seed options: a seed ID without its random part (empty = defaults)
-    // Meta Quest: the "LAS Recomp VR" launcher entry runs the game inside OpenXR (runtime/platform/xr_quest.c), where
-    // the game's picture is a panel in front of the player. These do nothing on a phone / a computer. The presentation
+    // Meta Quest: the app runs the game inside OpenXR there (runtime/platform/xr_quest.c), where the game's picture is
+    // a panel in front of the player. These do nothing on a phone / a computer. The presentation
     // modes and the stereo depth warping they switch on live in runtime/nvn/vulkan/vr_stereo.c.
     int vr_mode;       // VR_MODE_*: how the picture is presented
     int vr_panel;      // VR_PANEL_*: the panel's pixels per eye (also the render resolution: Internal resolution = 1x)
@@ -126,7 +126,7 @@ typedef struct {
     float vr_depth;    // stereo modes: the eye separation, percent of a comfortable default (negative: swapped eyes)
 } Settings;
 
-// VR_MODE_*: what the panel is (the "LAS Recomp VR" entry). FLAT and CURVED show both eyes the same picture, the way
+// VR_MODE_*: what the panel is, in the headset. FLAT and CURVED show both eyes the same picture, the way
 // the app has always shown it; STEREO and DIORAMA draw each eye its own picture, displaced per pixel by the scene's
 // depth (vr_stereo.c), and hang it in front of the player as a window / as a model on a table.
 enum { VR_MODE_FLAT = 0, VR_MODE_CURVED = 1, VR_MODE_STEREO = 2, VR_MODE_DIORAMA = 3, N_VR_MODES = 4 };

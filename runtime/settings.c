@@ -50,7 +50,7 @@ Settings g_settings = {
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
     .touch_opacity = 0.6f,
     .touch_size = 1.0f,
-    // Meta Quest (the "LAS Recomp VR" entry; ignored everywhere else): the plain cinema screen the port has always
+    // Meta Quest (ignored everywhere else): the plain cinema screen the port has always
     // shown, at 1080p per eye - the resolution the game then renders at (Internal resolution = Match display)
     .vr_mode = VR_MODE_FLAT,
     .vr_panel = VR_PANEL_1080,

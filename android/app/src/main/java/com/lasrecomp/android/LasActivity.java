@@ -54,13 +54,11 @@ public class LasActivity extends SDLActivity {
 
     @Override
     protected void onCreate(Bundle state) {
-        // Meta Quest: started through the "LAS Recomp VR" entry (AndroidManifest.xml), or with --ez vr true: the game runs
-        // inside OpenXR (runtime/platform/xr_quest.c looks for LARECOMP_XR). Set before the native side starts.
+        // Meta Quest: the game runs inside OpenXR (runtime/platform/xr_quest.c looks for LARECOMP_XR). Set before the
+        // native side starts. The app's single launcher tile is the VR one, so this is every start; without a headset
+        // runtime (a phone) OpenXR fails to start and the app falls back to the activity's own window (xr_quest_window).
         try {
-            android.content.Intent it = getIntent();
-            android.content.ComponentName cn = it != null ? it.getComponent() : null;
-            boolean vr = (cn != null && cn.getClassName().endsWith("LasVrActivity")) || (it != null && it.getBooleanExtra("vr", false));
-            if (vr) android.system.Os.setenv("LARECOMP_XR", "1", true);
+            android.system.Os.setenv("LARECOMP_XR", "1", true);
         } catch (Throwable ignored) {
         }
         super.onCreate(state);

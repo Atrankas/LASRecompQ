@@ -1,7 +1,7 @@
 # LAS Recomp VR en Meta Quest 3 — guía completa (WSL / Ubuntu)
 
-Todo lo de este documento está ya implementado en el repositorio, en la rama **`vr-quest3`** (commit `5cae77e`,
-12 archivos). No hay que copiar código a mano.
+Todo lo de este documento está ya implementado en el repositorio, en la rama **`vr-quest3`**. No hay que copiar
+código a mano.
 
 ---
 
@@ -21,9 +21,10 @@ Todo lo de este documento está ya implementado en el repositorio, en la rama **
 | `docs/vr-quest.md` | La documentación técnica (en inglés, como el resto de `docs/`). |
 | `.gitignore` | Ignora también los ficheros de la clave (`android/*.jks`). |
 
-Los ficheros de Android que hacen que exista la entrada **LAS Recomp VR** (el `activity-alias` en
-`android/app/src/main/AndroidManifest.xml` y el `LARECOMP_XR=1` en `LasActivity.java`) ya estaban en el repositorio: el
-cambio de VR no los toca.
+La ficha del visor es **única**: *LAS Recomp* arranca directamente en VR. El manifest declara las categorías de app VR en
+esa entrada (`com.oculus.intent.category.VR` y `org.khronos.openxr.intent.category.IMMERSIVE_HMD`) y `LasActivity.java`
+pone `LARECOMP_XR=1` en cada arranque. No hay (ni habrá) un `activity-alias` aparte tipo *LAS Recomp VR*: la biblioteca
+de Horizon OS lista una sola ficha por paquete, así que nunca aparecería.
 
 ### Cómo traer los cambios
 
@@ -266,7 +267,8 @@ adb devices                      # debe aparecer "device"
 adb install -r android/app/build/outputs/apk/release/app-release.apk
 ```
 
-4. Abre **LAS Recomp VR** en *Orígenes desconocidos* (o `adb shell am start -n com.lasrecomp.android/.LasVrActivity`).
+4. Abre **LAS Recomp** en *Orígenes desconocidos* (o `adb shell am start -n com.lasrecomp.android/.LasActivity`): arranca
+directamente en VR.
    El APK release no lleva el juego dentro: la primera vez, dentro del visor, eliges tu `.xci`/`.nsp` + `prod.keys` y el
    propio visor genera el código (el proceso tarda y se ve una notificación; en Quest 3 es más rápido que los ~11 min de
    un Snapdragon 865).
@@ -286,7 +288,7 @@ adb logcat -s LASRecomp-XR
 Variables (en `env.txt`, una por línea, en `Android/data/com.lasrecomp.android/files/`):
 
 ```
-LARECOMP_XR=1                    # arrancar en OpenXR (lo pone la entrada VR sola)
+LARECOMP_XR=1                    # arrancar en OpenXR (lo pone la app sola; 0 aquí lo desactiva)
 LARECOMP_XR_PASSTHROUGH=0        # sin passthrough (fondo negro en vez de tu habitación)
 ```
 

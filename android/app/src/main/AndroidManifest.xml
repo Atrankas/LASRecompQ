@@ -7,7 +7,8 @@
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
-    <!-- Meta Quest: the "LAS Recomp VR" entry (below) runs the game in OpenXR; on other devices these change nothing -->
+    <!-- Meta Quest: the app runs the game in OpenXR there (that is the only launcher entry); on other devices these
+         change nothing -->
     <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="false" />
     <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
 
@@ -55,23 +56,14 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-        <!-- Meta Quest: the same activity as an immersive (OpenXR) app. LasActivity sees it was started through this
-             entry (its name) and sets LARECOMP_XR=1, which runtime/platform/xr_quest.c looks for. Without the Quest's
-             library entry: adb shell am start -n com.lasrecomp.android/.LasVrActivity -->
-        <activity-alias
-            android:name=".LasVrActivity"
-            android:targetActivity=".LasActivity"
-            android:exported="true"
-            android:label="LAS Recomp VR">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
+                <!-- Meta Quest: this entry is a VR app, so the headset's library lists it as one (the game then runs
+                     inside OpenXR: LasActivity sets LARECOMP_XR=1, runtime/platform/xr_quest.c). One entry only: the
+                     library shows one per package, an extra activity-alias would never be listed. On a device with no
+                     headset runtime OpenXR fails to start and the app falls back to this activity's own window. -->
                 <category android:name="com.oculus.intent.category.VR" />
                 <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
             </intent-filter>
-        </activity-alias>
+        </activity>
         <!-- keeps the app alive while the game code is built on the phone (runtime/gamebuild.c). extractNativeLibs
              above: true in the builds that do that (build.gradle onDeviceBuild) - their programs (python, zig: lib*.so)
              must exist as files in the native library folder to run -->
