@@ -701,6 +701,11 @@ static void tab_display(void) {
     opt_section("VR (Meta Quest)");
     {
         int m = g_settings.vr_mode;
+        // The stereo modes' panel is twice as wide and is made once, at start: until the app is started again the value
+        // says in red that this change still has to be used (the game keeps the layout it is running)
+        bool pending = xr_quest_active() &&
+                       ((m == VR_MODE_STEREO || m == VR_MODE_DIORAMA) != vr_stereo_on());
+        if (pending) opt_warn_next();
         if (opt_choice("VR mode", &m, g_vr_modes, N_VR_MODES, VR_MODE_FLAT,
                        "What the game's picture is, in the headset.\n\n"
                        "Cinema (flat): one big screen in front of you. Cinema (curved): the screen wraps around you.\n\n"
@@ -710,7 +715,12 @@ static void tab_display(void) {
                        "Diorama (table): the same stereo pair, tilted back and hung below eye level: the world reads as "
                        "a model on a table.\n\n"
                        "Choosing a mode also sets the distance, the size, the tilt and the depth to values that suit "
-                       "it; each can then be changed on its own below.")) {
+                       "it; each can then be changed on its own below.\n\n"
+                       "Window (3D depth) and Diorama make the panel twice as wide (one eye per half), and the panel is "
+                       "made once, when the app starts: choosing one of them - or coming back from one - takes effect "
+                       "from the next start of the app, and the value shows in red until then. Until the app is started "
+                       "again the picture keeps the mode it is running. Flat and Cinema (curved) share the panel's "
+                       "layout: they apply at once.")) {
             g_settings.vr_mode = m;
             vr_mode_preset(m);
             settings_save();

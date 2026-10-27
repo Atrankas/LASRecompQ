@@ -88,6 +88,7 @@ static void panel_pixels(uint32_t *ew, uint32_t *eh, int win_w, int win_h) {
 // The panel's place and size for a mode, in metres (the layer's pose and size; the stereo modes' halves use the same
 // pose, each with its own half of the picture). y0 sinks the panel as it leans back, so a leaning diorama hangs low
 // like a table instead of in front of the player's face. arc: the curved mode's (radius, segment angle in radians).
+// segments: how many quads that fan has (1: one quad, the whole picture on it, the panel's own shape).
 typedef struct {
     V3 pos;
     Q4 rot;
@@ -96,7 +97,7 @@ typedef struct {
     float step;    // curved: the angle of one segment, radians
 } Panel;
 
-static Panel panel_place(bool stereo, float aspect) {
+static Panel panel_place(bool stereo, float aspect, uint32_t segments) {
     float dist = g_settings.vr_distance > 0.2f ? g_settings.vr_distance : 2.2f;
     float width = g_settings.vr_size > 0.2f ? g_settings.vr_size : 3.2f;
     float tilt = g_settings.vr_tilt;
@@ -115,7 +116,9 @@ static Panel panel_place(bool stereo, float aspect) {
         p.step = arc / (float)XR_QUEST_ARC_SEGMENTS;
         p.pos.z = 0.0f;  // (the axis sits at the player: the surface is `radius` ahead of them)
         p.w = 2.0f * p.radius * sinf(p.step * 0.5f);  // the chord of one segment
-        p.h = p.w * aspect;
+        // That segment shows 1/segments of the picture: without that count its height comes out `segments` times too
+        // small and each slice is stretched sideways (the fan read as a very wide, squashed screen)
+        p.h = p.w * aspect * (float)(segments ? segments : 1);
     } else {
         p.pos.z = -dist;
         p.w = width;
@@ -149,7 +152,7 @@ static struct {
     struct ANativeWindow *win;
     uint32_t w, h;    // the panel the swapchain was made with (both eyes' halves together)
     uint32_t ew, eh;  // one eye's half
-    bool stereo;
+    bool stereo;      // the panel was made with a stereo mode's layout (vr_stereo_on; fixed for the session)
     uint32_t pw, ph;  // the size the swapchain really got (device.c xr_quest_note_panel); 0: as asked for
     void *vklib;
     PFN_vkGetInstanceProcAddr gipa;
@@ -170,9 +173,16 @@ static struct {
 
 // ---- what the rest of the app asks about the VR side (runtime/nvn/vulkan/vr_stereo.c, framegen.c, device.c,
 //      runtime/ui/menu.mm). X is declared above: these have to follow it.
+// The settings' own mode: the stereo modes put the two eyes side by side in a panel twice as wide, which is decided
+// when the panel is made. (Device.c's surface, and so this, may be asked before the session exists.)
+static bool mode_is_stereo(void) { return g_settings.vr_mode == VR_MODE_STEREO || g_settings.vr_mode == VR_MODE_DIORAMA; }
+
 bool vr_stereo_on(void) {
-    if (!xr_quest_requested() || !X.ok) return false;  // (no OpenXR: the picture is an ordinary window, one eye only)
-    return g_settings.vr_mode == VR_MODE_STEREO || g_settings.vr_mode == VR_MODE_DIORAMA;
+    // The layout the panel was made with, not the settings' mode: the mode row may have been changed since, and
+    // applying that half-way split the picture - the game drew into one eye's half of a panel showing one picture, and
+    // the warping then doubled what was there. A mode whose layout differs is used from the next start (the row says so,
+    // in red); flat and curved, which share the layout, change at once.
+    return X.ok && X.stereo;
 }
 
 void vr_stereo_split_panel(double *w, double *h) {
@@ -444,7 +454,8 @@ static void pointer_update(XrTime time) {
                 // the panel's plane (the curved mode's fan is approximated by its middle segment's plane: fine at its
                 // centre, a few centimetres out at its edges)
                 float aspect = (float)X.eh / (float)(X.ew ? X.ew : 1);
-                Panel p = panel_place(X.stereo, aspect);
+                uint32_t seg = !X.stereo && g_settings.vr_mode == VR_MODE_CURVED ? XR_QUEST_ARC_SEGMENTS : 1;
+                Panel p = panel_place(X.stereo, aspect, seg);
                 V3 n = q_rot(p.rot, (V3){0, 0, 1});
                 float den = n.x * d.x + n.y * d.y + n.z * d.z;
                 if (fabsf(den) > 1e-4f) {
@@ -557,9 +568,9 @@ static void build_layers(const XrFrameState *fs, const XrCompositionLayerBaseHea
     uint32_t pw = X.pw ? X.pw : X.w, ph = X.ph ? X.ph : X.h;
     bool stereo = X.stereo;
     float aspect = stereo ? (float)ph / (float)(pw / 2) : (float)ph / (float)pw;  // (h/w: one layer's own shape)
-    Panel p = panel_place(stereo, aspect);
     uint32_t nseg = (!stereo && g_settings.vr_mode == VR_MODE_CURVED) ? XR_QUEST_ARC_SEGMENTS : 1;
     if (nseg > XR_QUEST_ARC_SEGMENTS) nseg = XR_QUEST_ARC_SEGMENTS;
+    Panel p = panel_place(stereo, aspect, nseg);
     for (uint32_t i = 0; i < nseg && n < 8; i++) {
         XrCompositionLayerQuad *q = &quads[i];
         *q = (XrCompositionLayerQuad){XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -781,7 +792,7 @@ static bool xr_start(int win_w, int win_h) {
     // renders at that size (Video > Internal resolution: Match display) - a 4K-wide picture per frame for nothing.
     uint32_t ew, eh;
     panel_pixels(&ew, &eh, win_w, win_h);
-    X.stereo = vr_stereo_on();
+    X.stereo = mode_is_stereo();  // (not vr_stereo_on: that one asks X.ok, which is the caller's to set)
     X.ew = ew, X.eh = eh;
     X.w = X.stereo ? ew * 2 : ew, X.h = eh;
     XLOG("panel %ux%u (%s, %u x %u per eye)", X.w, X.h, X.stereo ? "stereo" : "one picture",

@@ -1262,6 +1262,14 @@ bool vk_frame_begin(const float clear[4]) {
     if (!g_vk.surface || atomic_load(&g_surface_stale)) return false;
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
+#ifdef __ANDROID__
+    {   // Meta Quest: the window drawn into is the OpenXR panel, not the activity's own window, and the two are not
+        // the same size. Asking SDL made the swapchain look out of date at every frame (drained, waited for and made
+        // again, a GPU stall each) instead of once.
+        uint32_t xw, xh;
+        if (xr_quest_extent(&xw, &xh)) w = (int)xw, h = (int)xh;
+    }
+#endif
     if (!w || !h) return false;  // minimised
     // The last present (the recorder's, record.c) must be done before the swapchain is used again - acquire and present
     // on the same swapchain are not allowed at the same time - and it may have asked for a new swapchain

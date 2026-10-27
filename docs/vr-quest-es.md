@@ -272,7 +272,11 @@ directamente en VR.
    El APK release no lleva el juego dentro: la primera vez, dentro del visor, eliges tu `.xci`/`.nsp` + `prod.keys` y el
    propio visor genera el código (el proceso tarda y se ve una notificación; en Quest 3 es más rápido que los ~11 min de
    un Snapdragon 865).
-5. Ajustes: **clic en el stick derecho** → Vídeo → VR (Meta Quest).
+5. Ajustes: **clic en el stick derecho** → Vídeo → VR (Meta Quest). Ojo con los modos: *Ventana (3D)* y *Diorama* dan a
+   cada ojo su mitad de un panel del doble de ancho, y ese panel se crea una sola vez al arrancar la app. Por eso, al
+   elegir uno de ellos (o al volver desde uno), el valor sale **en rojo** y el cambio se usa en el **siguiente
+   arranque**; mientras tanto se sigue viendo el modo que estaba. *Cine* (plana y curva) comparten la disposición del
+   panel, así que esos dos sí cambian al instante.
 
 ### Si algo va mal, el log lo dice
 
