@@ -691,8 +691,9 @@ static bool make_panel(JNIEnv *env, int win_w, int win_h, bool stereo) {
         if (XR_FAILED(sr)) XLOG("xrCreateSwapchainAndroidSurfaceKHR (usage %#llx): %d", (unsigned long long)sc.usageFlags, (int)sr);
     }
     if (XR_FAILED(sr) || !jsurf || nsc == XR_NULL_HANDLE) { XLOG("the panel could not be made: %d", (int)sr); return false; }
+    // (the runtime hands the Surface out as a GLOBAL reference: deleting it as a local one aborts libart - "Attempt
+    //  to delete global reference reference as local JNI reference" - which killed every start)
     jobject nsurf = (*env)->NewGlobalRef(env, jsurf);
-    (*env)->DeleteLocalRef(env, jsurf);
     struct ANativeWindow *nwin = nsurf ? ANativeWindow_fromSurface(env, nsurf) : NULL;
     if (!nwin) {
         if (nsurf) (*env)->DeleteGlobalRef(env, nsurf);
