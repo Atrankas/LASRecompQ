@@ -6,9 +6,14 @@
 
 static std::atomic<SDL_JoystickID> g_last_pad{0};
 
-// Does the bottom button confirm for a pad of layout family `fam`? Game layout (the default): never - the right one
-// confirms, as in the game. Controller convention: Xbox / PlayStation / generic pads (#172).
-static bool south_confirms(int fam) { return g_settings.menu_confirm == MENU_CONFIRM_CONTROLLER && fam != 0; }
+// Does the bottom button confirm for a pad of layout family `fam`? The default follows the game's own A: the pad button
+// bindings.c binds it to (runtime/hle/bindings.c) is the one that confirms in the menus too - Android puts A on the
+// bottom button, a Switch layout on the right one - so a pad's A never confirms the game and backs out of our menus, or
+// the other way round. Controller convention: Xbox / PlayStation / generic pads (#172).
+static bool south_confirms(int fam) {
+    if (g_settings.menu_confirm == MENU_CONFIRM_CONTROLLER) return fam != 0;
+    return g_bind_pad[BIND_A] == SDL_GAMEPAD_BUTTON_SOUTH;
+}
 
 ImGuiKey ui_pad_key(SDL_JoystickID which, Uint8 button, bool down) {
     static ImGuiKey held[SDL_GAMEPAD_BUTTON_COUNT];  // (the layout can change while a button is held: its release)

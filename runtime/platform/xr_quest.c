@@ -269,8 +269,9 @@ static bool make_actions(void) {
     X.a_menu = make_action("menu", XR_ACTION_TYPE_BOOLEAN_INPUT);
     X.a_trig_l = make_action("trigger_left", XR_ACTION_TYPE_FLOAT_INPUT);
     X.a_trig_r = make_action("trigger_right", XR_ACTION_TYPE_FLOAT_INPUT);
-    X.a_sq_l = make_action("grip_left", XR_ACTION_TYPE_FLOAT_INPUT);
-    X.a_sq_r = make_action("grip_right", XR_ACTION_TYPE_FLOAT_INPUT);
+    // (a click, not the analog squeeze: a headset whose grip never reads a clean zero left the game's R held down)
+    X.a_sq_l = make_action("grip_left", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    X.a_sq_r = make_action("grip_right", XR_ACTION_TYPE_BOOLEAN_INPUT);
     X.a_aim = make_action("aim", XR_ACTION_TYPE_POSE_INPUT);
 
     const struct { XrAction a; const char *path; } map[] = {
@@ -280,7 +281,7 @@ static bool make_actions(void) {
         {X.a_thumbl, "/user/hand/left/input/thumbstick/click"}, {X.a_thumbr, "/user/hand/right/input/thumbstick/click"},
         {X.a_menu, "/user/hand/left/input/menu/click"},
         {X.a_trig_l, "/user/hand/left/input/trigger/value"},    {X.a_trig_r, "/user/hand/right/input/trigger/value"},
-        {X.a_sq_l, "/user/hand/left/input/squeeze/value"},      {X.a_sq_r, "/user/hand/right/input/squeeze/value"},
+        {X.a_sq_l, "/user/hand/left/input/squeeze/click"},      {X.a_sq_r, "/user/hand/right/input/squeeze/click"},
         {X.a_aim, "/user/hand/right/input/aim/pose"},
     };
     XrActionSuggestedBinding b[sizeof map / sizeof map[0]];
@@ -374,9 +375,23 @@ static void deadzone(float *x, float *y) {
 static bool g_pb[SDL_GAMEPAD_BUTTON_COUNT];
 static Sint16 g_pa[SDL_GAMEPAD_AXIS_COUNT];
 
+static const char *const k_pad_name[SDL_GAMEPAD_BUTTON_COUNT] = {
+    [SDL_GAMEPAD_BUTTON_SOUTH] = "A", [SDL_GAMEPAD_BUTTON_EAST] = "B", [SDL_GAMEPAD_BUTTON_WEST] = "X",
+    [SDL_GAMEPAD_BUTTON_NORTH] = "Y", [SDL_GAMEPAD_BUTTON_BACK] = "Minus", [SDL_GAMEPAD_BUTTON_GUIDE] = "menu (ours)",
+    [SDL_GAMEPAD_BUTTON_START] = "Plus", [SDL_GAMEPAD_BUTTON_LEFT_STICK] = "left stick click",
+    [SDL_GAMEPAD_BUTTON_RIGHT_STICK] = "right stick click", [SDL_GAMEPAD_BUTTON_LEFT_SHOULDER] = "L",
+    [SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER] = "R", [SDL_GAMEPAD_BUTTON_DPAD_UP] = "d-pad up",
+    [SDL_GAMEPAD_BUTTON_DPAD_DOWN] = "d-pad down", [SDL_GAMEPAD_BUTTON_DPAD_LEFT] = "d-pad left",
+    [SDL_GAMEPAD_BUTTON_DPAD_RIGHT] = "d-pad right",
+};
+
 static void pad_set(const bool *nb, const Sint16 *na) {
     for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
-        if (nb[i] != g_pb[i]) g_pb[i] = nb[i], SDL_SetJoystickVirtualButton(g_vj, i, nb[i]);
+        if (nb[i] != g_pb[i]) {
+            g_pb[i] = nb[i], SDL_SetJoystickVirtualButton(g_vj, i, nb[i]);
+            // (each change the game receives, named: a button that reads held while nothing is pressed shows up here)
+            if (k_pad_name[i]) XLOG("pad: %s %s", k_pad_name[i], nb[i] ? "down" : "up");
+        }
     for (int i = 0; i < SDL_GAMEPAD_AXIS_COUNT; i++)
         if (na[i] != g_pa[i]) g_pa[i] = na[i], SDL_SetJoystickVirtualAxis(g_vj, i, na[i]);
 }
@@ -417,17 +432,15 @@ static void pad_update(void) {
     si.countActiveActionSets = 1;
     si.activeActionSets = &as;
     if (XR_FAILED(xrSyncActions(X.sess, &si))) return;
-    static bool grip_l, grip_r;
-    float v = get_f(X.a_sq_l);
-    if (v > 0.7f) grip_l = true; else if (v < 0.4f) grip_l = false;
-    v = get_f(X.a_sq_r);
-    if (v > 0.7f) grip_r = true; else if (v < 0.4f) grip_r = false;
+    bool grip_l = get_b(X.a_sq_l), grip_r = get_b(X.a_sq_r);
     float x, y, rx, ry;
     get_v2(X.a_move, &x, &y);
     deadzone(&x, &y);
     get_v2(X.a_look, &rx, &ry);
     deadzone(&rx, &ry);
     bool nb[SDL_GAMEPAD_BUTTON_COUNT] = {0};
+    // (by label: the right controller's A is the button the game calls A, and the game's own binding table says which
+    //  of the pad's buttons that is - on Android A is the bottom one, bindings.c's DEF_FACE)
     nb[SDL_GAMEPAD_BUTTON_SOUTH] = get_b(X.a_a);
     nb[SDL_GAMEPAD_BUTTON_EAST] = get_b(X.a_b);
     nb[SDL_GAMEPAD_BUTTON_WEST] = get_b(X.a_x);

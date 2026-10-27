@@ -101,10 +101,10 @@ static const char kWarp[] =
     "  float d = 1.0 - 5.0 / z;\n"
     "  vec2 ndc = vec2(n.x * 2.0 - 1.0, flag(1u) ? 1.0 - 2.0 * n.y : 2.0 * n.y - 1.0);\n"
     "  vec4 c = vec4(ndc, flag(2u) ? d * 2.0 - 1.0 : d, 1.0);\n"
-    "  float w = dot(p.r3, c);\n"
-    "  if (w <= 1e-5) return g;\n"
-    "  float x = (dot(p.r0, c) + p.a.y) / w;\n"  // this eye's clip x (p.a.y: its half of the separation)
-    "  float y = ndc.y;\n"                       // the eyes are apart horizontally: the vertical stays where it was
+    "  float w = dot(p.r3, c);\n"                 // the distance along the view axis, in the projection's own sign
+    "  if (abs(w) <= 1e-5) return g;\n"           // (a Vulkan projection keeps it negative ahead of the camera)
+    "  float x = ndc.x + p.a.y / w;\n"            // this eye's clip x (p.a.y: its half of the separation)
+    "  float y = ndc.y;\n"                        // the eyes are apart horizontally: the vertical stays where it was
     "  return vec2(x * 0.5 + 0.5, flag(1u) ? 0.5 - y * 0.5 : y * 0.5 + 0.5);\n"
     "}\n"
     "void main() {\n"
@@ -360,10 +360,11 @@ void vr_stereo_draw(VkCommandBuffer cb, VkImage sc, VkFormat fmt, uint32_t w, ui
     float p00 = sqrtf(vp[0] * vp[0] + vp[1] * vp[1] + vp[2] * vp[2] + vp[3] * vp[3]);
     float shift = p00 * (VR_EYE_SEPARATION_M * 0.5f / VR_WORLD_UNIT_M) * (g_settings.vr_depth / 100.0f);
     static uint64_t last_log;
-    if (frame < 3 || frame - last_log > 600) {
+    if (frame < 3 || frame - last_log > 60) {
         last_log = frame;
-        LOG("[vr] stereo: P00 %.3f, clip shift %.4f (depth %+.0f%%), depth %ux%u scale %.2f %.2f, HUD mask %s\n", p00, shift,
-            g_settings.vr_depth, db->width, db->height, dsx, dsy, have_mask ? "yes" : "no");
+        LOG("[vr] stereo: P00 %.3f, clip shift %.4f (depth %+.0f%%), depth %ux%u scale %.2f %.2f, HUD mask %s, camera row3 "
+            "%.2f %.2f %.2f %.2f\n", p00, shift, g_settings.vr_depth, db->width, db->height, dsx, dsy, have_mask ? "yes" : "no",
+            vp[12], vp[13], vp[14], vp[15]);
     }
     VkImageView sv = vk_image_view(scene, VK_IMAGE_VIEW_TYPE_2D, scene->format, 0, 1, 0, 1, (VkComponentMapping){0}, VK_IMAGE_ASPECT_COLOR_BIT);
     VkImageView dv = vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, (VkComponentMapping){0}, VK_IMAGE_ASPECT_DEPTH_BIT);
