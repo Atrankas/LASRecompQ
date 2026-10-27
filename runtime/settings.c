@@ -24,6 +24,8 @@ static const char *settings_file(void) {
 
 const char *const g_enemy_colour_modes[N_ENEMY_COLOUR_MODES] = {"Off", "Random per seed", "Random every load"};
 static const char *const k_enemy_colour_keys[N_ENEMY_COLOUR_MODES] = {"off", "seed", "load"};  // (larecomp.ini)
+const char *const g_vr_modes[N_VR_MODES] = {"Cinema (flat)", "Cinema (curved)", "Window (3D depth)", "Diorama (table)"};
+const char *const g_vr_panels[N_VR_PANELS] = {"720p", "1080p", "1440p", "Native"};
 const char *const g_screen_filters[N_SCREEN_FILTERS] = {"Off", "Game Boy", "Game Boy Color", "Grayscale"};
 static const char *const k_screen_filter_keys[N_SCREEN_FILTERS] = {"off", "gameboy", "gameboy_color", "grayscale"};  // (else: off)
 
@@ -48,6 +50,16 @@ Settings g_settings = {
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
     .touch_opacity = 0.6f,
     .touch_size = 1.0f,
+    // Meta Quest (the "LAS Recomp VR" entry; ignored everywhere else): the plain cinema screen the port has always
+    // shown, at 1080p per eye - the resolution the game then renders at (Internal resolution = Match display)
+    .vr_mode = VR_MODE_FLAT,
+    .vr_panel = VR_PANEL_1080,
+    .vr_refresh = 0,
+    .vr_distance = 2.2f,
+    .vr_size = 3.2f,
+    .vr_curve = 80.0f,
+    .vr_tilt = 0.0f,
+    .vr_depth = 100.0f,
     .upscaler_auto = true,
     .res_auto = true,
     .livesplit_host = "localhost:16834",
@@ -200,6 +212,14 @@ void settings_load(void) {
         else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
         else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
+        else if (!strcmp(key, "vr_mode")) g_settings.vr_mode = atoi(val) >= 0 && atoi(val) < N_VR_MODES ? atoi(val) : 0;
+        else if (!strcmp(key, "vr_panel")) g_settings.vr_panel = atoi(val) >= 0 && atoi(val) < N_VR_PANELS ? atoi(val) : VR_PANEL_1080;
+        else if (!strcmp(key, "vr_refresh")) g_settings.vr_refresh = atoi(val);
+        else if (!strcmp(key, "vr_distance")) g_settings.vr_distance = (float)atof(val);
+        else if (!strcmp(key, "vr_size")) g_settings.vr_size = (float)atof(val);
+        else if (!strcmp(key, "vr_curve")) g_settings.vr_curve = (float)atof(val);
+        else if (!strcmp(key, "vr_tilt")) g_settings.vr_tilt = (float)atof(val);
+        else if (!strcmp(key, "vr_depth")) g_settings.vr_depth = (float)atof(val);
         else if (!strcmp(key, "touch_controls")) g_settings.touch_mode = !strcmp(val, "always") ? 1 : !strcmp(val, "off") ? 2 : 0;
         else if (!strcmp(key, "touch_opacity")) g_settings.touch_opacity = (float)atof(val);
         else if (!strcmp(key, "touch_all")) g_settings.touch_all = atoi(val) != 0;
@@ -342,6 +362,9 @@ static void settings_write(FILE *f) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
+    fprintf(f, "vr_mode = %d\nvr_panel = %d\nvr_refresh = %d\n", g_settings.vr_mode, g_settings.vr_panel, g_settings.vr_refresh);
+    fprintf(f, "vr_distance = %.2f\nvr_size = %.2f\nvr_curve = %.1f\nvr_tilt = %.1f\nvr_depth = %.0f\n", g_settings.vr_distance,
+            g_settings.vr_size, g_settings.vr_curve, g_settings.vr_tilt, g_settings.vr_depth);
     fprintf(f, "touch_controls = %s\n", g_settings.touch_mode == 1 ? "always" : g_settings.touch_mode == 2 ? "off" : "auto");
     fprintf(f, "touch_opacity = %.2f\n", g_settings.touch_opacity);
     fprintf(f, "touch_all = %d\ntouch_stick_fixed = %d\n", g_settings.touch_all, g_settings.touch_stick_fixed);

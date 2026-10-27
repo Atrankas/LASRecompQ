@@ -22,6 +22,7 @@
 #include "../../ui/menu.h"
 #include "../rqueue.h"
 #include "vk.h"
+#include "vr_stereo.h"  // (Meta Quest's stereo modes: the picture's two eyes, after the window image is complete)
 #include "record.h"
 #include "../output_scale.h"
 #include "../renderer.h"
@@ -1118,6 +1119,9 @@ static void create_swapchain(void) {
     g_vk.sc_format = sf.format;
     g_vk.sc_extent = ext;
     g_vk.sc_phys = phys;
+    // (Meta Quest: the runtime may have given the panel's surface another size than the VR settings asked for. The XR
+    //  layers' sub-rects follow the real one, so the two eyes' halves always land where they should)
+    if (xr_quest_active()) xr_quest_note_panel(ext.width, ext.height);
     if (g_vk.sc_quarter) LOG("[vk] swapchain pre-rotated %d degrees (images %ux%u)\n", g_vk.sc_quarter * 90, phys.width, phys.height);
     {
         int pw, ph;
@@ -1401,6 +1405,11 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
 }
 
 static bool g_fg_copy;  // vk_frame_end: copy the window picture for frame generation (backend_present_gpu)
+// The Quest entry's stereo modes (runtime/nvn/vulkan/vr_stereo.c): this frame's presentation, for the warping
+// vk_frame_end does after the picture is complete (the panel's halves are the two eyes there)
+static uint64_t g_vr_frame;
+static float g_vr_rect[4], g_vr_crop[4];
+static bool g_vr_flip;
 static double g_shown_fps;
 double vk_shown_fps(void) { return g_shown_fps; }
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
@@ -1415,6 +1424,9 @@ void vk_frame_end(const char *shot_path) {
         fg_copy_window(cb, g_vk.sc_images[cur_frame.image], g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height);
         g_fg_copy = false;
     }
+    if (vr_stereo_on())  // (Meta Quest: one eye per half of the panel; runtime/nvn/vulkan/vr_stereo.c)
+        vr_stereo_draw(cb, g_vk.sc_images[cur_frame.image], g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height,
+                       g_vr_frame, g_vr_rect, g_vr_crop, g_vr_flip);
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     uint32_t img = cur_frame.image;
     if (!done_sem[img]) done_sem[img] = binary_semaphore();
@@ -1616,6 +1628,9 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     }
     if (have) {
         double dw = g_vk.sc_extent.width, dh = g_vk.sc_extent.height;
+        // (Meta Quest's stereo modes: the game draws into one eye's half of the panel and the warping fills both -
+        //  everything below, the render scale and the menus included, treats that half as the window)
+        vr_stereo_split_panel(&dw, &dh);
         extern void widescreen_frame_end(uint64_t frame);
         widescreen_frame_end(frame);
         extern void widescreen_set_factor(float f);
@@ -1684,8 +1699,12 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
         if (menu_at && (long)frame + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
         // (ImGui records into cb itself: menu_render drains the recorder right before, when it draws anything)
-        menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
+        menu_render((void *)cb, (uint32_t)(dw > 0 ? dw : 1), (uint32_t)(dh > 0 ? dh : 1));
         pp_mark(PP_OVERLAY);
+        // (the warping in vk_frame_end needs where the picture landed, and which frame this is)
+        g_vr_frame = frame, g_vr_flip = pv[0] > 0.5f;
+        g_vr_rect[0] = (float)vx, g_vr_rect[1] = (float)vy, g_vr_rect[2] = (float)vw, g_vr_rect[3] = (float)vh;
+        memcpy(g_vr_crop, crop, sizeof g_vr_crop);
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)frame + 1 == win_shot;
@@ -1708,7 +1727,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             extern void menu_redraw(void *cmd);  // (the real frame's overlays again: no second UI frame - touch input)
             if (fg_draws_overlays()) menu_redraw((void *)vk_cmd());
             vk_frame_end(fs0 ? "build/fg_gen0.png" : NULL);
-        } else if (!gen && g_fifo_present && menu_open() && game_interval() == 2 && vk_frame_begin(black)) {
+        } else if (!gen && g_fifo_present && menu_open() && game_interval() == 2 && !vr_stereo_on() &&
+                   vk_frame_begin(black)) {
             // the menu over the game's 30: a second picture with the menu drawn again from the latest input, a refresh
             // later - scrolling with a finger moves at 60 instead of with the game's frames
             cb = vk_cmd();

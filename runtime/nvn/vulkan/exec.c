@@ -6604,7 +6604,8 @@ static void draw_(CmdRec *r, bool indexed) {
     if (scene_composite) {
         extern bool fg_enabled(void);
         extern void fg_scene_composited(VkCommandBuffer cb, TexBackend *rt);
-        if (fg_enabled()) { vk_end_pass(); fg_scene_composited(vk_cmd(), st.rt.color[0]->backend); }
+        extern bool vr_stereo_on(void);  // (the Quest entry's stereo modes compare this copy to find the HUD)
+        if (fg_enabled() || vr_stereo_on()) { vk_end_pass(); fg_scene_composited(vk_cmd(), st.rt.color[0]->backend); }
     }
     stat_draws++;
     cum_draws++;

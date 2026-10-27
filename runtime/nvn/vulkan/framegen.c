@@ -12,6 +12,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "../../platform/xr_quest.h"  // (the Quest entry's stereo modes stand this file down: vr_stereo_on)
 #include "../../rt.h"
 #include "../../settings.h"
 #include "record.h"
@@ -195,7 +196,11 @@ static int fg_setting(void) {
     return env >= 0 ? env : g_settings.frame_gen;
 }
 
-bool fg_enabled(void) { return fg_setting() != 0; }
+bool fg_enabled(void) {
+    if (vr_stereo_on()) return false;  // (the Quest entry's stereo modes: both halves have to be the same instant, and
+                                       //  an in-between frame would have to be warped twice - never both at once)
+    return fg_setting() != 0;
+}
 
 static bool make_image(TexBackend *t, VkFormat f, uint32_t w, uint32_t h, VkImageUsageFlags usage) {
     if (t->image && t->width == w && t->height == h && t->format == f) return true;
@@ -236,9 +241,31 @@ static void pick_depth(void) {
     memset(g_dc, 0, sizeof g_dc);
 }
 
+// ---- the Quest entry's stereo modes (vr_stereo.c) take the same frame data the in-between frame does. They ask once
+// per presented frame and take it away, so a frame that drew no scene (the title, the menus) never sees the one before.
+NvnTexture *fg_vr_depth_take(float *sx, float *sy) {
+    pick_depth();
+    NvnTexture *t = g_depth;
+    g_depth = NULL;
+    if (sx) *sx = g_depth_scale[0];
+    if (sy) *sy = g_depth_scale[1];
+    return t;
+}
+bool fg_vr_scene_take(TexBackend **scene) {
+    if (scene) *scene = &g_scene;
+    return g_scene_ok;
+}
+// the copy's colours: the presented picture's format, which the scene's composite shares (an sRGB image samples as
+// linear values, the window picture as the bytes that are scanned out)
+bool fg_vr_scene_srgb(void) {
+    return g_scene.format == VK_FORMAT_R8G8B8A8_SRGB || g_scene.format == VK_FORMAT_B8G8R8A8_SRGB;
+}
+void fg_vr_scene_done(void) { g_scene_ok = false; }
+
 // exec.c draw_, right after the scene's composite into the presented picture (outside any pass)
 void fg_scene_composited(VkCommandBuffer cb, TexBackend *rt) {
-    if (!fg_enabled() || !rt || !rt->image || rt->samples != 1) return;
+    // (also for the Quest entry's stereo modes: they compare this copy against the finished picture to find the HUD)
+    if (!(fg_enabled() || vr_stereo_on()) || !rt || !rt->image || rt->samples != 1) return;
     if (fg_sceneq()) {
         uint32_t hw = (rt->width + 1) / 2, hh = (rt->height + 1) / 2, qw = (rt->width + 3) / 4, qh = (rt->height + 3) / 4;
         VkImageUsageFlags u = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;

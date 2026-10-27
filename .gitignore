@@ -23,6 +23,9 @@ __pycache__/
 # Android: machine paths, release keys, Gradle state
 android/local.properties
 android/keystore.properties
+# (the key itself: android/keystore.properties names it, never commit it)
+android/*.jks
+android/*.keystore
 android/.gradle/
 android/app/build/
 android/app/.cxx/

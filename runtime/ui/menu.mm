@@ -47,6 +47,7 @@ bool controls_ui_took_back(void);
 bool rando_tab_took_back(void);  // rando_tab.mm: B went back from the Triforce hunt's count
 #include "../input_bind.h"
 #include "../paths.h"
+#include "../platform/xr_quest.h"  // Meta Quest: the VR rows, and vr_mode_preset
 #ifdef __ANDROID__
 #include "../platform/android.h"
 bool vk_gpu_driver_custom(const char **failed);  // nvn/vulkan/device.c
@@ -152,6 +153,27 @@ static int g_kbd_max = 8;
 static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
 // The game gets no input while this is true (runtime/hle/input.c): menu or name entry up.
 extern "C" bool menu_input_captured(void) { return capturing(); }
+
+// The Quest entry's ray pointer (runtime/platform/xr_quest.c): where the right controller's ray meets the panel, in
+// this menu's own pixels (0, 0 at its top left corner - the panel's half, in the stereo modes), and whether its
+// trigger is pulling. Only while a menu takes input: the game's own input is away then, so one trigger cannot do two
+// things at once, and the events cannot pile up while nothing drains them (drain_events, menu_render).
+extern "C" void menu_vr_pointer(float x, float y, bool down) {
+    if (!capturing()) return;
+    QEvent q = {};
+    q.kind = QEvent::MOUSE_POS;
+    q.x = x, q.y = y;
+    push(q);
+    static bool held;
+    if (down != held) {
+        held = down;
+        QEvent b = {};
+        b.kind = QEvent::MOUSE_BUTTON;
+        b.button = 0;
+        b.down = down;
+        push(b);
+    }
+}
 
 bool menu_handle_event(const SDL_Event *e) {
     static bool back_down, start_down;
@@ -671,6 +693,65 @@ static void tab_display(void) {
                "Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
 #ifdef __ANDROID__
     gpu_driver_rows();
+#endif
+
+#ifdef __ANDROID__
+    // ---- Meta Quest: what the "LAS Recomp VR" launcher entry shows the game's picture on (runtime/platform/xr_quest.c,
+    // runtime/nvn/vulkan/vr_stereo.c). Nothing here does anything on a phone: it is the VR entry's settings.
+    opt_section("VR (Meta Quest)");
+    {
+        int m = g_settings.vr_mode;
+        if (opt_choice("VR mode", &m, g_vr_modes, N_VR_MODES, VR_MODE_FLAT,
+                       "What the game's picture is, in the headset (the app's LAS Recomp VR entry).\n\n"
+                       "Cinema (flat): one big screen in front of you. Cinema (curved): the screen wraps around you.\n\n"
+                       "Window (3D depth): each eye gets its own picture, displaced pixel by pixel by the scene's depth - "
+                       "the picture reads as a window with real depth. It costs a little GPU: the warping pass over "
+                       "each eye. Frame generation is off in these modes (the two eyes have to be the same instant).\n\n"
+                       "Diorama (table): the same stereo pair, tilted back and hung below eye level: the world reads as "
+                       "a model on a table.\n\n"
+                       "Choosing a mode also sets the distance, the size, the tilt and the depth to values that suit "
+                       "it; each can then be changed on its own below.")) {
+            g_settings.vr_mode = m;
+            vr_mode_preset(m);
+            settings_save();
+        }
+    }
+    {
+        int pi = g_settings.vr_panel;
+        if (opt_choice("VR panel resolution", &pi, g_vr_panels, N_VR_PANELS, VR_PANEL_1080,
+                       "The panel's pixels per eye, and the resolution the game renders at (keep Internal resolution "
+                       "at Match display for it to be this). 1080p fits a Quest 3's GPU with room for 60 frames a "
+                       "second; 1440p is sharper and heavier; 720p is the fast one. The stereo modes put the two "
+                       "eyes side by side, so they cost twice the pixels. Used from the next start of the app."))
+            g_settings.vr_panel = pi;
+    }
+    {
+        static const char *rrn[] = {"Headset's own", "72 Hz", "90 Hz", "120 Hz"};
+        static const int rrv[] = {0, 72, 90, 120};
+        int ri = 0;
+        for (int i = 0; i < 4; i++) if (rrv[i] == g_settings.vr_refresh) ri = i;
+        if (opt_choice("VR refresh rate", &ri, rrn, 4, 0,
+                       "The headset's display rate, when OpenXR offers it (XR_FB_display_refresh_rate). A higher rate "
+                       "is smoother and leaves less room per frame: the game itself runs at its own 30 or 60. The "
+                       "headset's own is what it had before the app started."))
+            g_settings.vr_refresh = rrv[ri];
+    }
+    opt_slider("VR distance", &g_settings.vr_distance, 0.5f, 6.0f, 0.05f, 2.2f, "%.2f m",
+               "How far the panel hangs in front of you, in metres.");
+    opt_slider("VR size", &g_settings.vr_size, 0.8f, 8.0f, 0.05f, 3.2f, "%.2f m",
+               "How wide the panel is, in metres (its height follows the picture's shape).");
+    opt_slider("VR tilt", &g_settings.vr_tilt, 0.0f, 80.0f, 1.0f, 0.0f, "%.0f deg",
+               "How far the panel leans back from upright, in degrees: 0 is a screen in front of you, 40-50 is a "
+               "table with the world on it (the diorama). The panel also sinks as it leans, so it never ends up in "
+               "your face.");
+    opt_slider("VR curve", &g_settings.vr_curve, 20.0f, 160.0f, 5.0f, 80.0f, "%.0f deg",
+               "The curved cinema screen's arc around you, in degrees (the radius follows from it and the size). "
+               "Only used by Cinema (curved).");
+    opt_slider("VR depth", &g_settings.vr_depth, -150.0f, 150.0f, 5.0f, 100.0f, "%+.0f%%",
+               "The stereo modes' eye separation, in percent of a comfortable default (about 6 cm at the game's own "
+               "scale): 0 flattens the picture again, higher is a stronger, more model-like depth, and a negative "
+               "value swaps the eyes - use it if the depth looks inside-out (the scenery reading as a hole instead "
+               "of a model).");
 #endif
     opt_end();
 }
