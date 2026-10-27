@@ -21,10 +21,9 @@ A step-by-step guide in Spanish (WSL setup, signing, build, install, controls, l
 Video > **VR mode** picks what the picture is. Changing it also sets the distance, size, tilt and stereo depth to values
 that suit it; each can then be changed on its own.
 
-The stereo modes (Window, Diorama) give each eye its own half of a panel twice as wide, so choosing one of them - or
-coming back from one - has that panel made again in place: the app keeps running, with a short hitch. A runtime that
-refuses the new panel leaves the row's value in red and the mode in use where it was. Flat and Cinema (curved) share the
-panel's layout and change with no hitch at all.
+The panel is twice as wide in every mode, one eye per half: Cinema (flat and curved) shows one half, Window and Diorama
+one half per eye. Changing the mode therefore makes nothing again - no hitch, no restart - and a runtime that refuses the
+two-eyed panel falls back to a single picture, with the stereo rows in red (unavailable) and the rest running.
 
 | mode | what it does | cost |
 | --- | --- | --- |

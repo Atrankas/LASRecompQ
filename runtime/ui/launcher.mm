@@ -29,6 +29,7 @@ static TouchUi g_touch;  // (touch screens: the start screen's pages)
 #include "option_rows.h"
 #include "osk.h"
 #include "pad_nav.h"
+#include "../platform/xr_quest.h"  // (Meta Quest: the panel the start screen is shown on)
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
 #else
@@ -1920,6 +1921,16 @@ extern "C" void launcher_run(const char *root) {
             if (input_cursor_hidden()) io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
             else io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
             ImGui_ImplSDL3_NewFrame();
+            // Meta Quest: laid out for the panel it is shown on, not for the activity's own window (which on a headset is
+            // portrait and far larger than the panel: the start screen was laid out for it and only a corner fitted)
+            if (xr_quest_active()) {
+                uint32_t xw = 0, xh = 0;
+                if (xr_quest_extent(&xw, &xh) && xw && xh) {
+                    double dw = xw, dh = xh;
+                    vr_stereo_split_panel(&dw, &dh);  // (the game's picture is one eye's half of the panel)
+                    io.DisplaySize = ImVec2((float)dw, (float)dh);
+                }
+            }
             // the backend (manual mode, no gamepads of its own) clears HasGamepad every frame, and ImGui then drops the
             // controller presses launcher_pad_event fed in and turns gamepad navigation off: set it again while a
             // controller is connected

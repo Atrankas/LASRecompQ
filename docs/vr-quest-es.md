@@ -272,10 +272,10 @@ directamente en VR.
    El APK release no lleva el juego dentro: la primera vez, dentro del visor, eliges tu `.xci`/`.nsp` + `prod.keys` y el
    propio visor genera el código (el proceso tarda y se ve una notificación; en Quest 3 es más rápido que los ~11 min de
    un Snapdragon 865).
-5. Ajustes: **clic en el stick derecho** → Vídeo → VR (Meta Quest). Los modos *Ventana (3D)* y *Diorama* dan a cada ojo
-   su mitad de un panel del doble de ancho: al elegirlos (o al volver desde ellos) ese panel se **rehace en caliente**,
-   sin cerrar la app; se nota un tirón corto y sigue. Si el runtime rechazara el panel nuevo, el valor se queda **en
-   rojo** y el modo que estaba sigue puesto. *Cine* (plana y curva) comparten el panel y cambian sin tirón.
+5. Ajustes: **clic en el stick derecho** → Vídeo → VR (Meta Quest). El panel es del **doble de ancho, una mitad por
+   ojo, en todos los modos**: *Cine* (plana y curva) muestra una sola mitad y *Ventana (3D)* / *Diorama* una por ojo, así
+   que cambiar de modo es **instantáneo** - no se rehace nada, ni tirón, ni reinicio. Si el runtime rechazara el panel
+   doble queda una sola imagen y los modos 3D salen **en rojo** (no disponibles); el resto sigue funcionando.
 
 ### Si algo va mal, el log lo dice
 
@@ -284,7 +284,8 @@ adb logcat -s LASRecomp-XR
 ```
 
 * `OpenXR did not start` → se usa la ventana normal (plana); el motivo está en las líneas anteriores.
-* `panel 3840x1080 (stereo, 1920 x 1080 per eye)` → el panel es el esperado.
+* `panel 3840x1080 (one eye per half, 1920 x 1080 per eye)` → el panel es el esperado: una mitad por ojo, en todos los
+  modos.
 * `[vr] stereo: P00 ..., HUD mask yes/no` → el estéreo está funcionando; si dice `no stereo this frame (...)` explica
   qué falta (sin escena, sin profundidad o sin cámara) y muestra el panel plano en vez de una imagen rota.
 

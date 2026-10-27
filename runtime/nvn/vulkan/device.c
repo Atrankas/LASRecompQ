@@ -1760,7 +1760,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             cb = vk_cmd();
             vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
             bars_backdrop(cb, b, vx, vy, vw, vh, crop, pv[0] > 0.5f, true);
-            menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
+            menu_render((void *)cb, (uint32_t)(dw > 0 ? dw : 1), (uint32_t)(dh > 0 ? dh : 1));
             vk_frame_end(NULL);
         }
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) exit_after_shot();

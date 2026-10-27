@@ -44,19 +44,20 @@ bool xr_quest_active(void);
 // device.c: the swapchain's real size once it was made (the runtime may have given the surface another size than the
 // one asked for; the layers' sub-rects follow this, so the two eyes' halves always land where they should)
 void xr_quest_note_panel(uint32_t w, uint32_t h);
-// The VR mode's layout changed (one picture, or one eye per half of a panel twice as wide): the menu calls this after
-// changing the mode, device.c sees the request (relayout_pending) and makes its window surface anew, and the panel is
-// made again in place at that moment - the app keeps running, no restart. Nothing while the layout asked for is the one
-// already in use (or when the new panel could not be made: then the mode in use stays).
+// The VR mode changed: nothing is made again (the panel is one eye per half for every mode, and the layers follow the
+// settings), so the new mode is in use on the next frame. Kept because the menu and device.c ask; relayout_pending is
+// always false. (A panel made again mid-session dropped the Surface the game's swapchain was presenting to, which took
+// the app down with it every time a stereo mode was chosen.)
 void xr_quest_relayout(void);
 bool xr_quest_relayout_pending(void);
 
-// The stereo modes (VR_MODE_STEREO / VR_MODE_DIORAMA) are on: the game's window is the left eye's half of the panel,
-// the warping fills both halves (vr_stereo.c), and frame generation stands down (framegen.c cannot make an in-between
-// frame for a stereo pair: the two halves have to be the same instant).
+// The stereo modes (VR_MODE_STEREO / VR_MODE_DIORAMA) are on: the warping fills both halves of the panel (vr_stereo.c)
+// and frame generation stands down (framegen.c cannot make an in-between frame for a stereo pair: the two halves have to
+// be the same instant). True as soon as the settings' mode changes - no panel is made again.
 bool vr_stereo_on(void);
-// Halves w (the stereo modes: the game and the menus are drawn into one eye's half of the panel); device.c calls this
-// before the frame's presentation size is worked out. Nothing when the stereo modes are off.
+// Halves w: the game's window, and so the game and the menus, are one eye's half of the panel - in every mode, the panel
+// being twice as wide (the layers show one half, or one per eye). device.c calls this before the frame's size is worked
+// out.
 void vr_stereo_split_panel(double *w, double *h);
 // The distance / size / tilt / stereo strength that suit a mode, written into g_settings. The menu applies it when the
 // mode row is changed; every one of them can then be changed on its own.
