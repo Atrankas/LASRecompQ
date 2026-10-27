@@ -673,10 +673,9 @@ static void *xr_thread(void *arg) {
 // Internal resolution, Match display) and its layout is the VR mode's: one picture, or one eye per half of a panel twice
 // as wide. Made at start-up and again when the mode's layout changes (xr_quest_relayout); the panel in use is only
 // dropped once the new one is ready, so a runtime that refuses leaves the app with the one it had.
-static bool make_panel(JNIEnv *env, int win_w, int win_h) {
+static bool make_panel(JNIEnv *env, int win_w, int win_h, bool stereo) {
     uint32_t ew, eh;
     panel_pixels(&ew, &eh, win_w, win_h);
-    bool stereo = mode_is_stereo();
     uint32_t w = stereo ? ew * 2 : ew, h = eh;
     XrAndroidSurfaceSwapchainCreateInfoFB sfi = {XR_TYPE_ANDROID_SURFACE_SWAPCHAIN_CREATE_INFO_FB};
     XrSwapchainCreateInfo sc = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -861,7 +860,14 @@ static bool xr_start(int win_w, int win_h) {
     if (!make_actions()) return false;
 
     X.fb_surf = fb_surf;
-    if (!make_panel(env, win_w, win_h)) return false;
+    // The mode's own panel, or one picture's when the runtime will not make the twice-as-wide one: a mode that cannot be
+    // used must not cost the app its session (on a headset a VR app without a session is sent back to the library by
+    // the system, which is what a start in Window / Diorama did). The menu row then shows that the mode in use is not
+    // the one chosen, and choosing it again retries.
+    if (!make_panel(env, win_w, win_h, mode_is_stereo())) {
+        XLOG("%s panel: refused by the runtime, one picture instead", mode_is_stereo() ? "stereo" : "plain");
+        if (!make_panel(env, win_w, win_h, false)) return false;
+    }
 
     if (X.has_pt) {
         XrPassthroughCreateInfoFB pci = {XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
@@ -906,7 +912,7 @@ struct ANativeWindow *xr_quest_window(int w, int h) {
         atomic_store(&X.rebuilding, true);
         for (int i = 0; i < 500 && atomic_load(&X.qframes) == was; i++) usleep(1000);
         XLOG("the mode's layout changed: another panel is made");
-        if (!make_panel((JNIEnv *)SDL_GetAndroidJNIEnv(), w, h))
+        if (!make_panel((JNIEnv *)SDL_GetAndroidJNIEnv(), w, h, mode_is_stereo()))
             XLOG("the panel was not made again: the mode in use stays");
         atomic_store(&X.rebuilding, false);
     }
