@@ -388,6 +388,25 @@ static void pad_release(void) {
 
 static float g_trig_r;  // (the menus' click: pad_update notes it)
 
+// The right stick as a d-pad: the direction it is pushed in, kept until the stick comes back (0: centred). One press
+// per push - fed straight from the axis, a stick a hair past the threshold sent a d-pad press every frame and the
+// menus flew through their rows (a stick cannot be released as quickly as a d-pad). Presses above 0.6, releases below
+// 0.35, and the axis pushed furthest wins, so a diagonal sends one direction rather than two.
+static int stick_dpad(float rx, float ry) {
+    static int cur;
+    if (cur) {
+        float v = cur == 1 ? -rx : cur == 2 ? rx : cur == 3 ? ry : -ry;  // along the direction being held
+        if (v < 0.35f) cur = 0;
+    }
+    if (!cur) {
+        float ax = fabsf(rx), ay = fabsf(ry);
+        if (ax > ay) {
+            if (ax > 0.6f) cur = rx > 0 ? 2 : 1;
+        } else if (ay > 0.6f) cur = ry > 0 ? 3 : 4;
+    }
+    return cur;
+}
+
 static void pad_update(void) {
     pad_ensure();
     if (!g_vj) return;
@@ -418,10 +437,11 @@ static void pad_update(void) {
     nb[SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER] = grip_r;       // the game's R
     // the right stick is the d-pad: the game's menus (file select, item boxes) and our own menu rows both navigate
     // with it, and no game control of this one is lost (the d-pad moves Link only with the dpad_move setting)
-    nb[SDL_GAMEPAD_BUTTON_DPAD_LEFT] = rx < -0.45f;
-    nb[SDL_GAMEPAD_BUTTON_DPAD_RIGHT] = rx > 0.45f;
-    nb[SDL_GAMEPAD_BUTTON_DPAD_UP] = ry > 0.45f;
-    nb[SDL_GAMEPAD_BUTTON_DPAD_DOWN] = ry < -0.45f;
+    int dp = stick_dpad(rx, ry);
+    nb[SDL_GAMEPAD_BUTTON_DPAD_LEFT] = dp == 1;
+    nb[SDL_GAMEPAD_BUTTON_DPAD_RIGHT] = dp == 2;
+    nb[SDL_GAMEPAD_BUTTON_DPAD_UP] = dp == 3;
+    nb[SDL_GAMEPAD_BUTTON_DPAD_DOWN] = dp == 4;
     Sint16 na[SDL_GAMEPAD_AXIS_COUNT] = {0};
     na[SDL_GAMEPAD_AXIS_LEFTX] = (Sint16)(x * 32767.f), na[SDL_GAMEPAD_AXIS_LEFTY] = (Sint16)(-y * 32767.f);
     na[SDL_GAMEPAD_AXIS_RIGHTX] = (Sint16)(rx * 32767.f), na[SDL_GAMEPAD_AXIS_RIGHTY] = (Sint16)(-ry * 32767.f);

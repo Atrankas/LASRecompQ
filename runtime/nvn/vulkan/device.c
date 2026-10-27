@@ -1050,12 +1050,15 @@ static void create_swapchain(void) {
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     VkExtent2D ext = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : (VkExtent2D){(uint32_t)w, (uint32_t)h};
-    {   // the OpenXR panel (Quest): its surface may not say how big it is - it is as big as it was made
-        uint32_t xw, xh;
-        if ((caps.currentExtent.width == UINT32_MAX || !caps.currentExtent.width || !caps.currentExtent.height) &&
-            xr_quest_extent(&xw, &xh))
-            ext = (VkExtent2D){xw, xh};
-    }
+    // Meta Quest: this surface is the OpenXR panel, and the panel is what the compositor scans out - the game's window
+    // has to be the size the panel was made with. The surface reports its own size (its default buffers, which the
+    // runtime sets up when the session begins), and taking that laid the picture out for a size nobody shows: the panel
+    // held the top-left part of it, a piece that did not fit. The XR swapchain is the authority; a surface that will not
+    // take its size is used as it is, and the log says so.
+    static bool panel_size = true;
+    uint32_t xw, xh;
+    bool panel = panel_size && xr_quest_extent(&xw, &xh);
+    if (panel) ext = (VkExtent2D){xw, xh};
     VkSurfaceTransformFlagBitsKHR xf = caps.currentTransform;
 #ifdef __ANDROID__
     // Phones are portrait underneath: in landscape the surface reports a 90 / 270 degree transform. The images are
@@ -1068,8 +1071,10 @@ static void create_swapchain(void) {
     static int pre = -1;
     if (pre < 0) pre = getenv("LARECOMP_PRETRANSFORM") ? atoi(getenv("LARECOMP_PRETRANSFORM")) != 0 : 1;
     g_vk.sc_quarter = 0;
-    if (pre && (caps.currentTransform == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
-                caps.currentTransform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)) {
+    // (not the OpenXR panel: the compositor shows its images as they are - the layers' sub-rects are in image pixels -
+    //  and a pre-rotated panel put a turned slab of the picture in it)
+    if (!xr_quest_active() && pre && (caps.currentTransform == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
+                                      caps.currentTransform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)) {
         xf = caps.currentTransform;
         g_vk.sc_quarter = xf == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ? 1 : 3;
     }
@@ -1099,7 +1104,10 @@ static void create_swapchain(void) {
                                                                                           : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
         .presentMode = present_mode(), .clipped = VK_TRUE,
         .oldSwapchain = old};
-    VkResult cr = vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain);
+    // (a handle of its own: a failed creation must not touch the swapchain in use, which is `old` above)
+    VkSwapchainKHR made = VK_NULL_HANDLE;
+    VkResult cr = vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &made);
+    if (cr == VK_SUCCESS) g_vk.swapchain = made;
     g_fifo_present = ci.presentMode == VK_PRESENT_MODE_FIFO_KHR;
     if (cr == VK_ERROR_SURFACE_LOST_KHR || cr == VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) {  // (Android: the app went away)
         LOG("[vk] swapchain: surface lost (%d)\n", cr);
@@ -1108,6 +1116,13 @@ static void create_swapchain(void) {
         for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
         g_vk.sc_count = 0;
         atomic_store(&g_surface_stale, true);  // (a new surface is made on the next frame)
+        return;
+    }
+    if (cr != VK_SUCCESS && panel)
+    {   // the surface refused the panel's size: use its own, and say so (the picture follows it then)
+        LOG("[vk] the panel's %ux%u was refused by the surface (%d): the surface's own size\n", ext.width, ext.height, (int)cr);
+        panel_size = false;
+        create_swapchain();
         return;
     }
     VK_CHECK(cr);
